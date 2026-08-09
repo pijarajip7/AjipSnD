@@ -141,10 +141,10 @@ bool DailyLimitReached()
   {
    if(InpDailyMaxProfit <= 0 && InpDailyMaxLoss <= 0)
       return(false);
-   double realized = GetDailyPnL();
-   if(InpDailyMaxLoss > 0 && realized <= -InpDailyMaxLoss)
+   double total = GetDailyPnL() + GetFloatingPnL();
+   if(InpDailyMaxLoss > 0 && total <= -InpDailyMaxLoss)
       return(true);
-   if(InpDailyMaxProfit > 0 && realized >= InpDailyMaxProfit)
+   if(InpDailyMaxProfit > 0 && total >= InpDailyMaxProfit)
       return(true);
    return(false);
   }
