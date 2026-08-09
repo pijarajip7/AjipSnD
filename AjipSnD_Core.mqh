@@ -232,6 +232,61 @@ string ShortTF(ENUM_TIMEFRAMES tf)
    return(s);
   }
 
+//==================================================================
+// PANEL HELPERS — file-scope (MQL5 no nested functions)
+//==================================================================
+color PnlCol(double v) { return(v > 0 ? clrLimeGreen : (v < 0 ? clrTomato : clrSilver)); }
+
+string LimitTxt(double limitProfit, double limitLoss, double total)
+  {
+   if(limitProfit > 0 && total >= limitProfit) return("TARGET");
+   if(limitLoss   > 0 && total <= -limitLoss) return("MAX LOSS");
+   if(limitProfit <= 0 && limitLoss <= 0)     return("disabled");
+   return("active");
+  }
+color LimitCol(string s)
+  {
+   if(s == "TARGET")   return(clrLimeGreen);
+   if(s == "MAX LOSS") return(clrTomato);
+   if(s == "disabled") return(clrSilver);
+   return(clrLimeGreen);
+  }
+
+string CooldownTxt()
+  {
+   if(InpBatchCooldownMinutes <= 0) return("disabled");
+   if(!BatchCooldownActive())       return("clear");
+   int remainingSec = (int)(g_lastBatchEndTime + InpBatchCooldownMinutes * 60 - TimeCurrent());
+   return(StringFormat("%dm left", (remainingSec + 59) / 60));
+  }
+color CooldownCol()
+  {
+   if(InpBatchCooldownMinutes <= 0) return(clrSilver);
+   return(BatchCooldownActive() ? clrTomato : clrLimeGreen);
+  }
+
+string SessionTxt()
+  {
+   if(!g_sessionFilterEnabled) return("all day");
+   return(InSession() ? "OPEN" : "CLOSED");
+  }
+color SessionCol()
+  {
+   if(!g_sessionFilterEnabled) return(clrSilver);
+   return(InSession() ? clrLimeGreen : clrTomato);
+  }
+
+string NewsTxt()
+  {
+   if(!InpNewsFilterEnabled) return("disabled");
+   return(InNewsBlackout() ? "BLOCKED" : "clear");
+  }
+color NewsCol()
+  {
+   if(!InpNewsFilterEnabled) return(clrSilver);
+   return(InNewsBlackout() ? clrTomato : clrLimeGreen);
+  }
+
 //---- Draw info panel ----
 void DrawPanel()
   {
@@ -279,59 +334,6 @@ void DrawPanel()
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, clrDimGray);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
-   
-   // ---- Helper macros: PnL color, status text/color ----
-   color PnlCol(double v) { return(v > 0 ? clrLimeGreen : (v < 0 ? clrTomato : clrSilver)); }
-   
-   string LimitTxt(double limitProfit, double limitLoss, double total)
-     {
-      if(limitProfit > 0 && total >= limitProfit) return("TARGET");
-      if(limitLoss   > 0 && total <= -limitLoss) return("MAX LOSS");
-      if(limitProfit <= 0 && limitLoss <= 0)     return("disabled");
-      return("active");
-     }
-   color LimitCol(string s)
-     {
-      if(s == "TARGET")   return(clrLimeGreen);
-      if(s == "MAX LOSS") return(clrTomato);
-      if(s == "disabled") return(clrSilver);
-      return(clrLimeGreen); // active
-     }
-   
-   string CooldownTxt()
-     {
-      if(InpBatchCooldownMinutes <= 0) return("disabled");
-      if(!BatchCooldownActive())       return("clear");
-      int remainingSec = (int)(g_lastBatchEndTime + InpBatchCooldownMinutes * 60 - TimeCurrent());
-      return(StringFormat("%dm left", (remainingSec + 59) / 60));
-     }
-   color CooldownCol()
-     {
-      if(InpBatchCooldownMinutes <= 0) return(clrSilver);
-      return(BatchCooldownActive() ? clrTomato : clrLimeGreen);
-     }
-   
-   string SessionTxt()
-     {
-      if(!g_sessionFilterEnabled) return("all day");
-      return(InSession() ? "OPEN" : "CLOSED");
-     }
-   color SessionCol()
-     {
-      if(!g_sessionFilterEnabled) return(clrSilver);
-      return(InSession() ? clrLimeGreen : clrTomato);
-     }
-   
-   string NewsTxt()
-     {
-      if(!InpNewsFilterEnabled) return("disabled");
-      return(InNewsBlackout() ? "BLOCKED" : "clear");
-     }
-   color NewsCol()
-     {
-      if(!InpNewsFilterEnabled) return(clrSilver);
-      return(InNewsBlackout() ? clrTomato : clrLimeGreen);
-     }
    
    // ---- Text labels ----
    int corner = (int)InpPanelCorner;

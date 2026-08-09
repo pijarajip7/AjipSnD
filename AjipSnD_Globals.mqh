@@ -232,7 +232,6 @@ double GetHtfMaValue()
      {
       lastCalcTime = currentBarTime;
       double ma[1];
-      ArraySetAsSeries(ma, true);
       if(CopyBuffer(maHandle, 0, 0, 1, ma) > 0)
          lastMaValue = ma[0];
      }
