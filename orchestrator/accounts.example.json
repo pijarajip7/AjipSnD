@@ -1,0 +1,17 @@
+{
+  "poll_interval_seconds": 5,
+  "handoff_filename": "AjipSnD_Handoff.csv",
+  "heartbeat_filename": "AjipSnD_Heartbeat.csv",
+  "heartbeat_grace_seconds": 60,
+  "heartbeat_timeout_seconds": 90,
+  "mt5_terminal_path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+  "accounts": [
+    {
+      "login": 12345678,
+      "password": "CHANGE_ME",
+      "server": "PropFirmX-Live",
+      "symbol": "XAUUSD",
+      "magic": 99002
+    }
+  ]
+}
