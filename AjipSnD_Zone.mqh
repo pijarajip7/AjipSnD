@@ -32,14 +32,17 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
   {
    if(trend == TREND_DOWN)
      {
-      // Looking for DEMAND zone
+      // Looking for DEMAND zone — keep bear candle with LOWEST low
       if(IsBearBar(bar))
         {
-         // New/replace candidate
-         candidate.high    = bar.high;
-         candidate.low     = bar.low;
-         candidate.time    = bar.time;
-         candidate.isDemand = true;
+         if(candidate.time == 0 || bar.low < candidate.low)
+           {
+            // New candidate: this bear has a lower low
+            candidate.high    = bar.high;
+            candidate.low     = bar.low;
+            candidate.time    = bar.time;
+            candidate.isDemand = true;
+           }
         }
       
       if(candidate.time != 0)
@@ -52,20 +55,24 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
          if(bar.close > candidate.high)
            {
             confirmed = candidate;
-            trend = TREND_UP;  // flip trend
+            trend = TREND_UP;
             return(true);
            }
         }
      }
    else  // TREND_UP
      {
-      // Looking for SUPPLY zone
+      // Looking for SUPPLY zone — keep bull candle with HIGHEST high
       if(IsBullBar(bar))
         {
-         candidate.high    = bar.high;
-         candidate.low     = bar.low;
-         candidate.time    = bar.time;
-         candidate.isDemand = false;
+         if(candidate.time == 0 || bar.high > candidate.high)
+           {
+            // New candidate: this bull has a higher high
+            candidate.high    = bar.high;
+            candidate.low     = bar.low;
+            candidate.time    = bar.time;
+            candidate.isDemand = false;
+           }
         }
       
       if(candidate.time != 0)

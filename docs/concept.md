@@ -22,8 +22,9 @@ berbeda dari AjipSMC dan AjipIDM.
 ```
 Scan bar-by-bar:
 
-  if bar is BEAR (close < open):
-      candidate = {high: bar.high, low: bar.low}
+  Cari bear candle dengan LOW TERENDAH:
+    if bar is BEAR (close < open) AND (no candidate OR bar.low < candidate.low):
+        candidate = {high: bar.high, low: bar.low}
 
   if candidate exists AND bar.low < candidate.low:
       candidate.low = bar.low    // high tetap
@@ -37,8 +38,9 @@ Scan bar-by-bar:
 ### Supply Zone (uptrend → mencari reversal bearish) — Mirror
 
 ```
-  if bar is BULL (close > open):
-      candidate = {high: bar.high, low: bar.low}
+  Cari bull candle dengan HIGH TERTINGGI:
+    if bar is BULL (close > open) AND (no candidate OR bar.high > candidate.high):
+        candidate = {high: bar.high, low: bar.low}
 
   if candidate exists AND bar.high > candidate.high:
       candidate.high = bar.high    // low tetap
