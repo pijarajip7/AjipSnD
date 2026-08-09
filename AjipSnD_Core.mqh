@@ -223,6 +223,15 @@ void UpdateHTF(const MqlRates &rates[], int count)
      }
   }
 
+//---- Short timeframe name (strip PERIOD_ prefix) ----
+string ShortTF(ENUM_TIMEFRAMES tf)
+  {
+   string s = EnumToString(tf);
+   if(StringFind(s, "PERIOD_") == 0)
+      return(StringSubstr(s, 7));
+   return(s);
+  }
+
 //---- Draw info panel ----
 void DrawPanel()
   {
@@ -241,16 +250,16 @@ void DrawPanel()
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "║     AjipSnD v1.0     ║";
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "╠══════════════════════╣";
    
-   string ltfLine = StringFormat("║ LTF Trend: %-4s (%s)  ║", trendStr, EnumToString(InpTimeframe));
+   string ltfLine = StringFormat("║ LTF: %-4s (%s)  ║", trendStr, ShortTF(InpTimeframe));
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = ltfLine;
    
-   string htfLine = StringFormat("║ HTF Trend: %-4s (%s) ║", htfTrendStr, EnumToString(InpHtfTimeframe));
+   string htfLine = StringFormat("║ HTF: %-4s (%s)  ║", htfTrendStr, ShortTF(InpHtfTimeframe));
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = htfLine;
    
-   string dZoneLine = StringFormat("║ HTF Demands: %-2d       ║", ArraySize(g_htfDemandZones));
+   string dZoneLine = StringFormat("║ Demands: %-2d           ║", ArraySize(g_htfDemandZones));
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = dZoneLine;
    
-   string sZoneLine = StringFormat("║ HTF Supplies: %-2d      ║", ArraySize(g_htfSupplyZones));
+   string sZoneLine = StringFormat("║ Supplies: %-2d          ║", ArraySize(g_htfSupplyZones));
    sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = sZoneLine;
    
    string pnlLine = StringFormat("║ PnL Today: %-10.2f ║", GetDailyPnL() + GetFloatingPnL());
@@ -272,7 +281,7 @@ void DrawPanel()
    // Position — wider than the text block (22 chars Consolas-9 ≈ 14px/char)
    int x1 = (int)InpPanelX - 8;
    int y1 = (int)InpPanelY - 6;
-   int x2 = (int)InpPanelX + 260;
+   int x2 = (int)InpPanelX + 300;
    int y2 = (int)InpPanelY + totalLines * 16 + 4;
    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x1);
    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y1);
