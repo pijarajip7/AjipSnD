@@ -287,11 +287,11 @@ void CloseAllPositions()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      if(!PositionSelectByIndex(i)) continue;
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      ulong ticket = PositionGetInteger(POSITION_TICKET);
       if(!trade.PositionClose(ticket))
          PrintFormat("AjipSnD: Close %I64u failed retcode=%d", ticket, trade.ResultRetcode());
      }
