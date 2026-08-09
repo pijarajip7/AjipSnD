@@ -236,67 +236,67 @@ void DrawPanel()
    string lines[];
    ArrayResize(lines, 0);
    
-   // Header
    int sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = "╔══════════════════════╗";
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = "║     AjipSnD v1.0     ║";
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = "╠══════════════════════╣";
+   ArrayResize(lines, sz + 1); lines[sz] = "╔══════════════════════╗";
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "║     AjipSnD v1.0     ║";
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "╠══════════════════════╣";
    
-   // Trend
-   string ltfLine = StringFormat("║ LTF Trend: %-4s (%s)  ║",
-                                  trendStr,
-                                  EnumToString(InpTimeframe));
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = ltfLine;
+   string ltfLine = StringFormat("║ LTF Trend: %-4s (%s)  ║", trendStr, EnumToString(InpTimeframe));
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = ltfLine;
    
-   string htfLine = StringFormat("║ HTF Trend: %-4s (%s) ║",
-                                  htfTrendStr,
-                                  EnumToString(InpHtfTimeframe));
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = htfLine;
+   string htfLine = StringFormat("║ HTF Trend: %-4s (%s) ║", htfTrendStr, EnumToString(InpHtfTimeframe));
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = htfLine;
    
-   // Zones
    string dZoneLine = StringFormat("║ HTF Demands: %-2d       ║", ArraySize(g_htfDemandZones));
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = dZoneLine;
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = dZoneLine;
    
    string sZoneLine = StringFormat("║ HTF Supplies: %-2d      ║", ArraySize(g_htfSupplyZones));
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = sZoneLine;
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = sZoneLine;
    
-   // PnL
    string pnlLine = StringFormat("║ PnL Today: %-10.2f ║", GetDailyPnL() + GetFloatingPnL());
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = pnlLine;
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = pnlLine;
    
-   sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1);
-   lines[sz] = "╚══════════════════════╝";
+   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "╚══════════════════════╝";
    
-   // Draw using OBJ_LABEL
+   int totalLines = ArraySize(lines);
+   
+   // ---- Background rectangle (behind text) ----
+   string bgName = prefix + "BG";
+   if(ObjectFind(0, bgName) < 0)
+     {
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bgName, OBJPROP_CORNER, (int)InpPanelCorner);
+      ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
+     }
+   // Position — slightly wider than the text block
+   int x1 = (int)InpPanelX - 5;
+   int y1 = (int)InpPanelY - 5;
+   int x2 = (int)InpPanelX + 175;
+   int y2 = (int)InpPanelY + totalLines * 16 + 2;
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x1);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y1);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, x2 - x1);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, y2 - y1);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, clrDimGray);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+   
+   // ---- Text labels ----
    int corner = (int)InpPanelCorner;
-   for(int i = 0; i < ArraySize(lines); i++)
+   for(int i = 0; i < totalLines; i++)
      {
       string name = prefix + IntegerToString(i);
       if(ObjectFind(0, name) < 0)
         {
          ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
          ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
-         ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (int)InpPanelX);
-         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (int)InpPanelY + i * 16);
          ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
         }
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (int)InpPanelX);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (int)InpPanelY + i * 16);
       ObjectSetString(0, name, OBJPROP_TEXT, lines[i]);
       ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
@@ -304,7 +304,7 @@ void DrawPanel()
      }
    
    // Clean up extra labels
-   for(int i = ArraySize(lines); i < 20; i++)
+   for(int i = totalLines; i < 20; i++)
      {
       string name = prefix + IntegerToString(i);
       ObjectDelete(0, name);
