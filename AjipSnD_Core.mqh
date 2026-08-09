@@ -269,10 +269,10 @@ void DrawPanel()
       ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
      }
-   // Position — slightly wider than the text block
+   // Position — wider than the text block (22 chars Consolas-9 ≈ 14px/char)
    int x1 = (int)InpPanelX - 8;
    int y1 = (int)InpPanelY - 6;
-   int x2 = (int)InpPanelX + 230;
+   int x2 = (int)InpPanelX + 260;
    int y2 = (int)InpPanelY + totalLines * 16 + 4;
    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x1);
    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y1);
