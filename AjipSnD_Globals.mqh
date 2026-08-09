@@ -89,6 +89,9 @@ int            g_sessionStartMin      = 0;
 int            g_sessionEndMin        = 0;
 bool           g_sessionFilterEnabled = false;
 
+// ---- Timezone offset for daily/weekly boundaries ----
+int            g_timezoneOffsetSeconds = 0;
+
 // ---- Heartbeat throttle ----
 const int      HEARTBEAT_INTERVAL_SECONDS = 30;
 datetime       g_lastHeartbeatTime = 0;
@@ -130,9 +133,11 @@ bool InSession()
   {
    if(!g_sessionFilterEnabled)
       return(true);
-   MqlDateTime srv;
-   TimeCurrent(srv);
-   int nowMin = srv.hour * 60 + srv.min;
+   // Use local time (server + timezone offset) for session comparison
+   datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
+   MqlDateTime local;
+   TimeToStruct(localNow, local);
+   int nowMin = local.hour * 60 + local.min;
    
    if(g_sessionStartMin <= g_sessionEndMin)
       return(nowMin >= g_sessionStartMin && nowMin < g_sessionEndMin);

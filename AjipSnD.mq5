@@ -52,8 +52,9 @@ input double InpPartialCloseProfit  = 10.0;  // Floating profit ($) to trigger o
 input double InpPartialClosePercent = 50.0;  // % of volume to close at partial-close threshold
 
 input group "Session Filter"
-input string InpSessionStart = "02:00";  // Session start HH:MM (server) — start==end = no filter
-input string InpSessionEnd   = "20:00";  // Session end HH:MM — outside: no entries; if PnL>0 → close all
+input double InpTimezoneOffset = 0.0;       // UTC offset in hours for daily/weekly boundaries (e.g., -4=EST, +2=CEST)
+input string InpSessionStart   = "02:00";   // Session start HH:MM (local time) — start==end = no filter
+input string InpSessionEnd     = "20:00";   // Session end HH:MM — outside: no entries; if PnL>0 → close all
 
 input group "News Filter"
 input bool                           InpNewsFilterEnabled = true;                    // Block entries + profit exits around high-impact news
@@ -109,6 +110,9 @@ int OnInit()
    g_sessionFilterEnabled = (g_sessionStartMin >= 0 && g_sessionEndMin >= 0
                              && g_sessionStartMin != g_sessionEndMin);
 
+   // Timezone offset
+   g_timezoneOffsetSeconds = (int)(InpTimezoneOffset * 3600);
+
    // Capture starting balance
    CaptureStartingBalance();
 
@@ -128,9 +132,10 @@ int OnInit()
    PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, FixedLot=%.2f",
                EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
                InpMaxZones, InpFixedLot);
-   PrintFormat("  Session: %s-%s (%s)",
+   PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
                InpSessionStart, InpSessionEnd,
-               g_sessionFilterEnabled ? "ENABLED" : "ALL DAY");
+               g_sessionFilterEnabled ? "ENABLED" : "ALL DAY",
+               InpTimezoneOffset);
    Print("══════════════════════════════════════");
 
    return(INIT_SUCCEEDED);

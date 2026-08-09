@@ -242,34 +242,26 @@ void DrawPanel()
    string trendStr = g_ltfTrend == TREND_UP ? "UP" : (g_ltfTrend == TREND_DOWN ? "DOWN" : "NONE");
    string htfTrendStr = g_htfTrend == TREND_UP ? "UP" : (g_htfTrend == TREND_DOWN ? "DOWN" : "NONE");
    
-   string lines[];
-   ArrayResize(lines, 0);
+   const int lineH = 16;
+   int y = 0;
    
-   int sz = ArraySize(lines);
-   ArrayResize(lines, sz + 1); lines[sz] = "╔══════════════════════╗";
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "║     AjipSnD v1.0     ║";
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "╠══════════════════════╣";
+   // ---- Pre-compute PnL values ----
+   double todayPnl  = GetDailyPnL();
+   double weekPnl   = GetWeekPnL();
+   double monthPnl  = GetMonthPnL();
+   double floating  = GetFloatingPnL();
+   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
    
-   string ltfLine = StringFormat("║ LTF: %-4s (%s)  ║", trendStr, ShortTF(InpTimeframe));
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = ltfLine;
+   // ---- Open MFE/MAE ----
+   double openMfe = 0.0, openMae = 0.0;
+   int    nOpen   = ArraySize(g_entries);
+   for(int i = 0; i < nOpen; i++)
+     {
+      openMfe += g_entries[i].mfe;
+      openMae += g_entries[i].mae;
+     }
    
-   string htfLine = StringFormat("║ HTF: %-4s (%s)  ║", htfTrendStr, ShortTF(InpHtfTimeframe));
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = htfLine;
-   
-   string dZoneLine = StringFormat("║ Demands: %-2d           ║", ArraySize(g_htfDemandZones));
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = dZoneLine;
-   
-   string sZoneLine = StringFormat("║ Supplies: %-2d          ║", ArraySize(g_htfSupplyZones));
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = sZoneLine;
-   
-   string pnlLine = StringFormat("║ PnL Today: %-10.2f ║", GetDailyPnL() + GetFloatingPnL());
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = pnlLine;
-   
-   sz = ArraySize(lines); ArrayResize(lines, sz + 1); lines[sz] = "╚══════════════════════╝";
-   
-   int totalLines = ArraySize(lines);
-   
-   // ---- Background rectangle (behind text) ----
+   // ---- Background rectangle ----
    string bgName = prefix + "BG";
    if(ObjectFind(0, bgName) < 0)
      {
@@ -278,42 +270,132 @@ void DrawPanel()
       ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
      }
-   // Position — wider than the text block (22 chars Consolas-9 ≈ 14px/char)
-   int x1 = (int)InpPanelX - 8;
-   int y1 = (int)InpPanelY - 6;
-   int x2 = (int)InpPanelX + 300;
-   int y2 = (int)InpPanelY + totalLines * 16 + 4;
-   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x1);
-   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y1);
-   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, x2 - x1);
-   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, y2 - y1);
+   const int totalLines = 22;
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, (int)InpPanelX - 6);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, (int)InpPanelY - 6);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 185);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, lineH * totalLines + 12);
    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, clrBlack);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, clrDimGray);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
    
-   // ---- Text labels ----
-   int corner = (int)InpPanelCorner;
-   for(int i = 0; i < totalLines; i++)
+   // ---- Helper macros: PnL color, status text/color ----
+   color PnlCol(double v) { return(v > 0 ? clrLimeGreen : (v < 0 ? clrTomato : clrSilver)); }
+   
+   string LimitTxt(double limitProfit, double limitLoss, double total)
      {
-      string name = prefix + IntegerToString(i);
-      if(ObjectFind(0, name) < 0)
-        {
-         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-         ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
-         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-        }
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (int)InpPanelX);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (int)InpPanelY + i * 16);
-      ObjectSetString(0, name, OBJPROP_TEXT, lines[i]);
-      ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      if(limitProfit > 0 && total >= limitProfit) return("TARGET");
+      if(limitLoss   > 0 && total <= -limitLoss) return("MAX LOSS");
+      if(limitProfit <= 0 && limitLoss <= 0)     return("disabled");
+      return("active");
+     }
+   color LimitCol(string s)
+     {
+      if(s == "TARGET")   return(clrLimeGreen);
+      if(s == "MAX LOSS") return(clrTomato);
+      if(s == "disabled") return(clrSilver);
+      return(clrLimeGreen); // active
      }
    
+   string CooldownTxt()
+     {
+      if(InpBatchCooldownMinutes <= 0) return("disabled");
+      if(!BatchCooldownActive())       return("clear");
+      int remainingSec = (int)(g_lastBatchEndTime + InpBatchCooldownMinutes * 60 - TimeCurrent());
+      return(StringFormat("%dm left", (remainingSec + 59) / 60));
+     }
+   color CooldownCol()
+     {
+      if(InpBatchCooldownMinutes <= 0) return(clrSilver);
+      return(BatchCooldownActive() ? clrTomato : clrLimeGreen);
+     }
+   
+   string SessionTxt()
+     {
+      if(!g_sessionFilterEnabled) return("all day");
+      return(InSession() ? "OPEN" : "CLOSED");
+     }
+   color SessionCol()
+     {
+      if(!g_sessionFilterEnabled) return(clrSilver);
+      return(InSession() ? clrLimeGreen : clrTomato);
+     }
+   
+   string NewsTxt()
+     {
+      if(!InpNewsFilterEnabled) return("disabled");
+      return(InNewsBlackout() ? "BLOCKED" : "clear");
+     }
+   color NewsCol()
+     {
+      if(!InpNewsFilterEnabled) return(clrSilver);
+      return(InNewsBlackout() ? clrTomato : clrLimeGreen);
+     }
+   
+   // ---- Text labels ----
+   int corner = (int)InpPanelCorner;
+   int idx = 0;
+   
+   #define PANEL_LABEL(text, color) \
+     { \
+      string name = prefix + IntegerToString(idx); \
+      if(ObjectFind(0, name) < 0) \
+        { \
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0); \
+         ObjectSetInteger(0, name, OBJPROP_CORNER, corner); \
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false); \
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true); \
+         ObjectSetString(0, name, OBJPROP_FONT, "Consolas"); \
+         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9); \
+        } \
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (int)InpPanelX); \
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (int)InpPanelY + y); \
+      ObjectSetString(0, name, OBJPROP_TEXT, text); \
+      ObjectSetInteger(0, name, OBJPROP_COLOR, color); \
+      y += lineH; \
+      idx++; \
+     }
+   
+   // ---- Title + structure ----
+   PANEL_LABEL("AjipSnD v1.0", clrWhite);
+   PANEL_LABEL("", clrWhite);
+   PANEL_LABEL(StringFormat("LTF Trend: %s (%s)", trendStr, ShortTF(InpTimeframe)), clrWhite);
+   PANEL_LABEL(StringFormat("HTF Trend: %s (%s)", htfTrendStr, ShortTF(InpHtfTimeframe)), clrWhite);
+   PANEL_LABEL(StringFormat("Demands:   %d", ArraySize(g_htfDemandZones)), clrWhite);
+   PANEL_LABEL(StringFormat("Supplies:  %d", ArraySize(g_htfSupplyZones)), clrWhite);
+   PANEL_LABEL(StringFormat("Entries:   %d", nOpen), clrWhite);
+   
+   // ---- PnL section ----
+   PANEL_LABEL("", clrWhite);
+   PANEL_LABEL(StringFormat("Today P/L: %.2f", todayPnl + floating), PnlCol(todayPnl + floating));
+   PANEL_LABEL(StringFormat("Week P/L:  %.2f", weekPnl  + floating), PnlCol(weekPnl  + floating));
+   PANEL_LABEL(StringFormat("Month P/L: %.2f", monthPnl + floating), PnlCol(monthPnl + floating));
+   
+   // ---- Limit statuses ----
+   PANEL_LABEL("", clrWhite);
+   string s = LimitTxt(InpFinalProfitTarget, InpFinalMaxLoss, balance - g_startingBalance + floating);
+   PANEL_LABEL("Final:     " + s, LimitCol(s));
+   s = LimitTxt(InpDailyMaxProfit, InpDailyMaxLoss, todayPnl + floating);
+   PANEL_LABEL("Daily:     " + s, LimitCol(s));
+   s = LimitTxt(InpBatchMaxProfit, InpBatchMaxLoss, g_batchRealizedPnl + floating);
+   PANEL_LABEL("Batch:     " + s, LimitCol(s));
+   
+   // ---- Cooldown / Session / News ----
+   PANEL_LABEL("", clrWhite);
+   PANEL_LABEL("Cooldown:  " + CooldownTxt(), CooldownCol());
+   PANEL_LABEL("Session:   " + SessionTxt(), SessionCol());
+   PANEL_LABEL("News:      " + NewsTxt(), NewsCol());
+   
+   // ---- MFE/MAE ----
+   PANEL_LABEL("", clrWhite);
+   PANEL_LABEL(StringFormat("Open MFE:  %.2f", openMfe), PnlCol(openMfe));
+   PANEL_LABEL(StringFormat("Open MAE:  %.2f", openMae), PnlCol(openMae));
+   
+   #undef PANEL_LABEL
+   
    // Clean up extra labels
-   for(int i = totalLines; i < 20; i++)
+   for(int i = idx; i < 30; i++)
      {
       string name = prefix + IntegerToString(i);
       ObjectDelete(0, name);

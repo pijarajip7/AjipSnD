@@ -117,6 +117,9 @@ Sama dengan AjipIDM — tidak ada TP/SL di entry. Exit via:
 | Session close | Di luar jam + PnL > 0 | Tutup semua, profit-lock |
 | Aggregate SL | Budget dari max loss terkecil | SL broker-side per posisi tanpa SL |
 
+Daily/weekly/month boundary mengikuti `InpTimezoneOffset` (default UTC).
+Session times (`InpSessionStart`/`InpSessionEnd`) juga mengikuti timezone offset.
+
 ---
 
 ## Fixed Lot, No SL/TP

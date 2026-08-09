@@ -113,11 +113,27 @@ double GetPeriodPnL(datetime from, datetime to)
   }
 
 //==================================================================
+// LOCAL DAY START — convert server time to local via timezone offset
+//==================================================================
+datetime GetLocalDayStart()
+  {
+   datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
+   MqlDateTime localDt;
+   TimeToStruct(localNow, localDt);
+   localDt.hour = 0;
+   localDt.min  = 0;
+   localDt.sec  = 0;
+   datetime localMidnight = StructToTime(localDt);
+   // Convert local midnight back to server time for HistorySelect
+   return(localMidnight - g_timezoneOffsetSeconds);
+  }
+
+//==================================================================
 // GET DAILY PNL
 //==================================================================
 double GetDailyPnL()
   {
-   datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   datetime dayStart = GetLocalDayStart();
    datetime dayEnd   = dayStart + 86400;
    return(GetPeriodPnL(dayStart, dayEnd));
   }
@@ -127,11 +143,19 @@ double GetDailyPnL()
 //==================================================================
 double GetWeekPnL()
   {
-   MqlDateTime srv;
-   TimeCurrent(srv);
-   int daysFromMonday = srv.day_of_week == 0 ? 6 : srv.day_of_week - 1;
-   datetime monday = StringToTime(TimeToString(TimeCurrent(), TIME_DATE)) - daysFromMonday * 86400;
-   return(GetPeriodPnL(monday, TimeCurrent()));
+   datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
+   MqlDateTime localDt;
+   TimeToStruct(localNow, localDt);
+   int daysFromMonday = localDt.day_of_week == 0 ? 6 : localDt.day_of_week - 1;
+
+   localDt.hour = 0;
+   localDt.min  = 0;
+   localDt.sec  = 0;
+   datetime localMidnight = StructToTime(localDt);
+   datetime localMonday   = localMidnight - daysFromMonday * 86400;
+   datetime mondayServer  = localMonday - g_timezoneOffsetSeconds;
+
+   return(GetPeriodPnL(mondayServer, TimeCurrent()));
   }
 
 //==================================================================
@@ -139,14 +163,17 @@ double GetWeekPnL()
 //==================================================================
 double GetMonthPnL()
   {
-   MqlDateTime srv;
-   TimeCurrent(srv);
-   srv.day = 1;
-   srv.hour = 0;
-   srv.min = 0;
-   srv.sec = 0;
-   datetime monthStart = StructToTime(srv);
-   return(GetPeriodPnL(monthStart, TimeCurrent()));
+   datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
+   MqlDateTime localDt;
+   TimeToStruct(localNow, localDt);
+   localDt.day  = 1;
+   localDt.hour = 0;
+   localDt.min  = 0;
+   localDt.sec  = 0;
+   datetime localMonthStart = StructToTime(localDt);
+   datetime monthStartServer = localMonthStart - g_timezoneOffsetSeconds;
+
+   return(GetPeriodPnL(monthStartServer, TimeCurrent()));
   }
 
 //==================================================================
@@ -570,13 +597,13 @@ void RecalculateAggregateSL()
          double entry = PositionGetDouble(POSITION_PRICE_OPEN);
 
          double slDistance = budgetPerPos / (valuePerPointPerLot * vol);
-         slDistance = MathMax(slDistance, g_point * 10); // minimum 10 points
+         slDistance = MathMax(slDistance, 10.0); // minimum 10 points
 
          double slPrice;
          if(dir == 1)  // BUY
-            slPrice = entry - slDistance;
+            slPrice = entry - slDistance * g_point;
          else          // SELL
-            slPrice = entry + slDistance;
+            slPrice = entry + slDistance * g_point;
 
          slPrice = NormalizeDouble(slPrice, g_digits);
 

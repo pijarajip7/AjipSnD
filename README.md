@@ -19,12 +19,25 @@
 
 ---
 
+## Panel Info
+
+22-line on-chart dashboard (Consolas 9, OBJ_RECTANGLE_LABEL background):
+
+| Section | Lines |
+|---------|-------|
+| Structure | Title, LTF/HTF trend + timeframe, Demands/Supplies/Entries count |
+| PnL | Today/Week/Month PnL (realized + floating), colored green/red |
+| Limits | Final/Daily/Batch limit status (TARGET/MAX LOSS/active/disabled) |
+| Gates | Batch cooldown, Session status, News blackout status |
+| MFE/MAE | Open MFE/MAE summed across all tracked positions |
+
+---
+
 ## Known Limitations & TODO
 
 ### Belum diimplementasi
 - [ ] Compile & backtest in MetaEditor
 - [ ] Forward test live
-- [ ] News blackout full implementation (placeholder only)
 
 ### Potential improvements
 - [ ] Minimum zone size filter (minimum pip distance between high/low)
@@ -41,7 +54,8 @@
 | `AjipSnD_Globals.mqh` | Global state, structs, enums, helper functions |
 | `AjipSnD_Zone.mqh` | SnD zone detection algorithm + zone management (activate/deactivate) |
 | `AjipSnD_Entry.mqh` | Entry gate + entry logic (LTF zone + HTF zone filter) |
-| `AjipSnD_Trade.mqh` | OpenTrade (fixed lot), partial close, close-all (batch/daily/final/session), aggregate SL, batch CSV |
+| `AjipSnD_Trade.mqh` | OpenTrade (fixed lot), partial close, close-all (batch/daily/final/session), aggregate SL, batch CSV, PnL helpers |
+| `AjipSnD_News.mqh` | News blackout filter (high-impact calendar events) |
 | `AjipSnD_Core.mqh` | InitStructure (LTF + HTF), UpdateLTF, UpdateHTF, DrawPanel |
 | `docs/concept.md` | Konsep & strategi |
 | `docs/architecture.md` | EA architecture |

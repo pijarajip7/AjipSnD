@@ -51,8 +51,17 @@ InpPartialClosePercent = 50.0  — % of volume to close at threshold
 
 **Session Filter**
 ```
-InpSessionStart = "02:00"  — Session start HH:MM server time (==end = disabled)
-InpSessionEnd   = "20:00"  — Session end — outside: no entries; PnL>0 → close all
+InpTimezoneOffset = 0.0   — UTC offset in hours for daily/weekly/session boundaries (e.g., -4=EST, +2=CEST)
+InpSessionStart   = "02:00"  — Session start HH:MM local time (==end = disabled)
+InpSessionEnd     = "20:00"  — Session end — outside: no entries; PnL>0 → close all
+```
+
+**News Filter**
+```
+InpNewsFilterEnabled = true   — Block entries + profit exits around high-impact news
+InpNewsMinImportance = CALENDAR_IMPORTANCE_HIGH
+InpNewsMinutesBefore = 30     — Minutes before event to start blocking
+InpNewsMinutesAfter  = 30     — Minutes after event to keep blocking
 ```
 
 **Chart Display**
@@ -73,13 +82,14 @@ InpEnableLog = true  — Toggle Print/PrintFormat output
 ```
 1. Cache symbol info (digits, point, volume min/max/step)
 2. Parse session start/end → g_sessionFilterEnabled
-3. CaptureStartingBalance — auto-capture or use InpStartingBalance
-4. InitLTFStructure:
+3. Set g_timezoneOffsetSeconds = InpTimezoneOffset * 3600
+4. CaptureStartingBalance — auto-capture or use InpStartingBalance
+5. InitLTFStructure:
    - Fetch InpCandlesInit bars
    - DetermineInitialTrend (highest/lowest chronological)
    - Replay bars forward → build initial zones
    - Set g_ltfLastBarTime
-5. InitHTFStructure — same as above for HTF
+6. InitHTFStructure — same as above for HTF
 ```
 
 ---
@@ -195,7 +205,54 @@ direction at a time).
 One row per batch flush. Columns: `CloseTime, CloseReason, PositionCount,
 Wins, Losses, BreakEven, TotalRealizedPnL, SumMFE, SumMAE, FirstEntryTime,
 LastEntryTime`. File: `AjipSnD_Batches_<symbol>_<magic>.csv` in
-`Common\Files`.
+`Common\\Files`.
 
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
 `BATCH_MAX_LOSS`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
+
+---
+
+## Timezone Offset
+
+`InpTimezoneOffset` (default 0 = UTC) shifts all time-based calculations
+to prop firm local time:
+
+- **GetLocalDayStart()** — converts server time to local, truncates to
+  midnight, converts back to server time for `HistorySelect`.
+- **GetDailyPnL** / **GetWeekPnL** / **GetMonthPnL** — all use local
+  day/week/month boundaries.
+- **InSession** — session start/end compared against local hour:minute.
+
+Example: offset `-4` (EST) → daily reset at 04:00 UTC, session times
+interpreted in EST. Default `0` preserves old server-time behavior.
+
+---
+
+## Info Panel
+
+22-line dashboard drawn via `OBJ_LABEL` on `OBJ_RECTANGLE_LABEL` background
+(185×364 px, Consolas 9):
+
+```
+AjipSnD v1.0
+LTF Trend: UP (M1)        ← trend + timeframe
+HTF Trend: DOWN (M15)
+Demands:   2              ← active zone counts
+Supplies:  1
+Entries:   3              ← open position count
+
+Today P/L: 123.45         ← green/red colored
+Week P/L:  456.78
+Month P/L: -12.34
+
+Final:     active         ← TARGET / MAX LOSS / active / disabled
+Daily:     TARGET
+Batch:     active
+
+Cooldown:  3m left        ← Xm left / clear / disabled
+Session:   OPEN           ← OPEN / CLOSED / all day
+News:      clear          ← BLOCKED / clear / disabled
+
+Open MFE:  12.34          ← summed across positions
+Open MAE:  -5.67
+```
