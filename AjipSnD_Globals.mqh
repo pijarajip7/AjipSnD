@@ -204,4 +204,60 @@ void   CloseAllAndFlushBatch(string reason);
 void   AccumulateBatchStats(int idx);
 void   FlushBatchCSV(string reason);
 
+//---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
+double GetHtfMaValue()
+  {
+   if(!InpHtfMaFilter || InpHtfMaPeriod <= 0)
+      return(0.0);
+
+   static datetime lastCalcTime = 0;
+   static double   lastMaValue  = 0.0;
+   static int      maHandle     = INVALID_HANDLE;
+
+   if(maHandle == INVALID_HANDLE)
+      maHandle = iMA(_Symbol, InpHtfTimeframe, InpHtfMaPeriod, 0, InpHtfMaMethod, PRICE_CLOSE);
+
+   // Only recalculate on new HTF bar close
+   MqlRates rates[1];
+   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) != 1)
+      return(lastMaValue);
+
+   datetime currentBarTime = rates[0].time;
+   if(currentBarTime != lastCalcTime)
+     {
+      lastCalcTime = currentBarTime;
+      double ma[1];
+      ArraySetAsSeries(ma, true);
+      if(CopyBuffer(maHandle, 0, 0, 1, ma) > 0)
+         lastMaValue = ma[0];
+     }
+
+   return(lastMaValue);
+  }
+
+//---- HTF MA direction gate for entry ----
+bool HtfMaBlocksBuy()
+  {
+   if(!InpHtfMaFilter) return(false);
+   double ma = GetHtfMaValue();
+   if(ma <= 0) return(false);
+
+   MqlRates rates[1];
+   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) == 1)
+      return(rates[0].close <= ma);  // block BUY if HTF below/at MA
+   return(false);
+  }
+
+bool HtfMaBlocksSell()
+  {
+   if(!InpHtfMaFilter) return(false);
+   double ma = GetHtfMaValue();
+   if(ma <= 0) return(false);
+
+   MqlRates rates[1];
+   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) == 1)
+      return(rates[0].close >= ma);  // block SELL if HTF above/at MA
+   return(false);
+  }
+
 #endif // AJIPSND_GLOBALS_MQH

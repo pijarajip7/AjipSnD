@@ -98,6 +98,16 @@ bool EntryGateBlocked(int dir)
       if(InpEnableLog) Print("AjipSnD: Entry blocked — News blackout");
       return(true);
      }
+   if(dir == 1 && HtfMaBlocksBuy())
+     {
+      if(InpEnableLog) Print("AjipSnD: Entry blocked — HTF close below MA (BUY only above MA)");
+      return(true);
+     }
+   if(dir == -1 && HtfMaBlocksSell())
+     {
+      if(InpEnableLog) Print("AjipSnD: Entry blocked — HTF close above MA (SELL only below MA)");
+      return(true);
+     }
    return(false);
   }
 
