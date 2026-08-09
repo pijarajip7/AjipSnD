@@ -581,7 +581,11 @@ void RecalculateAggregateSL()
          slPrice = NormalizeDouble(slPrice, g_digits);
 
          if(trade.PositionModify(g_entries[i].ticket, slPrice, 0.0))
-            PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f", g_entries[i].ticket, slPrice);
+            PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f (budget=%.2f/pos=%d)", 
+                        g_entries[i].ticket, slPrice, budget, count);
+         else
+            PrintFormat("AjipSnD: Aggregate SL FAILED ticket=%I64u retcode=%d SL=%.5f",
+                        g_entries[i].ticket, trade.ResultRetcode(), slPrice);
         }
      }
   }
