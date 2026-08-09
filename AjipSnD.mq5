@@ -68,6 +68,11 @@ input int              InpPanelY      = 50;                 // Panel Y offset
 input group "Diagnostics"
 input bool InpEnableLog = true;  // Enable Print/PrintFormat output
 
+input group "Multi-Account Orchestrator"
+input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
+input string InpHandoffFile    = "AjipSnD_Handoff.csv";   // Written to Common\Files (FILE_COMMON)
+input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal, written ~30s, overwritten each tick
+
 //==================================================================
 // INCLUDES
 //==================================================================
@@ -104,6 +109,9 @@ int OnInit()
    // Capture starting balance
    CaptureStartingBalance();
 
+   // Recover tracking for positions from earlier EA run
+   RebuildTrackedPositions();
+
    // Init LTF & HTF
    InitLTFStructure();
    InitHTFStructure();
@@ -133,6 +141,9 @@ void OnTick()
    //══════════════════════════════════════════════════════════════
    // Per-tick checks (order matters)
    //══════════════════════════════════════════════════════════════
+
+   // 0. Heartbeat (not gated by new-bar, self-throttled ~30s)
+   WriteHeartbeat();
 
    // 1. Update MFE/MAE
    UpdateMfeMae();

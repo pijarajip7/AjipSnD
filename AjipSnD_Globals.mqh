@@ -89,7 +89,11 @@ int            g_sessionStartMin      = 0;
 int            g_sessionEndMin        = 0;
 bool           g_sessionFilterEnabled = false;
 
-// ---- One-shot entry per zone ----
+// ---- Heartbeat throttle ----
+const int      HEARTBEAT_INTERVAL_SECONDS = 30;
+datetime       g_lastHeartbeatTime = 0;
+
+//---- Symbol info cache ----
 datetime       g_ltfZoneEntryFiredTime = 0;  // last LTF zone time that triggered entry
 
 //==================================================================

@@ -417,6 +417,7 @@ void CheckDailyTargetCloseAll()
    if(total >= InpDailyMaxProfit)
      {
       PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all", total, InpDailyMaxProfit);
+      WriteHandoffSignal("DAILY_TARGET", total);
       CloseAllAndFlushBatch("DAILY_TARGET");
      }
   }
@@ -431,6 +432,7 @@ void CheckDailyMaxLossCloseAll()
    if(total <= -InpDailyMaxLoss)
      {
       PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
+      WriteHandoffSignal("DAILY_MAX_LOSS", total);
       CloseAllAndFlushBatch("DAILY_MAX_LOSS");
      }
   }
@@ -582,6 +584,55 @@ void RecalculateAggregateSL()
             PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f", g_entries[i].ticket, slPrice);
         }
      }
+  }
+
+//==================================================================
+// WRITE HANDOFF SIGNAL — fired when daily target/max-loss is hit.
+// This account should sit out the rest of the day.
+//==================================================================
+void WriteHandoffSignal(const string reason, double dailyTotal)
+  {
+   if(!InpHandoffEnabled) return;
+
+   int handle = FileOpen(InpHandoffFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+     {
+      if(InpEnableLog) PrintFormat("AjipSnD: WriteHandoffSignal — failed to open %s, error=%d", InpHandoffFile, GetLastError());
+      return;
+     }
+
+   string line = StringFormat("login=%d\nreason=%s\npnl=%.2f\nsymbol=%s\nmagic=%d\ntime=%s\n",
+                               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, dailyTotal, _Symbol, InpMagicNumber,
+                               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
+   FileWriteString(handle, line);
+   FileClose(handle);
+
+   if(InpEnableLog) PrintFormat("AjipSnD: Handoff signal written — login=%d reason=%s pnl=%.2f file=%s",
+               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, dailyTotal, InpHandoffFile);
+  }
+
+//==================================================================
+// WRITE HEARTBEAT — "I'm alive on THIS account" signal.
+// Overwrites file every ~30s. Gated by InpHandoffEnabled.
+//==================================================================
+void WriteHeartbeat()
+  {
+   if(!InpHandoffEnabled) return;
+   if(TimeCurrent() - g_lastHeartbeatTime < HEARTBEAT_INTERVAL_SECONDS) return;
+   g_lastHeartbeatTime = TimeCurrent();
+
+   int handle = FileOpen(InpHeartbeatFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+     {
+      if(InpEnableLog) PrintFormat("AjipSnD: WriteHeartbeat — failed to open %s, error=%d", InpHeartbeatFile, GetLastError());
+      return;
+     }
+
+   string line = StringFormat("login=%d\nsymbol=%s\nmagic=%d\ntime=%s\n",
+                               (int)AccountInfoInteger(ACCOUNT_LOGIN), _Symbol, InpMagicNumber,
+                               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
+   FileWriteString(handle, line);
+   FileClose(handle);
   }
 
 #endif // AJIPSND_TRADE_MQH

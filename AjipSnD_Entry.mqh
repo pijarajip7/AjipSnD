@@ -2,6 +2,54 @@
 #define AJIPSND_ENTRY_MQH
 
 //==================================================================
+// RESTART RECOVERY — rebuild g_entries[] tracking for positions
+// opened by an earlier run of this EA (reattach/recompile/restart).
+//==================================================================
+void RebuildTrackedPositions()
+  {
+   ArrayResize(g_entries, 0);
+
+   datetime firstTime = 0;
+   datetime lastTime  = 0;
+   int      recovered = 0;
+
+   int n = PositionsTotal();
+   for(int i = 0; i < n; i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      int      dir        = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      double   entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      datetime entryTime  = (datetime)PositionGetInteger(POSITION_TIME);
+
+      int idx = ArraySize(g_entries);
+      ArrayResize(g_entries, idx + 1);
+      g_entries[idx].ticket        = ticket;
+      g_entries[idx].dir           = dir;
+      g_entries[idx].entryPrice    = entryPrice;
+      g_entries[idx].entryTime     = entryTime;
+      g_entries[idx].mfe           = PositionGetDouble(POSITION_PROFIT);
+      g_entries[idx].mae           = PositionGetDouble(POSITION_PROFIT);
+      g_entries[idx].partialClosed = false;
+
+      if(firstTime == 0 || entryTime < firstTime) firstTime = entryTime;
+      if(entryTime > lastTime) lastTime = entryTime;
+      recovered++;
+     }
+
+   if(recovered == 0) return;
+
+   g_batchActive         = true;
+   g_batchFirstEntryTime = firstTime;
+   g_batchLastEntryTime  = lastTime;
+
+   if(InpEnableLog) PrintFormat("AjipSnD: Rebuilt tracking for %d pre-existing position(s) on restart.", recovered);
+  }
+
+//==================================================================
 // ENTRY LOGIC — LTF zone confirmed + price inside HTF zone
 //==================================================================
 
