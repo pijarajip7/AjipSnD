@@ -90,6 +90,11 @@ int OnInit()
    g_volMax   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    g_volStep  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
+   // Configure trade object
+   trade.SetDeviationInPoints(InpDeviation);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetExpertMagicNumber(InpMagicNumber);
+
    // Parse session
    g_sessionStartMin = ParseMinutesFromMidnight(InpSessionStart);
    g_sessionEndMin   = ParseMinutesFromMidnight(InpSessionEnd);
