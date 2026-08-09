@@ -1,0 +1,270 @@
+#ifndef AJIPSND_ZONE_MQH
+#define AJIPSND_ZONE_MQH
+
+//==================================================================
+// SnD ZONE DETECTION — Supply & Demand zone finder
+//
+// Algorithm:
+//   Downtrend (looking for demand):
+//     - bear candle (close < open) → candidate = {high, low}
+//     - subsequent bear candle → replace candidate
+//     - any candle with low < candidate.low → update candidate.low (high tetap)
+//     - any candle with close > candidate.high → ZONE CONFIRMED, trend flip up
+//
+//   Uptrend (looking for supply): mirror
+//==================================================================
+
+//---- Check if a bar is bearish ----
+bool IsBearBar(const MqlRates &bar)
+  {
+   return(bar.close < bar.open);
+  }
+
+//---- Check if a bar is bullish ----
+bool IsBullBar(const MqlRates &bar)
+  {
+   return(bar.close > bar.open);
+  }
+
+//---- Process one bar for zone detection, return true if zone confirmed ----
+bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
+                    SnDZone &candidate, SnDZone &confirmed)
+  {
+   if(trend == TREND_DOWN)
+     {
+      // Looking for DEMAND zone
+      if(IsBearBar(bar))
+        {
+         // New/replace candidate
+         candidate.high    = bar.high;
+         candidate.low     = bar.low;
+         candidate.time    = bar.time;
+         candidate.isDemand = true;
+        }
+      
+      if(candidate.time != 0)
+        {
+         // Update low if deeper wick
+         if(bar.low < candidate.low)
+            candidate.low = bar.low;
+         
+         // Confirmation: close > candidate.high
+         if(bar.close > candidate.high)
+           {
+            confirmed = candidate;
+            trend = TREND_UP;  // flip trend
+            return(true);
+           }
+        }
+     }
+   else  // TREND_UP
+     {
+      // Looking for SUPPLY zone
+      if(IsBullBar(bar))
+        {
+         candidate.high    = bar.high;
+         candidate.low     = bar.low;
+         candidate.time    = bar.time;
+         candidate.isDemand = false;
+        }
+      
+      if(candidate.time != 0)
+        {
+         if(bar.high > candidate.high)
+            candidate.high = bar.high;
+         
+         if(bar.close < candidate.low)
+           {
+            confirmed = candidate;
+            trend = TREND_DOWN;
+            return(true);
+           }
+        }
+     }
+   
+   return(false);
+  }
+
+//---- Manage active zones: insert, enforce max count, deactivate older if better ----
+void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
+  {
+   // Check if new zone invalidates any existing
+   for(int i = ArraySize(zones) - 1; i >= 0; i--)
+     {
+      if(newZone.low < zones[i].low)
+        {
+         // New zone is LOWER → old zone deactivated
+         ArrayRemove(zones, i, 1);
+        }
+     }
+   
+   // Add new zone
+   int sz = ArraySize(zones);
+   ArrayResize(zones, sz + 1);
+   zones[sz] = newZone;
+   
+   // Enforce InpMaxZones
+   while(ArraySize(zones) > InpMaxZones)
+     {
+      // Remove oldest (index 0)
+      ArrayRemove(zones, 0, 1);
+     }
+  }
+
+void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
+  {
+   for(int i = ArraySize(zones) - 1; i >= 0; i--)
+     {
+      if(newZone.high > zones[i].high)
+        {
+         ArrayRemove(zones, i, 1);
+        }
+     }
+   
+   int sz = ArraySize(zones);
+   ArrayResize(zones, sz + 1);
+   zones[sz] = newZone;
+   
+   while(ArraySize(zones) > InpMaxZones)
+     {
+      ArrayRemove(zones, 0, 1);
+     }
+  }
+
+//---- Check if price is inside any active demand zone ----
+bool IsPriceInDemandZone(double price, const SnDZone &zones[])
+  {
+   for(int i = 0; i < ArraySize(zones); i++)
+     {
+      if(price <= zones[i].high && price >= zones[i].low)
+         return(true);
+     }
+   return(false);
+  }
+
+//---- Check if price is inside any active supply zone ----
+bool IsPriceInSupplyZone(double price, const SnDZone &zones[])
+  {
+   for(int i = 0; i < ArraySize(zones); i++)
+     {
+      if(price >= zones[i].low && price <= zones[i].high)
+         return(true);
+     }
+   return(false);
+  }
+
+//---- Find initial trend from N bars: highest first = DOWN, lowest first = UP ----
+ENUM_TREND DetermineInitialTrend(const MqlRates &rates[], int count)
+  {
+   int highIdx = 0, lowIdx = 0;
+   double highest = rates[0].high;
+   double lowest  = rates[0].low;
+   
+   for(int i = 1; i < count; i++)
+     {
+      if(rates[i].high > highest)
+        {
+         highest = rates[i].high;
+         highIdx = i;
+        }
+      if(rates[i].low < lowest)
+        {
+         lowest = rates[i].low;
+         lowIdx = i;
+        }
+     }
+   
+   if(highIdx < lowIdx)
+      return(TREND_DOWN);
+   return(TREND_UP);
+  }
+
+//---- Replay bars from originIdx to build initial zones ----
+void ReplayZoneBars(const MqlRates &rates[], int startIdx, int count,
+                    ENUM_TREND &trend, SnDZone &demandZones[],
+                    SnDZone &supplyZones[], SnDZone &candidate)
+  {
+   trend = DetermineInitialTrend(rates, startIdx + 1);
+   
+   for(int i = startIdx + 1; i < count; i++)
+     {
+      SnDZone confirmed;
+      ZeroMemory(confirmed);
+      if(ProcessZoneBar(rates[i], trend, candidate, confirmed))
+        {
+         if(confirmed.isDemand)
+            AddDemandZone(demandZones, confirmed);
+         else
+            AddSupplyZone(supplyZones, confirmed);
+         
+         // Reset candidate for new trend
+         ZeroMemory(candidate);
+        }
+     }
+  }
+
+//---- Draw zone confirmation arrow on LTF chart ----
+void DrawZoneArrow(string name, datetime time, double price, bool isDemand)
+  {
+   if(!InpDrawLines) return;
+   
+   ObjectDelete(0, name);
+   
+   if(!ObjectCreate(0, name, OBJ_ARROW, 0, time, price))
+      return;
+   
+   ObjectSetInteger(0, name, OBJPROP_COLOR, isDemand ? clrDodgerBlue : clrOrangeRed);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, isDemand ? 233 : 234); // up/down arrow
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, isDemand ? ANCHOR_TOP : ANCHOR_BOTTOM);
+   
+   // Tooltip with zone info
+   string tip = StringFormat("%s zone confirmed [%.5f - %.5f]",
+                              isDemand ? "DEMAND" : "SUPPLY", price, price);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+  }
+
+//---- Draw all active HTF zones as rectangles ----
+void DrawAllHtfZones()
+  {
+   if(!InpDrawLines) return;
+
+   string prefix = g_objPrefix + "HTF_";
+   // Clean old objects  
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+     {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, prefix) == 0)
+         ObjectDelete(0, objName);
+     }
+
+   for(int i = 0; i < ArraySize(g_htfDemandZones); i++)
+     {
+      string name = prefix + "Demand_" + IntegerToString(i);
+      if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0,
+                       g_htfDemandZones[i].time, g_htfDemandZones[i].high,
+                       TimeCurrent(), g_htfDemandZones[i].low))
+         continue;
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_FILL, true);
+     }
+
+   for(int i = 0; i < ArraySize(g_htfSupplyZones); i++)
+     {
+      string name = prefix + "Supply_" + IntegerToString(i);
+      if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0,
+                       g_htfSupplyZones[i].time, g_htfSupplyZones[i].low,
+                       TimeCurrent(), g_htfSupplyZones[i].high))
+         continue;
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrOrangeRed);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_FILL, true);
+     }
+  }
+
+#endif // AJIPSND_ZONE_MQH
