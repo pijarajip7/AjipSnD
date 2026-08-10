@@ -192,31 +192,43 @@ void UpdateMfeMae()
   }
 
 //==================================================================
-// ACCUMULATE BATCH STATS — fold closed position into batch
+// ACCUMULATE BATCH STATS — fold closed position into batch.
+// Tries live POSITION_PROFIT first (fast, accurate), falls back to
+// history deals if position no longer selectable (e.g., CheckEntryCleanup).
 //==================================================================
 void AccumulateBatchStats(int idx)
   {
    if(idx < 0 || idx >= ArraySize(g_entries)) return;
 
-   // Get realized PnL from history
    double realized = 0.0;
-   if(HistorySelect(g_entries[idx].entryTime, TimeCurrent() + 1))
-     {
-      int ndeals = HistoryDealsTotal();
-      for(int i = 0; i < ndeals; i++)
-        {
-         ulong dticket = HistoryDealGetTicket(i);
-         if(dticket == 0) continue;
-         long dmagic = HistoryDealGetInteger(dticket, DEAL_MAGIC);
-         if(dmagic != InpMagicNumber) continue;
-         
-         // Get the position ID this deal belongs to
-         ulong dposition = HistoryDealGetInteger(dticket, DEAL_POSITION_ID);
-         if(dposition != g_entries[idx].ticket) continue;
 
-         realized += HistoryDealGetDouble(dticket, DEAL_PROFIT)
-                   + HistoryDealGetDouble(dticket, DEAL_SWAP)
-                   + HistoryDealGetDouble(dticket, DEAL_COMMISSION);
+   // Try live position profit (most accurate, avoids history-timing gap)
+   if(PositionSelectByTicket(g_entries[idx].ticket))
+     {
+      realized = PositionGetDouble(POSITION_PROFIT)
+               + PositionGetDouble(POSITION_SWAP)
+               + PositionGetDouble(POSITION_COMMISSION);
+     }
+   else
+     {
+      // Fallback: search history deals (already closed, deals settled)
+      if(HistorySelect(g_entries[idx].entryTime, TimeCurrent() + 1))
+        {
+         int ndeals = HistoryDealsTotal();
+         for(int i = 0; i < ndeals; i++)
+           {
+            ulong dticket = HistoryDealGetTicket(i);
+            if(dticket == 0) continue;
+            long dmagic = HistoryDealGetInteger(dticket, DEAL_MAGIC);
+            if(dmagic != InpMagicNumber) continue;
+            
+            ulong dposition = HistoryDealGetInteger(dticket, DEAL_POSITION_ID);
+            if(dposition != g_entries[idx].ticket) continue;
+
+            realized += HistoryDealGetDouble(dticket, DEAL_PROFIT)
+                      + HistoryDealGetDouble(dticket, DEAL_SWAP)
+                      + HistoryDealGetDouble(dticket, DEAL_COMMISSION);
+           }
         }
      }
 
