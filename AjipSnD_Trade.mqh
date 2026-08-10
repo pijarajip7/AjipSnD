@@ -341,7 +341,7 @@ void FlushBatchCSV(string reason)
   {
    if(g_batchCount == 0) return;
 
-   string filename = "AjipSnD_Batches_" + _Symbol + "_" + IntegerToString(InpMagicNumber) + ".csv";
+   string filename = "AjipSnD_Batches_" + _Symbol + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
    bool exists = FileIsExist(filename, FILE_COMMON);
 
    int handle = FileOpen(filename, FILE_COMMON | FILE_WRITE | FILE_READ | FILE_TXT, 0, CP_UTF8);
