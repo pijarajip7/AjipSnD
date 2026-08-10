@@ -38,7 +38,7 @@ void InitLTFStructure()
             AddDemandZone(g_ltfDemandZones, confirmed);
          else
             AddSupplyZone(g_ltfSupplyZones, confirmed);
-         ZeroMemory(g_ltfCandidate);
+         // Candidate seeded by ProcessZoneBar
         }
      }
 
@@ -84,7 +84,7 @@ void InitHTFStructure()
             AddDemandZone(g_htfDemandZones, confirmed);
          else
             AddSupplyZone(g_htfSupplyZones, confirmed);
-         ZeroMemory(g_htfCandidate);
+         // Candidate seeded by ProcessZoneBar
         }
      }
 
@@ -183,8 +183,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
            }
         }
 
-      // After zone confirmed, reset candidate for new trend
-      ZeroMemory(g_ltfCandidate);
+      // Candidate is now seeded by ProcessZoneBar (confirming bar becomes first opposite candidate)
      }
   }
 
@@ -216,9 +215,9 @@ void UpdateHTF(const MqlRates &rates[], int count)
          PrintFormat("AjipSnD: HTF SUPPLY zone confirmed! [%.5f, %.5f]",
                      confirmed.low, confirmed.high);
         }
-      ZeroMemory(g_htfCandidate);
+      // Candidate seeded by ProcessZoneBar
 
-      // Redraw HTF zone rectangles only (LTF uses arrows)
+      // Redraw all zones
       DrawAllHtfZones();
      }
   }

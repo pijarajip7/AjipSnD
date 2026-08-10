@@ -74,6 +74,20 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
            {
             confirmed = candidate;
             trend = TREND_UP;
+
+            // Seed confirming bar as first supply candidate (anti fake-confirmation)
+            if(IsBullBar(bar))
+              {
+               candidate.high     = bar.high;
+               candidate.low      = bar.low;
+               candidate.time     = bar.time;
+               candidate.isDemand = false;
+               candidate.sweepHigh = 0;
+               candidate.sweepLow  = 0;
+              }
+            else
+               ZeroMemory(candidate);
+
             return(true);
            }
         }
@@ -120,6 +134,20 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
            {
             confirmed = candidate;
             trend = TREND_DOWN;
+
+            // Seed confirming bar as first demand candidate (anti fake-confirmation)
+            if(IsBearBar(bar))
+              {
+               candidate.high     = bar.high;
+               candidate.low      = bar.low;
+               candidate.time     = bar.time;
+               candidate.isDemand = true;
+               candidate.sweepHigh = 0;
+               candidate.sweepLow  = 0;
+              }
+            else
+               ZeroMemory(candidate);
+
             return(true);
            }
         }
@@ -240,8 +268,7 @@ void ReplayZoneBars(const MqlRates &rates[], int startIdx, int count,
          else
             AddSupplyZone(supplyZones, confirmed);
          
-         // Reset candidate for new trend
-         ZeroMemory(candidate);
+         // Candidate already seeded by ProcessZoneBar
         }
      }
   }
