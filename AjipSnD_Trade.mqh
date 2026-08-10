@@ -206,8 +206,7 @@ void AccumulateBatchStats(int idx)
    if(PositionSelectByTicket(g_entries[idx].ticket))
      {
       realized = PositionGetDouble(POSITION_PROFIT)
-               + PositionGetDouble(POSITION_SWAP)
-               + PositionGetDouble(POSITION_COMMISSION);
+               + PositionGetDouble(POSITION_SWAP);  // commission only on deal, not position
      }
    else
      {
@@ -419,8 +418,7 @@ void CloseAllAndFlushBatch(string reason)
 
       double profit = PositionGetDouble(POSITION_PROFIT);
       double swap   = PositionGetDouble(POSITION_SWAP);
-      double comm   = PositionGetDouble(POSITION_COMMISSION);
-      double net    = profit + swap + comm;
+      double net    = profit + swap;  // commission only on deal, not position
 
       g_batchCount++;
       g_batchRealizedPnl += net;
