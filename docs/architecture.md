@@ -206,7 +206,7 @@ if new SL is within 0.5 point of current.
 
 One row per batch flush. Columns: `CloseTime, CloseReason, PositionCount,
 Wins, Losses, BreakEven, TotalRealizedPnL, SumMFE, SumMAE, FirstEntryTime,
-LastEntryTime`. File: `AjipSnD_Batches_<symbol>_<magic>.csv` in
+LastEntryTime`. File: `AjipSnD_Batches_<symbol>_<login>.csv` in
 `Common\\Files`.
 
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
