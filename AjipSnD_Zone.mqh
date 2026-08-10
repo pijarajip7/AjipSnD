@@ -2,14 +2,15 @@
 #define AJIPSND_ZONE_MQH
 
 //==================================================================
-// SnD ZONE DETECTION — Supply & Demand zone finder
+// SnD ZONE DETECTION — Supply & Demand zone finder with bar sweep.
 //
 // Algorithm:
 //   Downtrend (looking for demand):
-//     - bear candle (close < open) → candidate = {high, low}
-//     - subsequent bear candle → replace candidate
-//     - any candle with low < candidate.low → update candidate.low (high tetap)
-//     - any candle with close > candidate.high → ZONE CONFIRMED, trend flip up
+//     - bear candle → candidate = {high, low}
+//     - any candle low < candidate.low → update candidate.low
+//     - sweep: bar.high > candidate.high AND bar.close ≤ candidate.high
+//       → record sweepHigh = max(sweepHigh, bar.high)
+//     - confirmation: bar.close > (sweepHigh if swept else candidate.high)
 //
 //   Uptrend (looking for supply): mirror
 //==================================================================
@@ -38,10 +39,12 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
          if(candidate.time == 0 || bar.low < candidate.low)
            {
             // New candidate: this bear has a lower low
-            candidate.high    = bar.high;
-            candidate.low     = bar.low;
-            candidate.time    = bar.time;
+            candidate.high     = bar.high;
+            candidate.low      = bar.low;
+            candidate.time     = bar.time;
             candidate.isDemand = true;
+            candidate.sweepHigh = 0;
+            candidate.sweepLow  = 0;
            }
         }
       
@@ -51,8 +54,23 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
          if(bar.low < candidate.low)
             candidate.low = bar.low;
          
-         // Confirmation: close > candidate.high
-         if(bar.close > candidate.high)
+         // --- Bar sweep detection ---
+         // Wick above candidate.high but body closes back inside → liquidity sweep.
+         // Record the most extreme sweep; confirmation must break above sweepHigh.
+         if(bar.high > candidate.high && bar.close <= candidate.high)
+           {
+            if(bar.high > candidate.sweepHigh)
+               candidate.sweepHigh = bar.high;
+           }
+         
+         // --- Confirmation ---
+         // If swept: need close > sweepHigh (broke above the liquidity grab level).
+         // If not swept: close > candidate.high as before.
+         double breakLevel = (candidate.sweepHigh > 0)
+                             ? candidate.sweepHigh
+                             : candidate.high;
+         
+         if(bar.close > breakLevel)
            {
             confirmed = candidate;
             trend = TREND_UP;
@@ -68,10 +86,12 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
          if(candidate.time == 0 || bar.high > candidate.high)
            {
             // New candidate: this bull has a higher high
-            candidate.high    = bar.high;
-            candidate.low     = bar.low;
-            candidate.time    = bar.time;
+            candidate.high     = bar.high;
+            candidate.low      = bar.low;
+            candidate.time     = bar.time;
             candidate.isDemand = false;
+            candidate.sweepHigh = 0;
+            candidate.sweepLow  = 0;
            }
         }
       
@@ -80,7 +100,23 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
          if(bar.high > candidate.high)
             candidate.high = bar.high;
          
-         if(bar.close < candidate.low)
+         // --- Bar sweep detection ---
+         // Wick below candidate.low but body closes back inside → liquidity sweep.
+         // Record the most extreme sweep; confirmation must break below sweepLow.
+         if(bar.low < candidate.low && bar.close >= candidate.low)
+           {
+            if(bar.low < candidate.sweepLow || candidate.sweepLow == 0)
+               candidate.sweepLow = bar.low;
+           }
+         
+         // --- Confirmation ---
+         // If swept: need close < sweepLow (broke below the liquidity grab level).
+         // If not swept: close < candidate.low as before.
+         double breakLevel = (candidate.sweepLow > 0)
+                             ? candidate.sweepLow
+                             : candidate.low;
+         
+         if(bar.close < breakLevel)
            {
             confirmed = candidate;
             trend = TREND_DOWN;

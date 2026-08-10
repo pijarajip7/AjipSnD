@@ -22,6 +22,8 @@ struct SnDZone
   {
    double   high;        // zone top
    double   low;         // zone bottom
+   double   sweepHigh;   // highest wick above high that failed to break (0=none)
+   double   sweepLow;    // lowest wick below low that failed to break (0=none)
    datetime time;        // bar time when zone was confirmed
    bool     isDemand;    // true=demand, false=supply
    int      index;       // index in the active zones array (for reference)
