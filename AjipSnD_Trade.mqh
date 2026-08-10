@@ -546,7 +546,10 @@ void CheckFinalMaxLossCloseAll()
   }
 
 //==================================================================
-// RECALCULATE AGGREGATE SL — safety net, broker-side
+// RECALCULATE AGGREGATE SL — safety net, broker-side.
+// Budget = tightest active max loss, applied to ALL positions in a
+// direction as a single pool (not split per-position). Same slPoints
+// for every position in the direction — mirrors AjipIDM.
 //==================================================================
 void RecalculateAggregateSL()
   {
@@ -561,58 +564,62 @@ void RecalculateAggregateSL()
 
    if(budget <= 0) return;
 
-   double valuePerPointPerLot = (SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE)
-                               / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE)) * g_point;
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0) return;
 
+   double valuePerPointPerLot = (tickValue / tickSize) * g_point;
    if(valuePerPointPerLot <= 0) return;
 
-   // Apply per direction
+   int n = ArraySize(g_entries);
+
+   // Apply per direction — each direction gets the FULL budget independently
    for(int dir = -1; dir <= 1; dir += 2)
      {
       if(dir == 0) continue;
 
-      // Count entries of this direction without their own SL
-      int count = 0;
-      for(int i = 0; i < ArraySize(g_entries); i++)
+      // Sum total volume for this direction (skip already-protected positions)
+      double totalVolume = 0.0;
+      for(int i = 0; i < n; i++)
         {
          if(g_entries[i].dir != dir) continue;
-         if(g_entries[i].partialClosed) continue; // already at BE
          if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-         if(PositionGetDouble(POSITION_SL) != 0) continue; // already has SL
-         count++;
+         // Skip if already has a protective SL (partialClosed + SL != 0 = safe)
+         if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
+         totalVolume += PositionGetDouble(POSITION_VOLUME);
         }
 
-      if(count == 0) continue;
+      if(totalVolume <= 0.0) continue;
 
-      double budgetPerPos = budget / count;
+      // Same slPoints for ALL positions in this direction
+      double slPoints = budget / (totalVolume * valuePerPointPerLot);
+      if(slPoints <= 0.0) continue;
 
-      for(int i = 0; i < ArraySize(g_entries); i++)
+      for(int i = 0; i < n; i++)
         {
          if(g_entries[i].dir != dir) continue;
-         if(g_entries[i].partialClosed) continue;
          if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-         if(PositionGetDouble(POSITION_SL) != 0) continue;
+         if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
 
-         double vol = PositionGetDouble(POSITION_VOLUME);
-         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         if(entryPrice <= 0.0) continue;
 
-         double slDistance = budgetPerPos / (valuePerPointPerLot * vol);
-         slDistance = MathMax(slDistance, 10.0); // minimum 10 points
+         double newSl = (dir == 1)
+                        ? NormalizeDouble(entryPrice - slPoints * g_point, g_digits)
+                        : NormalizeDouble(entryPrice + slPoints * g_point, g_digits);
 
-         double slPrice;
-         if(dir == 1)  // BUY
-            slPrice = entry - slDistance * g_point;
-         else          // SELL
-            slPrice = entry + slDistance * g_point;
+         double curSl = PositionGetDouble(POSITION_SL);
+         // Skip if already within 0.5 point
+         if(MathAbs(curSl - newSl) < g_point * 0.5) continue;
 
-         slPrice = NormalizeDouble(slPrice, g_digits);
+         double curTp = PositionGetDouble(POSITION_TP);
 
-         if(trade.PositionModify(g_entries[i].ticket, slPrice, 0.0))
-            PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f (budget=%.2f/pos=%d)", 
-                        g_entries[i].ticket, slPrice, budget, count);
+         if(trade.PositionModify(g_entries[i].ticket, newSl, curTp))
+            PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f (budget=%.2f totalVol=%.2f)",
+                        g_entries[i].ticket, newSl, budget, totalVolume);
          else
             PrintFormat("AjipSnD: Aggregate SL FAILED ticket=%I64u retcode=%d SL=%.5f",
-                        g_entries[i].ticket, trade.ResultRetcode(), slPrice);
+                        g_entries[i].ticket, trade.ResultRetcode(), newSl);
         }
      }
   }
