@@ -231,7 +231,8 @@ void AccumulateBatchStats(int idx)
   }
 
 //==================================================================
-// CHECK ENTRY CLEANUP — positions closed outside close-all
+// CHECK ENTRY CLEANUP — positions closed outside close-all.
+// If all entries gone AND batch has stats, flush CSV.
 //==================================================================
 void CheckEntryCleanup()
   {
@@ -242,6 +243,15 @@ void CheckEntryCleanup()
          AccumulateBatchStats(i);
          RemoveEntry(i);
         }
+     }
+
+   // Batch went flat via natural closes (SL hit, aggregate SL, manual) —
+   // flush CSV so stats aren't orphaned until the next CloseAllAndFlushBatch.
+   if(ArraySize(g_entries) == 0 && g_batchCount > 0)
+     {
+      FlushBatchCSV("BATCH_FLAT");
+      ResetBatchAccumulator();
+      g_lastBatchEndTime = TimeCurrent();
      }
   }
 
