@@ -194,9 +194,11 @@ entry blocked permanently until input reset.
 
 ### Aggregate SL
 
-Safety net: distributes smallest active max loss budget across positions
-without their own SL. Per-direction budget (not halved — worst case one
-direction at a time).
+Safety net: tightest active max loss budget applied to ALL positions in
+a direction as a single pool. Same slPoints distance from entry for every
+position in the direction (mirrors AjipIDM). Per-direction budget not
+halved — worst case one direction at a time. Preserves TP, skips modify
+if new SL is within 0.5 point of current.
 
 ---
 
