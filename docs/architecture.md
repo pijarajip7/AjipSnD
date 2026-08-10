@@ -210,7 +210,7 @@ LastEntryTime`. File: `AjipSnD_Batches_<symbol>_<login>.csv` in
 `Common\\Files`.
 
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
-`BATCH_MAX_LOSS`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
+`BATCH_MAX_LOSS`, `BATCH_FLAT`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
 
 ---
 
