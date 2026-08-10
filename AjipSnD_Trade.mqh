@@ -391,24 +391,46 @@ void ResetBatchAccumulator()
   }
 
 //==================================================================
-// CLOSE ALL AND FLUSH BATCH (atomic)
+// CLOSE ALL AND FLUSH BATCH (atomic).
+// Capture POSITION_PROFIT BEFORE closing to avoid history-timing gap
+// where the deal hasn't settled yet. Always flush if anything accumulated.
 //==================================================================
 void CloseAllAndFlushBatch(string reason)
   {
+   int n = ArraySize(g_entries);
+
+   // ---- Accumulate from live position profit BEFORE closing ----
+   // This avoids the history-deal timing gap after PositionClose.
+   for(int i = n - 1; i >= 0; i--)
+     {
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double swap   = PositionGetDouble(POSITION_SWAP);
+      double comm   = PositionGetDouble(POSITION_COMMISSION);
+      double net    = profit + swap + comm;
+
+      g_batchCount++;
+      g_batchRealizedPnl += net;
+      g_batchMfeSum += g_entries[i].mfe;
+      g_batchMaeSum += g_entries[i].mae;
+      if(net > 0)       g_batchWins++;
+      else if(net < 0)  g_batchLosses++;
+      else              g_batchBreakEven++;
+     }
+
+   // ---- Close all positions ----
    CloseAllPositions();
 
-   // Accumulate + remove entries that were actually closed
+   // ---- Remove entries whose positions are now gone ----
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
       if(!PositionSelectByTicket(g_entries[i].ticket))
-        {
-         AccumulateBatchStats(i);
          RemoveEntry(i);
-        }
      }
 
-   // Flush only if all tracked entries are gone
-   if(ArraySize(g_entries) == 0)
+   // ---- Always flush if anything was accumulated ----
+   if(g_batchCount > 0)
      {
       FlushBatchCSV(reason);
       ResetBatchAccumulator();
