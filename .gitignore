@@ -1,0 +1,9 @@
+# Dashboard auth (credentials)
+orchestrator/dashboard_auth.json
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
