@@ -112,6 +112,66 @@ bool EntryGateBlocked(int dir)
   }
 
 //---- Check if LTF zone is inside any active HTF zone and entry ----
+void CheckLTFZoneEntry(const MqlRates &bar);  // forward
+
+//==== Zone gap gate: entry invalid if nearest opposite zone too close ====
+bool ZoneGapBlocked(const SnDZone &zone)
+  {
+   if(InpMinZoneGapPoints <= 0) return(false);
+
+   double minGap = InpMinZoneGapPoints * g_point;
+
+   if(zone.isDemand)
+     {
+      // BUY entry (demand zone): find nearest supply ABOVE
+      // Check: supply.low - demand.high > minGap
+      double nearestSupplyLow = 0;
+      int n = ArraySize(g_htfSupplyZones);
+      for(int i = 0; i < n; i++)
+        {
+         // Supply above demand: supply.low must be > demand.high
+         if(g_htfSupplyZones[i].low <= zone.high) continue;
+         if(nearestSupplyLow == 0 || g_htfSupplyZones[i].low < nearestSupplyLow)
+            nearestSupplyLow = g_htfSupplyZones[i].low;
+        }
+
+      if(nearestSupplyLow > 0 && (nearestSupplyLow - zone.high) < minGap)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: BUY entry blocked — zone gap %.1f pts < min %d pts (supplyLow=%.5f demandHigh=%.5f)",
+                        (nearestSupplyLow - zone.high) / g_point, InpMinZoneGapPoints,
+                        nearestSupplyLow, zone.high);
+         return(true);
+        }
+     }
+   else
+     {
+      // SELL entry (supply zone): find nearest demand BELOW
+      // Check: supply.low - demand.high > minGap
+      double nearestDemandHigh = 0;
+      int n = ArraySize(g_htfDemandZones);
+      for(int i = 0; i < n; i++)
+        {
+         // Demand below supply: demand.high must be < supply.low
+         if(g_htfDemandZones[i].high >= zone.low) continue;
+         if(nearestDemandHigh == 0 || g_htfDemandZones[i].high > nearestDemandHigh)
+            nearestDemandHigh = g_htfDemandZones[i].high;
+        }
+
+      if(nearestDemandHigh > 0 && (zone.low - nearestDemandHigh) < minGap)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: SELL entry blocked — zone gap %.1f pts < min %d pts (supplyLow=%.5f demandHigh=%.5f)",
+                        (zone.low - nearestDemandHigh) / g_point, InpMinZoneGapPoints,
+                        zone.low, nearestDemandHigh);
+         return(true);
+        }
+     }
+
+   return(false);
+  }
+
+//---- Common entry gate — all conditions that block new positions ----
 void CheckLTFZoneEntry(const MqlRates &bar)
   {
    // Must have active HTF zones

@@ -152,7 +152,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
            {
             PrintFormat("AjipSnD: LTF demand zone CONFIRMED + price=%.5f inside HTF demand zone → BUY signal",
                         entryPrice);
-            if(!EntryGateBlocked(1))
+            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(1))
               {
                ulong ticket = OpenTrade(true, entryPrice);
                if(ticket != 0)
@@ -171,7 +171,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
            {
             PrintFormat("AjipSnD: LTF supply zone CONFIRMED + price=%.5f inside HTF supply zone → SELL signal",
                         entryPrice);
-            if(!EntryGateBlocked(-1))
+            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(-1))
               {
                ulong ticket = OpenTrade(false, entryPrice);
                if(ticket != 0)
