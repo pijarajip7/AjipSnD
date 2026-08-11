@@ -126,20 +126,12 @@ void UpdateLTF(const MqlRates &rates[], int count)
          AddDemandZone(g_ltfDemandZones, confirmed);
          PrintFormat("AjipSnD: LTF DEMAND zone confirmed! [%.5f, %.5f] at %s",
                      confirmed.low, confirmed.high, TimeToString(confirmed.time));
-         // Draw up arrow BELOW the confirmation bar
-         double arrowPrice = bar.low - (bar.high - bar.low) * 0.5;
-         string arrowName = g_objPrefix + "LTF_Demand_" + TimeToString(confirmed.time);
-         DrawZoneArrow(arrowName, bar.time, arrowPrice, true);
         }
       else
         {
          AddSupplyZone(g_ltfSupplyZones, confirmed);
          PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
                      confirmed.low, confirmed.high, TimeToString(confirmed.time));
-         // Draw down arrow ABOVE the confirmation bar
-         double arrowPrice = bar.high + (bar.high - bar.low) * 0.5;
-         string arrowName = g_objPrefix + "LTF_Supply_" + TimeToString(confirmed.time);
-         DrawZoneArrow(arrowName, bar.time, arrowPrice, false);
         }
 
       // Check entry: is the close price inside an active HTF zone?

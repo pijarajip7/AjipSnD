@@ -273,27 +273,6 @@ void ReplayZoneBars(const MqlRates &rates[], int startIdx, int count,
      }
   }
 
-//---- Draw zone confirmation arrow on LTF chart ----
-void DrawZoneArrow(string name, datetime time, double price, bool isDemand)
-  {
-   if(!InpDrawLines) return;
-   
-   ObjectDelete(0, name);
-   
-   if(!ObjectCreate(0, name, OBJ_ARROW, 0, time, price))
-      return;
-   
-   ObjectSetInteger(0, name, OBJPROP_COLOR, isDemand ? clrDodgerBlue : clrOrangeRed);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, isDemand ? 233 : 234); // up/down arrow
-   ObjectSetInteger(0, name, OBJPROP_ANCHOR, isDemand ? ANCHOR_TOP : ANCHOR_BOTTOM);
-   
-   // Tooltip with zone info
-   string tip = StringFormat("%s zone confirmed [%.5f - %.5f]",
-                              isDemand ? "DEMAND" : "SUPPLY", price, price);
-   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
-  }
-
 //---- Invalidate HTF zones on new closed bar ----
 // Returns true if any zone was removed (caller should redraw).
 bool InvalidateHtfZones(const MqlRates &bar)
