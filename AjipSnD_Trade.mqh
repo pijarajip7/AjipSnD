@@ -367,9 +367,16 @@ void CheckInvalidPositions()
       string reason = "";
 
       // Condition 1: outside active HTF zone
+      // Use last CLOSED HTF bar, not LTF bid/ask — avoids false triggers
+      // from LTF intra-bar wicks that sweep but don't break the HTF zone.
+      MqlRates htfBar[2];
+      double zonePrice = currentPrice;  // fallback to LTF bid/ask
+      if(CopyRates(_Symbol, InpHtfTimeframe, 0, 2, htfBar) == 2)
+         zonePrice = htfBar[0].close;  // oldest = last closed HTF bar
+
       if(g_entries[i].dir == 1)  // BUY → must be inside demand zone
         {
-         if(!IsPriceInDemandZone(currentPrice, g_htfDemandZones))
+         if(!IsPriceInDemandZone(zonePrice, g_htfDemandZones))
            {
             invalid = true;
             reason = "outside HTF demand zone";
@@ -377,7 +384,7 @@ void CheckInvalidPositions()
         }
       else  // SELL → must be inside supply zone
         {
-         if(!IsPriceInSupplyZone(currentPrice, g_htfSupplyZones))
+         if(!IsPriceInSupplyZone(zonePrice, g_htfSupplyZones))
            {
             invalid = true;
             reason = "outside HTF supply zone";
