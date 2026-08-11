@@ -55,12 +55,17 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.low = bar.low;
          
          // --- Bar sweep detection ---
-         // Wick above candidate.high but body closes back inside → liquidity sweep.
-         // Record the most extreme sweep; confirmation must break above sweepHigh.
+         // Sweep above: wick above candidate.high, close stays below → liquidity grab.
+         // Sweep below: wick below candidate.low, close stays above → support test.
          if(bar.high > candidate.high && bar.close <= candidate.high)
            {
             if(bar.high > candidate.sweepHigh)
                candidate.sweepHigh = bar.high;
+           }
+         if(bar.low < candidate.low && bar.close >= candidate.low)
+           {
+            if(bar.low < candidate.sweepLow || candidate.sweepLow == 0)
+               candidate.sweepLow = bar.low;
            }
          
          // --- Confirmation ---
@@ -115,12 +120,17 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.high = bar.high;
          
          // --- Bar sweep detection ---
-         // Wick below candidate.low but body closes back inside → liquidity sweep.
-         // Record the most extreme sweep; confirmation must break below sweepLow.
+         // Sweep below: wick below candidate.low, close stays above → liquidity grab.
+         // Sweep above: wick above candidate.high, close stays below → resistance test.
          if(bar.low < candidate.low && bar.close >= candidate.low)
            {
             if(bar.low < candidate.sweepLow || candidate.sweepLow == 0)
                candidate.sweepLow = bar.low;
+           }
+         if(bar.high > candidate.high && bar.close <= candidate.high)
+           {
+            if(bar.high > candidate.sweepHigh || candidate.sweepHigh == 0)
+               candidate.sweepHigh = bar.high;
            }
          
          // --- Confirmation ---
@@ -282,27 +292,35 @@ bool InvalidateHtfZones(const MqlRates &bar)
   {
    bool anyChange = false;
 
-   // Check demand zones — invalid if close breaks BELOW support
+   // Check demand zones — invalid if support broken (close < sweepLow if swept, else close < low)
    for(int i = ArraySize(g_htfDemandZones) - 1; i >= 0; i--)
      {
-      if(bar.close < g_htfDemandZones[i].low)
+      double breakLevel = (g_htfDemandZones[i].sweepLow > 0)
+                          ? g_htfDemandZones[i].sweepLow
+                          : g_htfDemandZones[i].low;
+      if(bar.close < breakLevel)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] bar.close=%.5f",
-                        g_htfDemandZones[i].low, g_htfDemandZones[i].high, bar.close);
+            PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] sweepLow=%.5f bar.close=%.5f",
+                        g_htfDemandZones[i].low, g_htfDemandZones[i].high,
+                        g_htfDemandZones[i].sweepLow, bar.close);
          ArrayRemove(g_htfDemandZones, i, 1);
          anyChange = true;
         }
      }
 
-   // Check supply zones — invalid if close breaks ABOVE resistance
+   // Check supply zones — invalid if resistance broken (close > sweepHigh if swept, else close > high)
    for(int i = ArraySize(g_htfSupplyZones) - 1; i >= 0; i--)
      {
-      if(bar.close > g_htfSupplyZones[i].high)
+      double breakLevel = (g_htfSupplyZones[i].sweepHigh > 0)
+                          ? g_htfSupplyZones[i].sweepHigh
+                          : g_htfSupplyZones[i].high;
+      if(bar.close > breakLevel)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] bar.close=%.5f",
-                        g_htfSupplyZones[i].low, g_htfSupplyZones[i].high, bar.close);
+            PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] sweepHigh=%.5f bar.close=%.5f",
+                        g_htfSupplyZones[i].low, g_htfSupplyZones[i].high,
+                        g_htfSupplyZones[i].sweepHigh, bar.close);
          ArrayRemove(g_htfSupplyZones, i, 1);
          anyChange = true;
         }
