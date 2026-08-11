@@ -338,9 +338,6 @@ void CheckInvalidPositions()
   {
    if(InpPosMaxLoss <= 0) return;  // feature disabled
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
       if(!PositionSelectByTicket(g_entries[i].ticket))
@@ -362,35 +359,27 @@ void CheckInvalidPositions()
       if(g_entries[i].entryTime >= g_ltfLastBarTime)
          continue;
 
-      double currentPrice = (g_entries[i].dir == 1) ? bid : ask;
       bool invalid = false;
       string reason = "";
 
-      // Condition 1: outside active HTF zone
-      // Use last CLOSED HTF bar, not LTF bid/ask — avoids false triggers
-      // from LTF intra-bar wicks that sweep but don't break the HTF zone.
-      MqlRates htfBar[2];
-      double zonePrice = currentPrice;  // fallback to LTF bid/ask
-      if(CopyRates(_Symbol, InpHtfTimeframe, 0, 2, htfBar) == 2)
+      // Condition 1: entry premise invalid — the HTF zone we entered on no longer exists.
+      // Check if entryPrice is still inside any active zone of the same type.
+      // If the zone was invalidated (removed by InvalidateHtfZones), entryPrice
+      // will no longer be inside any active zone → position premise is broken.
+      if(g_entries[i].dir == 1)  // BUY → entry was inside a demand zone
         {
-         ArraySetAsSeries(htfBar, true);
-         zonePrice = htfBar[1].close;  // [1] = last closed HTF bar (series=true)
-        }
-
-      if(g_entries[i].dir == 1)  // BUY → must be inside demand zone
-        {
-         if(!IsPriceInDemandZone(zonePrice, g_htfDemandZones))
+         if(!IsPriceInDemandZone(entryPrice, g_htfDemandZones))
            {
             invalid = true;
-            reason = "outside HTF demand zone";
+            reason = "entry demand zone invalidated";
            }
         }
-      else  // SELL → must be inside supply zone
+      else  // SELL → entry was inside a supply zone
         {
-         if(!IsPriceInSupplyZone(zonePrice, g_htfSupplyZones))
+         if(!IsPriceInSupplyZone(entryPrice, g_htfSupplyZones))
            {
             invalid = true;
-            reason = "outside HTF supply zone";
+            reason = "entry supply zone invalidated";
            }
         }
 
