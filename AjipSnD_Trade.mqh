@@ -372,7 +372,10 @@ void CheckInvalidPositions()
       MqlRates htfBar[2];
       double zonePrice = currentPrice;  // fallback to LTF bid/ask
       if(CopyRates(_Symbol, InpHtfTimeframe, 0, 2, htfBar) == 2)
-         zonePrice = htfBar[0].close;  // oldest = last closed HTF bar
+        {
+         ArraySetAsSeries(htfBar, true);
+         zonePrice = htfBar[1].close;  // [1] = last closed HTF bar (series=true)
+        }
 
       if(g_entries[i].dir == 1)  // BUY → must be inside demand zone
         {
