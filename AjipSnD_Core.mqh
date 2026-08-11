@@ -154,19 +154,25 @@ void UpdateLTF(const MqlRates &rates[], int count)
                        ? IsPriceInDemandZone(limitPrice, g_htfDemandZones)
                        : IsPriceInSupplyZone(limitPrice, g_htfSupplyZones);
 
-      if(insideHtf && ArraySize(confirmed.isDemand ? g_htfDemandZones : g_htfSupplyZones) > 0)
+      if(insideHtf)
         {
-         // One-shot per LTF zone
-         if(confirmed.time != g_ltfZonePendingTime)
+         int htfZoneCount = confirmed.isDemand
+                            ? ArraySize(g_htfDemandZones)
+                            : ArraySize(g_htfSupplyZones);
+         if(htfZoneCount > 0)
            {
-            PrintFormat("AjipSnD: LTF %s zone CONFIRMED — placing %s LIMIT at %.5f",
-                        confirmed.isDemand ? "DEMAND" : "SUPPLY",
-                        dir == 1 ? "BUY" : "SELL", limitPrice);
-
-            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
+            // One-shot per LTF zone
+            if(confirmed.time != g_ltfZonePendingTime)
               {
-               PlacePendingOrder(dir, limitPrice, confirmed.time);
-               g_ltfZonePendingTime = confirmed.time;
+               PrintFormat("AjipSnD: LTF %s zone CONFIRMED — placing %s LIMIT at %.5f",
+                           confirmed.isDemand ? "DEMAND" : "SUPPLY",
+                           dir == 1 ? "BUY" : "SELL", limitPrice);
+
+               if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
+                 {
+                  PlacePendingOrder(dir, limitPrice, confirmed.time);
+                  g_ltfZonePendingTime = confirmed.time;
+                 }
               }
            }
         }
