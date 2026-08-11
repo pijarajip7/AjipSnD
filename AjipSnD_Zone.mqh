@@ -164,7 +164,8 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
      {
       if(newZone.low < zones[i].low)
         {
-         // New zone is LOWER → old zone deactivated
+         // New zone is LOWER → old zone deactivated, cancel its pending
+         CancelPendingForZone(true, zones[i].time);
          ArrayRemove(zones, i, 1);
         }
      }
@@ -188,6 +189,8 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
      {
       if(newZone.high > zones[i].high)
         {
+         // New zone is HIGHER → old zone deactivated, cancel its pending
+         CancelPendingForZone(false, zones[i].time);
          ArrayRemove(zones, i, 1);
         }
      }

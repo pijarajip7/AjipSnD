@@ -158,6 +158,9 @@ void OnTick()
    // 1. Update MFE/MAE
    UpdateMfeMae();
 
+   // 1b. Check pending orders — remove if outside HTF zone, detect fills
+   CheckPendingOrders();
+
    // 2. Partial close check (skip during news blackout — profit-taking blocked)
    if(!InNewsBlackout())
       CheckPartialClose();

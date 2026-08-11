@@ -41,6 +41,15 @@ struct EntryTracker
    bool     partialClosed;  // true once one-time partial close fired
   };
 
+// Pending order tracking (BUY LIMIT / SELL LIMIT)
+struct PendingOrder
+  {
+   ulong    ticket;
+   int      dir;       // 1=BUY LIMIT, -1=SELL LIMIT
+   double   price;     // limit price
+   datetime zoneTime;  // LTF zone time that triggered this order
+  };
+
 //==================================================================
 // GLOBALS
 //==================================================================
@@ -99,7 +108,10 @@ const int      HEARTBEAT_INTERVAL_SECONDS = 30;
 datetime       g_lastHeartbeatTime = 0;
 
 //---- Symbol info cache ----
-datetime       g_ltfZoneEntryFiredTime = 0;  // last LTF zone time that triggered entry
+datetime       g_ltfZonePendingTime  = 0;  // last LTF zone time that placed a pending order
+
+//---- Pending orders ----
+PendingOrder   g_pendingOrders[];
 
 //==================================================================
 // HELPER FUNCTIONS

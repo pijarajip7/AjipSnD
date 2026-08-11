@@ -111,9 +111,6 @@ bool EntryGateBlocked(int dir)
    return(false);
   }
 
-//---- Check if LTF zone is inside any active HTF zone and entry ----
-void CheckLTFZoneEntry(const MqlRates &bar);  // forward
-
 //==== Zone gap gate: entry invalid if nearest opposite zone too close ====
 bool ZoneGapBlocked(const SnDZone &zone)
   {
@@ -123,128 +120,41 @@ bool ZoneGapBlocked(const SnDZone &zone)
 
    if(zone.isDemand)
      {
-      // BUY entry (demand zone): find nearest supply ABOVE
-      // Check: supply.low - demand.high > minGap
       double nearestSupplyLow = 0;
       int n = ArraySize(g_htfSupplyZones);
       for(int i = 0; i < n; i++)
         {
-         // Supply above demand: supply.low must be > demand.high
          if(g_htfSupplyZones[i].low <= zone.high) continue;
          if(nearestSupplyLow == 0 || g_htfSupplyZones[i].low < nearestSupplyLow)
             nearestSupplyLow = g_htfSupplyZones[i].low;
         }
-
       if(nearestSupplyLow > 0 && (nearestSupplyLow - zone.high) < minGap)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: BUY entry blocked — zone gap %.1f pts < min %d pts (supplyLow=%.5f demandHigh=%.5f)",
-                        (nearestSupplyLow - zone.high) / g_point, InpMinZoneGapPoints,
-                        nearestSupplyLow, zone.high);
+            PrintFormat("AjipSnD: BUY entry blocked — zone gap %.1f pts < min %d pts",
+                        (nearestSupplyLow - zone.high) / g_point, InpMinZoneGapPoints);
          return(true);
         }
      }
    else
      {
-      // SELL entry (supply zone): find nearest demand BELOW
-      // Check: supply.low - demand.high > minGap
       double nearestDemandHigh = 0;
       int n = ArraySize(g_htfDemandZones);
       for(int i = 0; i < n; i++)
         {
-         // Demand below supply: demand.high must be < supply.low
          if(g_htfDemandZones[i].high >= zone.low) continue;
          if(nearestDemandHigh == 0 || g_htfDemandZones[i].high > nearestDemandHigh)
             nearestDemandHigh = g_htfDemandZones[i].high;
         }
-
       if(nearestDemandHigh > 0 && (zone.low - nearestDemandHigh) < minGap)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: SELL entry blocked — zone gap %.1f pts < min %d pts (supplyLow=%.5f demandHigh=%.5f)",
-                        (zone.low - nearestDemandHigh) / g_point, InpMinZoneGapPoints,
-                        zone.low, nearestDemandHigh);
+            PrintFormat("AjipSnD: SELL entry blocked — zone gap %.1f pts < min %d pts",
+                        (zone.low - nearestDemandHigh) / g_point, InpMinZoneGapPoints);
          return(true);
         }
      }
-
    return(false);
-  }
-
-//---- Common entry gate — all conditions that block new positions ----
-void CheckLTFZoneEntry(const MqlRates &bar)
-  {
-   // Must have active HTF zones
-   int htfDemandCount = ArraySize(g_htfDemandZones);
-   int htfSupplyCount = ArraySize(g_htfSupplyZones);
-
-   if(htfDemandCount == 0 && htfSupplyCount == 0)
-      return;
-
-   // Check LTF demand zone confirmed → potential BUY
-   SnDZone ltfConfirmed;
-   ZeroMemory(ltfConfirmed);
-
-   // Process the current bar for LTF zone detection
-   // (UpdateLTFZone in Core.mqh already ran ProcessZoneBar and updates g_ltfTrend/candidate)
-   // Here we just check if there's a fresh zone to trade
-
-   // For BUY: LTF demand zone confirmed + price inside HTF demand zone
-   if(g_ltfTrend == TREND_UP && htfDemandCount > 0 &&
-      g_ltfCandidate.time != 0)  // There was an active candidate before flip
-     {
-      // The close price of this bar is the entry
-      double entryPrice = bar.close;
-
-      // Check if close is inside any HTF demand zone
-      if(IsPriceInDemandZone(entryPrice, g_htfDemandZones))
-        {
-         // One-shot per LTF zone
-         bool isNewZone = (ArraySize(g_ltfDemandZones) > 0 &&
-                          g_ltfDemandZones[ArraySize(g_ltfDemandZones) - 1].time != g_ltfZoneEntryFiredTime);
-
-         if(g_ltfZoneEntryFiredTime == 0 || isNewZone)
-           {
-            if(!EntryGateBlocked(1))  // 1 = BUY
-              {
-               ulong ticket = OpenTrade(true, entryPrice);
-               if(ticket != 0)
-                 {
-                  AddEntry(ticket, 1, entryPrice);
-                  if(ArraySize(g_ltfDemandZones) > 0)
-                     g_ltfZoneEntryFiredTime = g_ltfDemandZones[ArraySize(g_ltfDemandZones) - 1].time;
-                 }
-              }
-           }
-        }
-     }
-
-   // For SELL: LTF supply zone confirmed + price inside HTF supply zone
-   if(g_ltfTrend == TREND_DOWN && htfSupplyCount > 0 &&
-      g_ltfCandidate.time != 0)
-     {
-      double entryPrice = bar.close;
-
-      if(IsPriceInSupplyZone(entryPrice, g_htfSupplyZones))
-        {
-         bool isNewZone = (ArraySize(g_ltfSupplyZones) > 0 &&
-                          g_ltfSupplyZones[ArraySize(g_ltfSupplyZones) - 1].time != g_ltfZoneEntryFiredTime);
-
-         if(g_ltfZoneEntryFiredTime == 0 || isNewZone)
-           {
-            if(!EntryGateBlocked(-1))  // -1 = SELL
-              {
-               ulong ticket = OpenTrade(false, entryPrice);
-               if(ticket != 0)
-                 {
-                  AddEntry(ticket, -1, entryPrice);
-                  if(ArraySize(g_ltfSupplyZones) > 0)
-                     g_ltfZoneEntryFiredTime = g_ltfSupplyZones[ArraySize(g_ltfSupplyZones) - 1].time;
-                 }
-              }
-           }
-        }
-     }
   }
 
 #endif // AJIPSND_ENTRY_MQH

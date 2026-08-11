@@ -133,49 +133,43 @@ void UpdateLTF(const MqlRates &rates[], int count)
          PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
                      confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
-
-      // Check entry: is the close price inside an active HTF zone?
-      double entryPrice = bar.close;
-
-      // Demand zone confirmed → potential BUY (close inside HTF demand zone)
-      if(confirmed.isDemand && ArraySize(g_htfDemandZones) > 0)
-        {
-         if(IsPriceInDemandZone(entryPrice, g_htfDemandZones))
-           {
-            PrintFormat("AjipSnD: LTF demand zone CONFIRMED + price=%.5f inside HTF demand zone → BUY signal",
-                        entryPrice);
-            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(1))
-              {
-               ulong ticket = OpenTrade(true, entryPrice);
-               if(ticket != 0)
-                 {
-                  AddEntry(ticket, 1, entryPrice);
-                  g_ltfZoneEntryFiredTime = confirmed.time;
-                 }
-              }
-           }
-        }
-
-      // Supply zone confirmed → potential SELL (close inside HTF supply zone)
-      if(!confirmed.isDemand && ArraySize(g_htfSupplyZones) > 0)
-        {
-         if(IsPriceInSupplyZone(entryPrice, g_htfSupplyZones))
-           {
-            PrintFormat("AjipSnD: LTF supply zone CONFIRMED + price=%.5f inside HTF supply zone → SELL signal",
-                        entryPrice);
-            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(-1))
-              {
-               ulong ticket = OpenTrade(false, entryPrice);
-               if(ticket != 0)
-                 {
-                  AddEntry(ticket, -1, entryPrice);
-                  g_ltfZoneEntryFiredTime = confirmed.time;
-                 }
-              }
-           }
-        }
-
       // Candidate is now seeded by ProcessZoneBar (confirming bar becomes first opposite candidate)
+
+      //---- Place pending order ----
+      double limitPrice;
+      int    dir;
+      if(confirmed.isDemand)
+        {
+         limitPrice = confirmed.high;  // BUY LIMIT at demand.high
+         dir = 1;
+        }
+      else
+        {
+         limitPrice = confirmed.low;   // SELL LIMIT at supply.low
+         dir = -1;
+        }
+
+      // Check if limit price is inside HTF zone
+      bool insideHtf = confirmed.isDemand
+                       ? IsPriceInDemandZone(limitPrice, g_htfDemandZones)
+                       : IsPriceInSupplyZone(limitPrice, g_htfSupplyZones);
+
+      if(insideHtf && ArraySize(confirmed.isDemand ? g_htfDemandZones : g_htfSupplyZones) > 0)
+        {
+         // One-shot per LTF zone
+         if(confirmed.time != g_ltfZonePendingTime)
+           {
+            PrintFormat("AjipSnD: LTF %s zone CONFIRMED — placing %s LIMIT at %.5f",
+                        confirmed.isDemand ? "DEMAND" : "SUPPLY",
+                        dir == 1 ? "BUY" : "SELL", limitPrice);
+
+            if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
+              {
+               PlacePendingOrder(dir, limitPrice, confirmed.time);
+               g_ltfZonePendingTime = confirmed.time;
+              }
+           }
+        }
      }
   }
 

@@ -86,6 +86,145 @@ double GetFloatingPnL()
   }
 
 //==================================================================
+// PENDING ORDER — BUY LIMIT / SELL LIMIT
+//==================================================================
+
+//---- Place pending order at limit price ----
+ulong PlacePendingOrder(int dir, double price, datetime zoneTime)
+  {
+   double lot = NormalizeDouble(InpFixedLot, 8);
+   if(lot < g_volMin || lot > g_volMax)
+     {
+      PrintFormat("AjipSnD: Pending %s skip — lot %.2f outside broker range",
+                  dir == 1 ? "BUY LIMIT" : "SELL LIMIT", lot);
+      return(0);
+     }
+
+   string comment = StringFormat("AjipSnD %s", dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
+   bool ok;
+   if(dir == 1)
+      ok = trade.BuyLimit(lot, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
+   else
+      ok = trade.SellLimit(lot, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
+
+   if(!ok)
+     {
+      PrintFormat("AjipSnD: Pending order failed. retcode=%d", trade.ResultRetcode());
+      return(0);
+     }
+
+   ulong ticket = trade.ResultOrder();
+   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f",
+               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price);
+
+   // Track pending order
+   int sz = ArraySize(g_pendingOrders);
+   ArrayResize(g_pendingOrders, sz + 1);
+   g_pendingOrders[sz].ticket   = ticket;
+   g_pendingOrders[sz].dir      = dir;
+   g_pendingOrders[sz].price    = price;
+   g_pendingOrders[sz].zoneTime = zoneTime;
+
+   return(ticket);
+  }
+
+//---- Cancel pending order for a specific zone (called when zone replaced) ----
+void CancelPendingForZone(bool isDemand, datetime zoneTime)
+  {
+   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
+     {
+      int expectedDir = isDemand ? 1 : -1;
+      if(g_pendingOrders[i].dir != expectedDir) continue;
+      if(g_pendingOrders[i].zoneTime != zoneTime) continue;
+
+      if(OrderSelect(g_pendingOrders[i].ticket))
+        {
+         if(trade.OrderDelete(g_pendingOrders[i].ticket))
+            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u (zone replaced)", g_pendingOrders[i].ticket);
+        }
+      ArrayRemove(g_pendingOrders, i, 1);
+     }
+  }
+
+//---- Per-tick check: remove pendings outside HTF zone, detect fills ----
+void CheckPendingOrders()
+  {
+   int n = ArraySize(g_pendingOrders);
+   if(n == 0) return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   for(int i = n - 1; i >= 0; i--)
+     {
+      // Check if order still exists
+      if(!OrderSelect(g_pendingOrders[i].ticket))
+        {
+         // Order gone — likely filled. Check for new position.
+         bool found = false;
+         int npos = PositionsTotal();
+         for(int j = 0; j < npos; j++)
+           {
+            ulong t = PositionGetTicket(j);
+            if(t == 0) continue;
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+            // Check if this position is already tracked
+            bool tracked = false;
+            for(int k = 0; k < ArraySize(g_entries); k++)
+              {
+               if(g_entries[k].ticket == t) { tracked = true; break; }
+              }
+            if(tracked) continue;
+
+            // New position — add to tracking
+            int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+            // Match direction with pending
+            if(dir != g_pendingOrders[i].dir) continue;
+
+            AddEntry(t, dir, PositionGetDouble(POSITION_PRICE_OPEN));
+            PrintFormat("AjipSnD: Pending filled! Ticket=%I64u dir=%s fill=%.5f",
+                        t, dir == 1 ? "BUY" : "SELL",
+                        PositionGetDouble(POSITION_PRICE_OPEN));
+            found = true;
+            break;
+           }
+
+         if(!found && InpEnableLog)
+            PrintFormat("AjipSnD: Pending ticket=%I64u gone (cancelled/expired)", g_pendingOrders[i].ticket);
+
+         ArrayRemove(g_pendingOrders, i, 1);
+         continue;
+        }
+
+      // Order still pending — check if price is inside HTF zone
+      double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      bool insideHtf = false;
+
+      if(g_pendingOrders[i].dir == 1)  // BUY LIMIT → need demand zone
+        {
+         insideHtf = IsPriceInDemandZone(orderPrice, g_htfDemandZones);
+        }
+      else  // SELL LIMIT → need supply zone
+        {
+         insideHtf = IsPriceInSupplyZone(orderPrice, g_htfSupplyZones);
+        }
+
+      if(!insideHtf)
+        {
+         if(trade.OrderDelete(g_pendingOrders[i].ticket))
+           {
+            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u dir=%s — outside HTF zone (orderPrice=%.5f)",
+                        g_pendingOrders[i].ticket,
+                        g_pendingOrders[i].dir == 1 ? "BUY LIMIT" : "SELL LIMIT", orderPrice);
+           }
+         ArrayRemove(g_pendingOrders, i, 1);
+        }
+     }
+  }
+
+//==================================================================
 // GET PERIOD PNL — sum realized profit in [from, to]
 //==================================================================
 double GetPeriodPnL(datetime from, datetime to)
