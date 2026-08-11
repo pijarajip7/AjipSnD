@@ -86,14 +86,21 @@ void InitHTFStructure()
             AddSupplyZone(g_htfSupplyZones, confirmed);
          // Candidate seeded by ProcessZoneBar
         }
+
+      // Invalidate zones broken by this bar (same logic as live HTF update)
+      InvalidateHtfZones(rates[i]);
      }
 
    PrintFormat("AjipSnD: HTF zones after init — demands=%d supplies=%d",
                ArraySize(g_htfDemandZones), ArraySize(g_htfSupplyZones));
 
+   // Clean up zones already broken by later bars during replay
+   ArraySetAsSeries(rates, true);
+   if(count >= 2)
+      InvalidateHtfZones(rates[1]);  // last closed HTF bar
+
    if(count > 0)
      {
-      ArraySetAsSeries(rates, true);
       g_htfLastBarTime = rates[1].time;
      }
   }
