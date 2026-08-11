@@ -357,6 +357,11 @@ void CheckInvalidPositions()
       if(MathAbs(curTp - entryPrice) < g_point * 0.5)
          continue;
 
+      // Skip positions opened this bar — give them at least 1 full bar to settle
+      // Prevents false triggers from bid/ask spread at zone boundaries on fresh entries
+      if(g_entries[i].entryTime >= g_ltfLastBarTime)
+         continue;
+
       double currentPrice = (g_entries[i].dir == 1) ? bid : ask;
       bool invalid = false;
       string reason = "";
