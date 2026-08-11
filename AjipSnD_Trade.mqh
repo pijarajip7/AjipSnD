@@ -841,43 +841,31 @@ void RecalculateAggregateSL()
      {
       if(dir == 0) continue;
 
-      // Sum total volume for this direction (skip already-protected positions)
+      // Sum total volume + weighted entry sum (same filter)
       double totalVolume = 0.0;
+      double weightedSum = 0.0;
       for(int i = 0; i < n; i++)
         {
          if(g_entries[i].dir != dir) continue;
          if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
          // Skip if already has a protective SL (partialClosed + SL != 0 = safe)
          if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
-         totalVolume += PositionGetDouble(POSITION_VOLUME);
+         double vol = PositionGetDouble(POSITION_VOLUME);
+         totalVolume += vol;
+         weightedSum += PositionGetDouble(POSITION_PRICE_OPEN) * vol;
         }
 
       if(totalVolume <= 0.0) continue;
+      double avgEntry = weightedSum / totalVolume;
 
       // Same slPoints for ALL positions in this direction
       double slPoints = budget / (totalVolume * valuePerPointPerLot);
       if(slPoints <= 0.0) continue;
 
-      // Find anchor entry — most conservative (closest to SL)
-      // BUY: lowest entry = nearest to SL below
-      // SELL: highest entry = nearest to SL above
-      double anchorEntry = 0;
-      for(int i = 0; i < n; i++)
-        {
-         if(g_entries[i].dir != dir) continue;
-         if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-         double ep = PositionGetDouble(POSITION_PRICE_OPEN);
-         if(dir == 1)
-            anchorEntry = (anchorEntry == 0) ? ep : MathMin(anchorEntry, ep);
-         else
-            anchorEntry = (anchorEntry == 0) ? ep : MathMax(anchorEntry, ep);
-        }
-      if(anchorEntry <= 0) continue;
-
       // Same SL price for ALL positions in this direction
       double commonSl = (dir == 1)
-                        ? NormalizeDouble(anchorEntry - slPoints * g_point, g_digits)
-                        : NormalizeDouble(anchorEntry + slPoints * g_point, g_digits);
+                        ? NormalizeDouble(avgEntry - slPoints * g_point, g_digits)
+                        : NormalizeDouble(avgEntry + slPoints * g_point, g_digits);
 
       for(int i = 0; i < n; i++)
         {
