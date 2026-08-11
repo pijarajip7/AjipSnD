@@ -282,57 +282,27 @@ bool InvalidateHtfZones(const MqlRates &bar)
   {
    bool anyChange = false;
 
-   // Check demand zones
+   // Check demand zones — invalid if close breaks BELOW support
    for(int i = ArraySize(g_htfDemandZones) - 1; i >= 0; i--)
      {
-      bool invalid = false;
-      if(g_htfDemandZones[i].sweepHigh > 0)
-        {
-         // Sweep existed (fake breakout above): zone invalid if close breaks ABOVE sweep level
-         if(bar.close > g_htfDemandZones[i].sweepHigh)
-            invalid = true;
-        }
-      else
-        {
-         // No sweep: demand zone invalid if close breaks BELOW support
-         if(bar.close < g_htfDemandZones[i].low)
-            invalid = true;
-        }
-
-      if(invalid)
+      if(bar.close < g_htfDemandZones[i].low)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] sweepHigh=%.5f bar.close=%.5f",
-                        g_htfDemandZones[i].low, g_htfDemandZones[i].high,
-                        g_htfDemandZones[i].sweepHigh, bar.close);
+            PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] bar.close=%.5f",
+                        g_htfDemandZones[i].low, g_htfDemandZones[i].high, bar.close);
          ArrayRemove(g_htfDemandZones, i, 1);
          anyChange = true;
         }
      }
 
-   // Check supply zones
+   // Check supply zones — invalid if close breaks ABOVE resistance
    for(int i = ArraySize(g_htfSupplyZones) - 1; i >= 0; i--)
      {
-      bool invalid = false;
-      if(g_htfSupplyZones[i].sweepLow > 0)
-        {
-         // Sweep existed (fake breakout below): zone invalid if close breaks BELOW sweep level
-         if(bar.close < g_htfSupplyZones[i].sweepLow)
-            invalid = true;
-        }
-      else
-        {
-         // No sweep: supply zone invalid if close breaks ABOVE resistance
-         if(bar.close > g_htfSupplyZones[i].high)
-            invalid = true;
-        }
-
-      if(invalid)
+      if(bar.close > g_htfSupplyZones[i].high)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] sweepLow=%.5f bar.close=%.5f",
-                        g_htfSupplyZones[i].low, g_htfSupplyZones[i].high,
-                        g_htfSupplyZones[i].sweepLow, bar.close);
+            PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] bar.close=%.5f",
+                        g_htfSupplyZones[i].low, g_htfSupplyZones[i].high, bar.close);
          ArrayRemove(g_htfSupplyZones, i, 1);
          anyChange = true;
         }
