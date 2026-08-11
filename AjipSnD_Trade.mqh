@@ -329,6 +329,84 @@ void CheckPartialClose()
   }
 
 //==================================================================
+// INVALID POSITION HANDLER — positions that are floating loss AND
+// either outside active HTF zone or loss > InpPosMaxLoss.
+// Sets TP to entry price (breakeven) — gives chance to exit at BE.
+// One-shot: skips if TP already at entry price.
+//==================================================================
+void CheckInvalidPositions()
+  {
+   if(InpPosMaxLoss <= 0) return;  // feature disabled
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+     {
+      if(!PositionSelectByTicket(g_entries[i].ticket))
+         continue;
+
+      double posProfit   = PositionGetDouble(POSITION_PROFIT);
+      double entryPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double curTp       = PositionGetDouble(POSITION_TP);
+
+      // Only handle floating LOSS positions
+      if(posProfit >= 0) continue;
+
+      // One-shot: TP already at entry → already handled
+      if(MathAbs(curTp - entryPrice) < g_point * 0.5)
+         continue;
+
+      double currentPrice = (g_entries[i].dir == 1) ? bid : ask;
+      bool invalid = false;
+      string reason = "";
+
+      // Condition 1: outside active HTF zone
+      if(g_entries[i].dir == 1)  // BUY → must be inside demand zone
+        {
+         if(!IsPriceInDemandZone(currentPrice, g_htfDemandZones))
+           {
+            invalid = true;
+            reason = "outside HTF demand zone";
+           }
+        }
+      else  // SELL → must be inside supply zone
+        {
+         if(!IsPriceInSupplyZone(currentPrice, g_htfSupplyZones))
+           {
+            invalid = true;
+            reason = "outside HTF supply zone";
+           }
+        }
+
+      // Condition 2: floating loss exceeds threshold
+      if(!invalid && MathAbs(posProfit) > InpPosMaxLoss)
+        {
+         invalid = true;
+         reason = StringFormat("floating loss %.2f > InpPosMaxLoss %.2f",
+                               MathAbs(posProfit), InpPosMaxLoss);
+        }
+
+      if(!invalid) continue;
+
+      // Set TP to entry price (BE), keep existing SL
+      double curSl = PositionGetDouble(POSITION_SL);
+
+      if(!trade.PositionModify(g_entries[i].ticket, curSl, entryPrice))
+        {
+         PrintFormat("AjipSnD: Invalid pos BE-TP modify FAILED ticket=%I64u retcode=%d reason=%s",
+                     g_entries[i].ticket, trade.ResultRetcode(), reason);
+         continue;
+        }
+
+      PrintFormat("AjipSnD: Invalid pos ticket=%I64u dir=%s TP→BE (%.5f) reason=%s loss=%.2f",
+                  g_entries[i].ticket,
+                  g_entries[i].dir == 1 ? "BUY" : "SELL",
+                  entryPrice, reason, MathAbs(posProfit));
+     }
+  }
+
+//==================================================================
 // CLOSE ALL POSITIONS (this symbol + magic)
 //==================================================================
 void CloseAllPositions()

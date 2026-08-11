@@ -31,6 +31,7 @@ input group "Entry & Trade Sizing"
 input double InpFixedLot     = 0.02;   // Fixed lot size per entry
 input double InpMaxTotalLots = 0.0;    // Max open volume per direction (0=disabled)
 input bool   InpAllowHedging = true;   // Allow BUY & SELL open simultaneously (false=block opposite)
+input double InpPosMaxLoss   = 0.0;    // Max floating loss per position ($) before setting TP to BE (0=disabled)
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
 
@@ -156,6 +157,9 @@ void OnTick()
 
    // 1. Update MFE/MAE
    UpdateMfeMae();
+
+   // 1b. Check invalid positions — floating loss + outside zone or > InpPosMaxLoss → set TP to BE
+   CheckInvalidPositions();
 
    // 2. Partial close check (skip during news blackout — profit-taking blocked)
    if(!InNewsBlackout())
