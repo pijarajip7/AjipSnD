@@ -158,9 +158,6 @@ void OnTick()
    // 1. Update MFE/MAE
    UpdateMfeMae();
 
-   // 1b. Check invalid positions — floating loss + outside zone or > InpPosMaxLoss → set TP to BE
-   CheckInvalidPositions();
-
    // 2. Partial close check (skip during news blackout — profit-taking blocked)
    if(!InNewsBlackout())
       CheckPartialClose();
@@ -222,6 +219,10 @@ void OnTick()
 
    // Process the closed bar
    UpdateLTF(ltfRates, ltfCopied);
+
+   // Invalid position check — floating loss outside zone or > InpPosMaxLoss → TP→BE
+   // Runs per LTF bar close, not per-tick, to avoid spread/flicker false triggers
+   CheckInvalidPositions();
 
    // Entry cleanup (positions closed outside close-all)
    CheckEntryCleanup();
