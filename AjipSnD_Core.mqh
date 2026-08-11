@@ -192,7 +192,7 @@ void UpdateHTF(const MqlRates &rates[], int count)
    g_htfLastBarTime = bar.time;
 
    // Invalidate zones that have been broken by price action
-   bool anyChange = InvalidateHtfZones(bar);
+   InvalidateHtfZones(bar);
 
    SnDZone confirmed;
    ZeroMemory(confirmed);
@@ -211,12 +211,10 @@ void UpdateHTF(const MqlRates &rates[], int count)
                      confirmed.low, confirmed.high);
         }
       // Candidate seeded by ProcessZoneBar
-      anyChange = true;
      }
 
-   // Redraw if anything changed (zone invalidated or new zone confirmed)
-   if(anyChange)
-      DrawAllHtfZones();
+   // Redraw every HTF bar close — zone rectangles extend to current time
+   DrawAllHtfZones();
   }
 
 //---- Short timeframe name (strip PERIOD_ prefix) ----
