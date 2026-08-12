@@ -146,6 +146,22 @@ void CancelPendingForZone(bool isDemand, datetime zoneTime)
      }
   }
 
+//---- Cancel ALL pending orders (called on close-all, except batch) ----
+void CancelAllPendingOrders()
+  {
+   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
+     {
+      if(OrderSelect(g_pendingOrders[i].ticket))
+        {
+         if(trade.OrderDelete(g_pendingOrders[i].ticket))
+            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u dir=%s (close-all)",
+                        g_pendingOrders[i].ticket,
+                        g_pendingOrders[i].dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
+        }
+      ArrayRemove(g_pendingOrders, i, 1);
+     }
+  }
+
 //---- Per-tick check: remove pendings outside HTF zone, detect fills ----
 void CheckPendingOrders()
   {
@@ -721,6 +737,10 @@ void CloseAllAndFlushBatch(string reason)
       else if(net < 0)  g_batchLosses++;
       else              g_batchBreakEven++;
      }
+
+   // ---- Cancel pending orders (except batch close-all — trading continues) ----
+   if(StringFind(reason, "BATCH_") != 0)
+      CancelAllPendingOrders();
 
    // ---- Close all positions ----
    CloseAllPositions();

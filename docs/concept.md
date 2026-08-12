@@ -122,6 +122,7 @@ SELL LIMIT:
 - Placed → per-tick CheckPendingOrders: hapus jika price keluar HTF zone
 - Filled → detect via OrderSelect fail + new position → AddEntry to g_entries[]
 - Cancelled → zone replaced (AddDemandZone/AddSupplyZone call CancelPendingForZone)
+- Cancelled → close-all daily/final/session: CancelAllPendingOrders; batch close-all TIDAK cancel pending
 
 ---
 

@@ -174,6 +174,7 @@ LTF update (new closed bar gate):
 | Place | LTF zone confirmed + limit price inside HTF zone + gates pass |
 | Cancel | Zone replaced (new better zone of same type → CancelPendingForZone) |
 | Cancel | Pending price drifts outside HTF zone (CheckPendingOrders per-tick) |
+| Cancel | Close-all (daily/final/session → CancelAllPendingOrders; batch TIDAK cancel) |
 | Fill | OrderSelect fails → scan for new position → AddEntry to g_entries[] |
 
 Struct: `PendingOrder { ticket, dir, price, zoneTime }` in `g_pendingOrders[]` array.
