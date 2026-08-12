@@ -477,8 +477,8 @@ void CheckTrailingStop()
   {
    if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
 
-   double bid = Bid;
-   double ask = Ask;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double trailDist  = InpTrailDistancePoints * g_point;
    double trailStart = InpTrailStartPoints * g_point;
 
