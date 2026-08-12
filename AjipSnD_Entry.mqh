@@ -33,7 +33,11 @@ void RebuildTrackedPositions()
       g_entries[idx].entryTime     = entryTime;
       g_entries[idx].mfe           = PositionGetDouble(POSITION_PROFIT);
       g_entries[idx].mae           = PositionGetDouble(POSITION_PROFIT);
-      g_entries[idx].partialClosed = false;
+
+      // Detect if already partial-closed: SL at entry price (BE) means it was
+      double curSl = PositionGetDouble(POSITION_SL);
+      g_entries[idx].partialClosed = (MathAbs(curSl - entryPrice) < g_point * 0.5
+                                      && curSl != 0.0);
 
       if(firstTime == 0 || entryTime < firstTime) firstTime = entryTime;
       if(entryTime > lastTime) lastTime = entryTime;
