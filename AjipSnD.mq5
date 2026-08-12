@@ -22,7 +22,7 @@ input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M1;   // LTF — entry timefra
 input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_M15;  // HTF — retest zones timeframe
 input int              InpCandlesInit    = 50;          // Lookback candles for initial trend
 input int              InpMaxZones       = 2;           // Max active zones per type (demand/supply)
-input int              InpMinZoneGapPoints = 0;        // Min distance (points) between supply.low and demand.high for entry (0=disabled)
+input int              InpMinZoneGapPoints = 0;        // Min gap (points) to NEWEST opposite HTF zone for entry (0=disabled)
 input bool             InpHtfMaFilter    = false;       // Enable HTF MA direction filter (BUY only above MA, SELL only below)
 input int              InpHtfMaPeriod    = 50;          // HTF MA period (only if InpHtfMaFilter=true)
 input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method

@@ -114,7 +114,7 @@ bool EntryGateBlocked(int dir)
    return(false);
   }
 
-//==== Zone gap gate: entry invalid if nearest opposite zone too close ====
+//==== Zone gap gate: entry invalid if NEWEST opposite zone too close ====
 bool ZoneGapBlocked(const SnDZone &zone)
   {
    if(InpMinZoneGapPoints <= 0) return(false);
@@ -123,37 +123,69 @@ bool ZoneGapBlocked(const SnDZone &zone)
 
    if(zone.isDemand)
      {
-      double nearestSupplyLow = 0;
+      double   newestSupplyLow  = 0;
+      datetime newestSupplyTime = 0;
       int n = ArraySize(g_htfSupplyZones);
       for(int i = 0; i < n; i++)
         {
-         if(g_htfSupplyZones[i].low <= zone.high) continue;
-         if(nearestSupplyLow == 0 || g_htfSupplyZones[i].low < nearestSupplyLow)
-            nearestSupplyLow = g_htfSupplyZones[i].low;
+         if(g_htfSupplyZones[i].time > newestSupplyTime)
+           {
+            newestSupplyTime = g_htfSupplyZones[i].time;
+            newestSupplyLow  = g_htfSupplyZones[i].low;
+           }
         }
-      if(nearestSupplyLow > 0 && (nearestSupplyLow - zone.high) < minGap)
+      // No supply zone → nothing to check → allow
+      if(newestSupplyLow == 0)
+         return(false);
+
+      // supply.low < demand.high (supply below/overlap demand) → block entry
+      if(newestSupplyLow < zone.high)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: BUY entry blocked — zone gap %.1f pts < min %d pts",
-                        (nearestSupplyLow - zone.high) / g_point, InpMinZoneGapPoints);
+            PrintFormat("AjipSnD: BUY entry blocked — newest supply.low %.5f < demand.high %.5f",
+                        newestSupplyLow, zone.high);
+         return(true);
+        }
+
+      if((newestSupplyLow - zone.high) < minGap)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: BUY entry blocked — gap to newest supply %.1f pts < min %d pts",
+                        (newestSupplyLow - zone.high) / g_point, InpMinZoneGapPoints);
          return(true);
         }
      }
    else
      {
-      double nearestDemandHigh = 0;
+      double   newestDemandHigh = 0;
+      datetime newestDemandTime = 0;
       int n = ArraySize(g_htfDemandZones);
       for(int i = 0; i < n; i++)
         {
-         if(g_htfDemandZones[i].high >= zone.low) continue;
-         if(nearestDemandHigh == 0 || g_htfDemandZones[i].high > nearestDemandHigh)
-            nearestDemandHigh = g_htfDemandZones[i].high;
+         if(g_htfDemandZones[i].time > newestDemandTime)
+           {
+            newestDemandTime = g_htfDemandZones[i].time;
+            newestDemandHigh = g_htfDemandZones[i].high;
+           }
         }
-      if(nearestDemandHigh > 0 && (zone.low - nearestDemandHigh) < minGap)
+      // No demand zone → nothing to check → allow
+      if(newestDemandHigh == 0)
+         return(false);
+
+      // supply.low < demand.high (demand above/overlap supply) → block entry
+      if(newestDemandHigh > zone.low)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: SELL entry blocked — zone gap %.1f pts < min %d pts",
-                        (zone.low - nearestDemandHigh) / g_point, InpMinZoneGapPoints);
+            PrintFormat("AjipSnD: SELL entry blocked — newest demand.high %.5f > supply.low %.5f",
+                        newestDemandHigh, zone.low);
+         return(true);
+        }
+
+      if((zone.low - newestDemandHigh) < minGap)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: SELL entry blocked — gap to newest demand %.1f pts < min %d pts",
+                        (zone.low - newestDemandHigh) / g_point, InpMinZoneGapPoints);
          return(true);
         }
      }

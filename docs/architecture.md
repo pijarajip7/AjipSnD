@@ -10,7 +10,7 @@ InpTimeframe       = PERIOD_M1    — LTF, entry timeframe
 InpHtfTimeframe    = PERIOD_M15   — HTF, retest zones timeframe
 InpCandlesInit     = 50           — Lookback bars for initial trend
 InpMaxZones        = 2            — Max active zones per type
-InpMinZoneGapPoints = 0           — Min gap to opposite zone for entry (0=disabled)
+InpMinZoneGapPoints = 0           — Min gap to NEWEST opposite HTF zone for entry (0=disabled)
 InpHtfMaFilter     = false        — HTF MA direction filter
 ```
 
