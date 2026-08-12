@@ -53,6 +53,10 @@ input group "Partial Close"
 input double InpPartialCloseProfit  = 10.0;  // Floating profit ($) to trigger one-time partial close (0=disabled)
 input double InpPartialClosePercent = 50.0;  // % of volume to close at partial-close threshold
 
+input group "Trailing Stop"
+input int    InpTrailStartPoints    = 0;     // Min profit (points) from entry before trail activates (0=disabled)
+input int    InpTrailDistancePoints = 0;     // SL distance (points) behind current price
+
 input group "Session Filter"
 input double InpTimezoneOffset = 0.0;       // UTC offset in hours for daily/weekly boundaries (e.g., -4=EST, +2=CEST)
 input string InpSessionStart   = "02:00";   // Session start HH:MM (local time) — start==end = no filter
@@ -160,6 +164,9 @@ void OnTick()
 
    // 1b. Check pending orders — remove if outside HTF zone, detect fills
    CheckPendingOrders();
+
+   // 1c. Trailing stop for partial-closed (BE) positions
+   CheckTrailingStop();
 
    // 2. Partial close check (skip during news blackout — profit-taking blocked)
    if(!InNewsBlackout())

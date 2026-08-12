@@ -468,6 +468,58 @@ void CheckPartialClose()
   }
 
 //==================================================================
+// TRAILING STOP — for positions that have been partial-closed to BE.
+// Only trails SL forward (never backward). Fixed-step: SL stays
+// InpTrailDistancePoints behind current price once profit exceeds
+// InpTrailStartPoints from entry.
+//==================================================================
+void CheckTrailingStop()
+  {
+   if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double trailDist  = InpTrailDistancePoints * g_point;
+   double trailStart = InpTrailStartPoints * g_point;
+
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+     {
+      if(!g_entries[i].partialClosed) continue;  // only trail BE positions
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+
+      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double curSl      = PositionGetDouble(POSITION_SL);
+      double curTp      = PositionGetDouble(POSITION_TP);
+
+      if(g_entries[i].dir == 1)  // BUY
+        {
+         double profitPoints = bid - entryPrice;
+         if(profitPoints < trailStart) continue;  // not enough profit yet
+
+         double newSl = NormalizeDouble(bid - trailDist, g_digits);
+         // Only move SL forward (never below current SL or below entry)
+         if(newSl <= curSl + g_point * 0.5) continue;
+
+         if(trade.PositionModify(g_entries[i].ticket, newSl, curTp))
+            PrintFormat("AjipSnD: Trail SL BUY ticket=%I64u SL=%.5f (bid=%.5f dist=%d pts)",
+                        g_entries[i].ticket, newSl, bid, InpTrailDistancePoints);
+        }
+      else  // SELL
+        {
+         double profitPoints = entryPrice - ask;
+         if(profitPoints < trailStart) continue;
+
+         double newSl = NormalizeDouble(ask + trailDist, g_digits);
+         if(newSl >= curSl - g_point * 0.5) continue;
+
+         if(trade.PositionModify(g_entries[i].ticket, newSl, curTp))
+            PrintFormat("AjipSnD: Trail SL SELL ticket=%I64u SL=%.5f (ask=%.5f dist=%d pts)",
+                        g_entries[i].ticket, newSl, ask, InpTrailDistancePoints);
+        }
+     }
+  }
+
+//==================================================================
 // INVALID POSITION HANDLER — positions that are floating loss AND
 // either outside active HTF zone or loss > InpPosMaxLoss.
 // Sets TP to entry price (breakeven) — gives chance to exit at BE.
