@@ -152,8 +152,10 @@ void CheckPendingOrders()
    int n = ArraySize(g_pendingOrders);
    if(n == 0) return;
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   MqlTick tick;
+   SymbolInfoTick(_Symbol, tick);
+   double bid = tick.bid;
+   double ask = tick.ask;
 
    for(int i = n - 1; i >= 0; i--)
      {
@@ -477,8 +479,10 @@ void CheckTrailingStop()
   {
    if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   MqlTick tick;
+   SymbolInfoTick(_Symbol, tick);
+   double bid = tick.bid;
+   double ask = tick.ask;
    double trailDist  = InpTrailDistancePoints * g_point;
    double trailStart = InpTrailStartPoints * g_point;
 
