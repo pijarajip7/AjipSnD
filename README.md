@@ -1,12 +1,10 @@
 # AjipSnD — Supply & Demand Zone Trading EA
 
 > Multi-timeframe Supply & Demand strategy for MT5 EA. HTF identifies
-> retest zones (Supply/Demand), LTF confirms entry when a zone forms
-> inside an active HTF zone. Fixed lot, no SL/TP at entry — exit via
-> one-time partial close (then SL to breakeven) + batch target/max loss
-> (close batch only) + daily target/max loss (close all, block entries
-> for rest of day) + final target/max loss (stop permanently) +
-> profit-lock outside session + aggregate SL safety net.
+> retest zones (Supply/Demand), LTF triggers pending orders (BUY/SELL LIMIT)
+> at zone boundaries. Fixed lot, no SL/TP at entry — exit via partial close
+> (then SL to BE + trailing stop) + zone invalidation handler + batch/daily/
+> final close-all + aggregate SL safety net.
 
 ---
 
@@ -14,8 +12,25 @@
 
 | Dokumen | Isi |
 |---------|-----|
-| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, entry rules, zone management |
-| [docs/architecture.md](docs/architecture.md) | Input parameters, Init/OnTick flow, position management |
+| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, entry rules, zone invalidation, exit plan |
+| [docs/architecture.md](docs/architecture.md) | Input parameters, Init/OnTick flow, position management, CSV, panel |
+
+---
+
+## Fitur Utama
+
+| Fitur | Deskripsi |
+|-------|-----------|
+| SnD Detection | Raw candle bear/bull + body-break confirm, lowest-low / highest-high candidate |
+| Zone Invalidation | HTF zones dihapus saat price break boundary (sweep-aware) |
+| Pending Orders | BUY LIMIT at demand.high, SELL LIMIT at supply.low |
+| Invalid Position Handler | TP→BE jika entry zone invalidated atau floating loss > InpPosMaxLoss |
+| Trailing Stop | Fixed-step untuk posisi partial-closed, SL hanya maju |
+| Aggregate SL | Weighted average entry, satu level SL untuk semua posisi se-arah |
+| Partial Close | Once per position → SL ke BE, trailing stop aktif |
+| Batch/Daily/Final | Close-all dengan target/max loss, daily + final block entry |
+| Session + News | Session filter, news blackout (profit exits gated, max loss never) |
+| Panel | 22-line dashboard, HTF zone rectangles |
 
 ---
 
@@ -33,29 +48,16 @@
 
 ---
 
-## Known Limitations & TODO
-
-### Belum diimplementasi
-- [ ] Compile & backtest in MetaEditor
-- [ ] Forward test live
-
-### Potential improvements
-- [ ] Minimum zone size filter (minimum pip distance between high/low)
-- [ ] Alert/notification saat zone confirmed
-- [ ] Allow user to choose between bar-close and per-tick entry
-
----
-
 ## Files
 
 | File | Deskripsi |
 |------|-----------|
 | `AjipSnD.mq5` | EA MQL5 main file — inputs, OnInit, OnTick, OnDeinit |
-| `AjipSnD_Globals.mqh` | Global state, structs, enums, helper functions |
-| `AjipSnD_Zone.mqh` | SnD zone detection algorithm + zone management (activate/deactivate) |
-| `AjipSnD_Entry.mqh` | Entry gate + entry logic (LTF zone + HTF zone filter) |
-| `AjipSnD_Trade.mqh` | OpenTrade (fixed lot), partial close, close-all (batch/daily/final/session), aggregate SL, batch CSV, PnL helpers |
-| `AjipSnD_News.mqh` | News blackout filter (high-impact calendar events) |
-| `AjipSnD_Core.mqh` | InitStructure (LTF + HTF), UpdateLTF, UpdateHTF, DrawPanel |
+| `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, PendingOrder), globals, helpers |
+| `AjipSnD_Zone.mqh` | SnD detection + zone management + invalidation + drawing |
+| `AjipSnD_Entry.mqh` | Entry gate (EntryGateBlocked, ZoneGapBlocked), RebuildTrackedPositions |
+| `AjipSnD_Trade.mqh` | Pending orders, trailing stop, invalid pos handler, partial close, close-all, aggregate SL, batch CSV, heartbeat, handoff |
+| `AjipSnD_News.mqh` | News blackout filter |
+| `AjipSnD_Core.mqh` | InitStructure, UpdateLTF/HTF, DrawPanel |
 | `docs/concept.md` | Konsep & strategi |
-| `docs/architecture.md` | EA architecture |
+| `docs/architecture.md` | EA architecture & parameters |

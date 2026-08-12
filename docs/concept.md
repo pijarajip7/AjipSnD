@@ -9,9 +9,13 @@ berbeda dari AjipSMC dan AjipIDM.
 | Detection | 2-stage pullback + simple structure | Raw candle (bear/bull) + body-break confirm |
 | Zones | idm zone (single level) | Supply/Demand zone (high-low range) |
 | HTF role | Equilibrium filter (discount/premium) | Retest zones |
-| Entry trigger | idm touch + no body break | LTF zone confirmed + price inside HTF zone |
+| Entry trigger | idm touch + no body break | BUY LIMIT at LTF demand.high / SELL LIMIT at LTF supply.low |
 | Lot | Fixed lot | Fixed lot |
 | SL/TP | Tidak ada di entry | Tidak ada di entry |
+| Zone invalidation | Tidak ada | HTF zones dihapus saat price break |
+| Pending orders | Tidak ada | BUY/SELL LIMIT |
+| Invalid positions | Tidak ada | TP→BE jika zone entry invalidated atau loss > InpPosMaxLoss |
+| Trailing stop | Tidak ada | Untuk posisi partial-closed |
 
 ---
 
@@ -29,10 +33,17 @@ Scan bar-by-bar:
   if candidate exists AND bar.low < candidate.low:
       candidate.low = bar.low    // high tetap
 
-  if candidate exists AND bar.close > candidate.high:
+  // Track both sweep directions
+  Sweep above: if bar.high > candidate.high AND bar.close <= candidate.high:
+      candidate.sweepHigh = max(sweepHigh, bar.high)
+  Sweep below: if bar.low < candidate.low AND bar.close >= candidate.low:
+      candidate.sweepLow = min(sweepLow, bar.low)
+
+  if candidate exists AND bar.close > (sweepHigh if swept else candidate.high):
       → DEMAND ZONE CONFIRMED
       zone = [candidate.high, candidate.low]
       trend flips → UPTREND
+      Seeding: if confirming bar is BULL → seed as first supply candidate
 ```
 
 ### Supply Zone (uptrend → mencari reversal bearish) — Mirror
@@ -43,12 +54,19 @@ Scan bar-by-bar:
         candidate = {high: bar.high, low: bar.low}
 
   if candidate exists AND bar.high > candidate.high:
-      candidate.high = bar.high    // low tetap
+      candidate.high = bar.high
 
-  if candidate exists AND bar.close < candidate.low:
+  // Track both sweep directions
+  Sweep below: if bar.low < candidate.low AND bar.close >= candidate.low:
+      candidate.sweepLow = min(sweepLow, bar.low)
+  Sweep above: if bar.high > candidate.high AND bar.close <= candidate.high:
+      candidate.sweepHigh = max(sweepHigh, bar.high)
+
+  if candidate exists AND bar.close < (sweepLow if swept else candidate.low):
       → SUPPLY ZONE CONFIRMED
       zone = [candidate.high, candidate.low]
       trend flips → DOWNTREND
+      Seeding: if confirming bar is BEAR → seed as first demand candidate
 ```
 
 ---
@@ -58,32 +76,52 @@ Scan bar-by-bar:
 ```
 InpMaxZones (default 2) — max zona aktif per tipe
 
-Demand zone baru:  if zone.low < any_existing_demand.low → old deactivated
-Supply zone baru:  if zone.high > any_existing_supply.high → old deactivated
+Demand zone baru:  if zone.low < any_existing_demand.low → old deactivated + cancel pending
+Supply zone baru:  if zone.high > any_existing_supply.high → old deactivated + cancel pending
 
 Max exceeded → oldest (index 0) deactivated
 ```
 
 ---
 
+## HTF Zone Invalidation
+
+HTF zones yang di-break price action dihapus dari array + chart.
+Per HTF bar close, BEFORE ProcessZoneBar (existing zones checked first).
+
+Sweep hanya memperlebar batas zone, **tidak** mengubah trigger invalidasi:
+- Demand: bar.close < zone.low → INVALID. Jika swept → bar.close < zone.sweepLow → INVALID
+- Supply: bar.close > zone.high → INVALID. Jika swept → bar.close > zone.sweepHigh → INVALID
+
+Sweep tracking: ProcessZoneBar track **kedua arah** sweep untuk **kedua jenis** zone.
+Demand invalidation pakai sweepLow (support side), supply pakai sweepHigh (resistance side).
+
+InvalidateHtfZones juga dipanggil di InitHTFStructure replay loop — zone yang
+break di tengah replay langsung dihapus.
+
+---
+
 ## Entry Rules
 
-```
-Entry = LTF zone confirmed + price inside active HTF zone at bar close
+Entry pakai **pending order** (BUY LIMIT / SELL LIMIT), bukan market order.
 
-BUY:
+```
+BUY LIMIT:
   - LTF demand zone confirmed
-  - bar.close inside ANY active HTF demand zone
-  → BUY @ bar.close, lot = InpFixedLot, SL=0, TP=0
+  - BUY LIMIT at confirmed.high inside ANY active HTF demand zone
+  - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(BUY, demand.high)
+  - One-shot per LTF zone (g_ltfZonePendingTime)
 
-SELL:
+SELL LIMIT:
   - LTF supply zone confirmed
-  - bar.close inside ANY active HTF supply zone
-  → SELL @ bar.close, lot = InpFixedLot, SL=0, TP=0
+  - SELL LIMIT at confirmed.low inside ANY active HTF supply zone
+  - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(SELL, supply.low)
 ```
 
-**One-shot per zone:** Setiap zona LTF hanya bisa memicu SATU entry.
-Setelah entry, zona tersebut tidak bisa memicu entry lagi.
+**Pending order lifecycle:**
+- Placed → per-tick CheckPendingOrders: hapus jika price keluar HTF zone
+- Filled → detect via OrderSelect fail + new position → AddEntry to g_entries[]
+- Cancelled → zone replaced (AddDemandZone/AddSupplyZone call CancelPendingForZone)
 
 ---
 
@@ -92,41 +130,63 @@ Setelah entry, zona tersebut tidak bisa memicu entry lagi.
 ```
 HTF (InpHtfTimeframe, e.g., M15):
   └─ Detect Supply & Demand zones from bar data
-  └─ Active zones = retest areas for LTF entries
+  └─ Active zones = retest areas for pending placement + validation
   └─ After zone confirmed → trend flips → detect next zone
   └─ Zone management: max InpMaxZones, lower demand / higher supply invalidates older
+  └─ Zone invalidation: close breaks zone boundary → remove from array + chart
+  └─ DrawAllHtfZones on every HTF bar close
 
 LTF (InpTimeframe, e.g., M1):
   └─ Detect Supply & Demand zones independently
-  └─ When LTF zone confirmed + close inside HTF active zone → ENTRY
-  └─ Multi-position allowed: one entry per LTF zone confirmation
+  └─ When LTF zone confirmed + limit price inside HTF zone → PLACE PENDING
+  └─ Per LTF bar close: CheckInvalidPositions, CheckEntryCleanup
 ```
 
 ---
 
 ## Exit Plan
 
-Sama dengan AjipIDM — tidak ada TP/SL di entry. Exit via:
-
-| Mekanisme | Trigger | Efek |
+| Mekanisme | Trigger | Gate |
 |-----------|---------|------|
-| Partial close | POSITION_PROFIT >= InpPartialCloseProfit | Tutup InpPartialClosePercent%, SL sisa → BE |
-| Batch target/loss | g_batchRealizedPnl + floating | Tutup batch INI saja, entry baru tetap boleh |
-| Daily target/loss | GetDailyPnL() + floating | Tutup semua, blokir entry baru SISA HARI |
-| Final target/loss | Balance - baseline + floating | Tutup semua, stop PERMANEN |
-| Session close | Di luar jam + PnL > 0 | Tutup semua, profit-lock |
-| Aggregate SL | Budget dari max loss terkecil | SL broker-side per posisi tanpa SL |
+| Trailing stop | profit ≥ InpTrailStartPoints (points from entry) | Hanya partialClosed positions, per-tick |
+| Pending cancel | Price outside HTF zone | Per-tick |
+| Invalid pos → TP BE | Entry zone invalidated OR loss > InpPosMaxLoss | Per LTF bar, one-shot, grace 1 bar |
+| Partial close | POSITION_PROFIT ≥ InpPartialCloseProfit | Gated by news |
+| Batch target/loss | g_batchRealizedPnl + floating | Close batch, target gated |
+| Daily target/loss | GetDailyPnL() + floating | Close all + block rest of day |
+| Final target/loss | Balance - baseline + floating | Close all + stop permanent |
+| Session close | Di luar jam + PnL > 0 | Gated by news |
+| Aggregate SL | Budget / totalVol / valuePerPoint → same SL price | Every tick |
 
-Daily/weekly/month boundary mengikuti `InpTimezoneOffset` (default UTC).
-Session times (`InpSessionStart`/`InpSessionEnd`) juga mengikuti timezone offset.
+---
+
+## Trailing Stop
+
+Fixed-step, hanya untuk posisi yang sudah partial-closed ke BE:
+- `InpTrailStartPoints` — minimum profit dari entry sebelum trail aktif
+- `InpTrailDistancePoints` — jarak SL di belakang current price
+- SL hanya maju (BUY naik, SELL turun), tidak pernah mundur
+- Per-tick via `CheckTrailingStop()`
+
+---
+
+## Invalid Position Handler
+
+Posisi yang entry premise-nya sudah tidak valid:
+1. Entry zone invalidated → `entryPrice` tidak ada di zona aktif manapun
+2. Floating loss > `InpPosMaxLoss`
+
+Action: TP diset ke entry price (BE). Tidak close — kasih kesempatan exit BE.
+One-shot: skip jika TP sudah di entry. Grace period: skip posisi di bar yang sama.
+Per LTF bar close (bukan per-tick), setelah UpdateLTF.
 
 ---
 
 ## Fixed Lot, No SL/TP
 
-- `OpenTrade` selalu buka posisi dengan lot = `InpFixedLot`, SL=0, TP=0
+- Entry via pending LIMIT dengan lot = `InpFixedLot`, SL=0, TP=0
 - Tidak ada TP order sama sekali
-- SL nol di entry, tapi bisa muncul dari: breakeven after partial close, atau aggregate SL
+- SL bisa muncul dari: breakeven after partial close, trailing stop, atau aggregate SL
 
 ---
 
@@ -137,28 +197,7 @@ Session times (`InpSessionStart`/`InpSessionEnd`) juga mengikuti timezone offset
 2. Find highest high dan lowest low
 3. Initial trend: highIdx < lowIdx → DOWNTREND, else → UPTREND
 4. Replay bars forward → build initial zones
-5. No entry on historical bars
-```
-
----
-
-## Full Cycle Example
-
-```
-HTF (M15) — downtrend, mencari demand zone:
-  Bar 1: bear → candidate {H=2000, L=1990}
-  Bar 2: bear → replace candidate {H=1998, L=1985}
-  Bar 3: low=1980 < 1985 → candidate.low=1980, high tetap 1998
-  Bar 4: close=2005 > 1998 → HTF DEMAND ZONE CONFIRMED [2005, 1980]
-  → Trend HTF flips ke UPTREND → sekarang cari supply zone
-
-LTF (M1) — uptrend, mencari supply zone (untuk entry SELL):
-  Beberapa bar kemudian...
-  Bar N: bull → candidate {H=1995, L=1988}
-  Bar N+1: close=1986 < 1988 → LTF SUPPLY ZONE CONFIRMED [1995, 1986]
-  → close=1986 inside HTF demand zone [2005, 1980]? YES!
-  → SELL @ 1986, lot=InpFixedLot
-
-Exit: posisi jalan sampai partial close ($10 profit → SL ke BE),
-      atau batch/daily/final target loss tercapai.
+5. InvalidateHtfZones called on every bar during replay
+6. No entry/pending on historical bars
+7. RebuildTrackedPositions: detect partialClosed via volume < InpFixedLot
 ```

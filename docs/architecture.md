@@ -1,67 +1,74 @@
 # AjipSnD — EA Architecture
 
-Files: `AjipSnD.mq5` (main) + 4 `.mqh` includes.
+Files: `AjipSnD.mq5` (main) + 6 `.mqh` includes.
 
 ## Input Parameters
-
-Dikelompokkan dengan `input group`.
 
 **Strategy**
 ```
 InpTimeframe       = PERIOD_M1    — LTF, entry timeframe
 InpHtfTimeframe    = PERIOD_M15   — HTF, retest zones timeframe
 InpCandlesInit     = 50           — Lookback bars for initial trend
-InpMaxZones        = 2            — Max active zones per type (demand/supply)
+InpMaxZones        = 2            — Max active zones per type
+InpMinZoneGapPoints = 0           — Min gap to opposite zone for entry (0=disabled)
+InpHtfMaFilter     = false        — HTF MA direction filter
 ```
 
 **Entry & Trade Sizing**
 ```
-InpFixedLot     = 0.02   — Fixed lot per entry
+InpFixedLot     = 0.02   — Fixed lot per entry / pending
 InpMaxTotalLots = 0.0    — Max volume per direction (0=disabled)
 InpAllowHedging = true   — Allow BUY & SELL simultaneously
+InpPosMaxLoss   = 0.0    — Max floating loss before TP→BE (0=disabled)
 InpDeviation    = 10     — Slippage (points)
 InpMagicNumber  = 99002  — Magic number
 ```
 
 **Risk Management — Final** (permanen, lintas hari)
 ```
-InpFinalProfitTarget = 0.0  — Close all + stop entry PERMANENTLY (0=disabled)
-InpFinalMaxLoss      = 0.0  — Close all + stop entry PERMANENTLY (0=disabled)
-InpStartingBalance   = 0.0  — Baseline (0=auto-capture, persisted via GlobalVariable)
+InpFinalProfitTarget = 0.0  — Close all + stop entry PERMANENTLY
+InpFinalMaxLoss      = 0.0  — Close all + stop entry PERMANENTLY
+InpStartingBalance   = 0.0  — Baseline (0=auto-capture)
 ```
 
 **Risk Management — Daily**
 ```
-InpDailyMaxProfit = 60.0   — Close all + block entries rest of day (0=disabled)
-InpDailyMaxLoss   = 280.0  — Close all + block entries rest of day (0=disabled)
+InpDailyMaxProfit = 60.0   — Close all + block entries rest of day
+InpDailyMaxLoss   = 280.0  — Close all + block entries rest of day
 ```
 
 **Risk Management — Batch**
 ```
-InpBatchMaxProfit       = 20.0  — Close batch only, new entries still allowed (0=disabled)
-InpBatchMaxLoss         = 0.0   — Close batch only, new entries still allowed (0=disabled)
-InpBatchCooldownMinutes = 11    — Cooldown after batch flat (0=disabled)
+InpBatchMaxProfit       = 20.0  — Close batch only
+InpBatchMaxLoss         = 0.0   — Close batch only
+InpBatchCooldownMinutes = 11    — Cooldown after batch flat
 ```
 
 **Partial Close**
 ```
-InpPartialCloseProfit  = 10.0  — Floating profit ($) to trigger one-time partial close (0=disabled)
-InpPartialClosePercent = 50.0  — % of volume to close at threshold
+InpPartialCloseProfit  = 10.0  — Floating profit threshold
+InpPartialClosePercent = 50.0  — % of volume to close
+```
+
+**Trailing Stop**
+```
+InpTrailStartPoints    = 0     — Min profit (points) from entry before trail
+InpTrailDistancePoints = 0     — SL distance (points) behind current price
 ```
 
 **Session Filter**
 ```
-InpTimezoneOffset = 0.0   — UTC offset in hours for daily/weekly/session boundaries (e.g., -4=EST, +2=CEST)
-InpSessionStart   = "02:00"  — Session start HH:MM local time (==end = disabled)
-InpSessionEnd     = "20:00"  — Session end — outside: no entries; PnL>0 → close all
+InpTimezoneOffset = 0.0   — UTC offset for daily/weekly/session boundaries
+InpSessionStart   = "02:00"  — Session start HH:MM local time
+InpSessionEnd     = "20:00"  — Session end
 ```
 
 **News Filter**
 ```
-InpNewsFilterEnabled = true   — Block entries + profit exits around high-impact news
+InpNewsFilterEnabled = true   — Block entries + profit exits around news
 InpNewsMinImportance = CALENDAR_IMPORTANCE_HIGH
-InpNewsMinutesBefore = 30     — Minutes before event to start blocking
-InpNewsMinutesAfter  = 30     — Minutes after event to keep blocking
+InpNewsMinutesBefore = 30
+InpNewsMinutesAfter  = 30
 ```
 
 **Chart Display**
@@ -75,21 +82,27 @@ InpPanelCorner = CORNER_LEFT_UPPER / InpPanelX = 20 / InpPanelY = 50
 InpEnableLog = true  — Toggle Print/PrintFormat output
 ```
 
+**Multi-Account Orchestrator**
+```
+InpHandoffEnabled = false
+InpHandoffFile    = "AjipSnD_Handoff.csv"
+InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"
+```
+
 ---
 
 ## Init
 
 ```
 1. Cache symbol info (digits, point, volume min/max/step)
-2. Parse session start/end → g_sessionFilterEnabled
-3. Set g_timezoneOffsetSeconds = InpTimezoneOffset * 3600
-4. CaptureStartingBalance — auto-capture or use InpStartingBalance
-5. InitLTFStructure:
-   - Fetch InpCandlesInit bars
-   - DetermineInitialTrend (highest/lowest chronological)
-   - Replay bars forward → build initial zones
-   - Set g_ltfLastBarTime
-6. InitHTFStructure — same as above for HTF
+2. Configure CTrade (SetDeviationInPoints, SetTypeFillingBySymbol, SetExpertMagicNumber)
+3. Parse session start/end → g_sessionFilterEnabled
+4. Set g_timezoneOffsetSeconds = InpTimezoneOffset * 3600
+5. CaptureStartingBalance
+6. RebuildTrackedPositions — detect partialClosed via volume < InpFixedLot
+7. InitLTFStructure — replay bars, build initial LTF zones
+8. InitHTFStructure — replay bars, build initial HTF zones, InvalidateHtfZones per bar
+9. Initial DrawAllHtfZones
 ```
 
 ---
@@ -98,25 +111,31 @@ InpEnableLog = true  — Toggle Print/PrintFormat output
 
 ```
 Per-tick (order matters):
+0. WriteHeartbeat (~30s throttle)
 1. UpdateMfeMae
-2. CheckPartialClose (one-time per position)
-3. CheckFinalCloseAll → return if max loss/target hit
-4. CheckBatchCloseAll
-5. CheckDailyCloseAll
-6. CheckSessionCloseAll
+1b. CheckPendingOrders — delete if outside HTF zone, detect fills → AddEntry
+1c. CheckTrailingStop — per-tick, partialClosed positions only
+2. CheckPartialClose (gated by news)
+3. CheckFinalTargetCloseAll (gated) → return if hit
+3b. CheckFinalMaxLossCloseAll (never gated) → return if hit
+4. CheckBatchTargetCloseAll (gated) / CheckBatchMaxLossCloseAll (never)
+5. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
+6. CheckSessionCloseAll (gated)
 7. RecalculateAggregateSL
 
 HTF update (separate new-bar gate):
   CopyRates 3 bars InpHtfTimeframe
-  if new closed bar → UpdateHTF()
+  if new closed bar:
+    InvalidateHtfZones(bar) — remove broken zones first
+    ProcessZoneBar(bar) — detect new zone
+    DrawAllHtfZones() — always, on every HTF bar close
 
-LTF update:
+LTF update (new closed bar gate):
   CopyRates 3 bars InpTimeframe
-  if SAME bar as g_ltfLastBarTime → return (new-bar gate)
-  UpdateLTF() — process closed bar for zone detection + entry check
-
-Post-bar:
-  CheckEntryCleanup — fold closed positions into batch accumulator
+  if SAME bar as g_ltfLastBarTime → return
+  UpdateLTF() — process closed bar + place pending if zone confirmed
+  CheckInvalidPositions() — per LTF bar close, not per-tick
+  CheckEntryCleanup() — fold closed positions into batch accumulator
   DrawPanel (if enabled)
 ```
 
@@ -126,15 +145,13 @@ Post-bar:
 
 ```
 1. bar = rates[1] (latest closed bar)
-2. Save trendBefore
-3. ProcessZoneBar(bar) → check if zone confirmed
-4. If zone CONFIRMED:
+2. ProcessZoneBar(bar) → check if zone confirmed
+3. If zone CONFIRMED:
    a. AddDemandZone / AddSupplyZone → manage active zones
-   b. Check entry condition:
-      - Demand confirmed: bar.close in HTF demand zone? → BUY
-      - Supply confirmed: bar.close in HTF supply zone? → SELL
-   c. EntryGateBlocked check → OpenTrade if allowed
-   d. Reset candidate for new trend
+   b. Compute limit price: BUY LIMIT at demand.high, SELL LIMIT at supply.low
+   c. Check if limit price is inside HTF zone
+   d. One-shot check (confirmed.time != g_ltfZonePendingTime)
+   e. ZoneGapBlocked + EntryGateBlocked → PlacePendingOrder
 ```
 
 ---
@@ -142,41 +159,94 @@ Post-bar:
 ## UpdateHTF (bar-close processing)
 
 ```
-Same as UpdateLTF but for HTF zones.
-On zone confirmed → redraw all zones on chart.
-No entry from HTF directly.
+1. bar = rates[1]
+2. InvalidateHtfZones(bar) — remove zones broken by this bar
+3. ProcessZoneBar(bar) → if zone confirmed → AddDemandZone/AddSupplyZone
+4. DrawAllHtfZones() — always, zone rectangles extend to TimeCurrent()
 ```
+
+---
+
+## Pending Orders
+
+| Action | Trigger |
+|--------|---------|
+| Place | LTF zone confirmed + limit price inside HTF zone + gates pass |
+| Cancel | Zone replaced (new better zone of same type → CancelPendingForZone) |
+| Cancel | Pending price drifts outside HTF zone (CheckPendingOrders per-tick) |
+| Fill | OrderSelect fails → scan for new position → AddEntry to g_entries[] |
+
+Struct: `PendingOrder { ticket, dir, price, zoneTime }` in `g_pendingOrders[]` array.
+One-shot: `g_ltfZonePendingTime` prevents duplicate pendings per LTF zone.
 
 ---
 
 ## Zone Drawing
 
 ```
-Demand zones:  blue (clrDodgerBlue), width=2 for HTF, width=1 for LTF
-Supply zones:  red (clrOrangeRed), width=2 for HTF, width=1 for LTF
-Zones drawn as OBJ_RECTANGLE from zone.time to TimeCurrent().
-Redraw on every HTF zone confirmation.
+HTF zones: OBJ_RECTANGLE, dotted, filled, background
+  Demand → clrDodgerBlue (width 2), Supply → clrOrangeRed (width 2)
+  Redrawn via DrawAllHtfZones() on EVERY HTF bar close
+  Zones extend from zone.time to TimeCurrent()
+
+LTF zones: data-only — no chart objects (arrows removed)
 ```
 
 ---
 
 ## Position Management
 
-- No SL/TP at entry — order always SL=0, TP=0
+- No SL/TP at entry — pending orders SL=0, TP=0
 - Lot size: fixed (InpFixedLot)
 - Multi-position: no position count limit
-- Volume cap: InpMaxTotalLots per direction (BUY and SELL capped independently)
+- Volume cap: InpMaxTotalLots per direction
 - Hedging: InpAllowHedging=false blocks entry while opposite side open
 
 ### Partial Close + Breakeven
 
-`CheckPartialClose` runs every tick:
+`CheckPartialClose` per-tick, gated by news:
 ```
 if POSITION_PROFIT >= InpPartialCloseProfit AND not yet partial-closed:
   1. Calculate closeVol = posVolume * InpPartialClosePercent / 100
   2. PositionClosePartial(ticket, closeVol)
   3. PositionModify(ticket, SL=entryPrice, TP=0) → BE
   4. Mark partialClosed = true
+```
+
+### Trailing Stop
+
+`CheckTrailingStop` per-tick, only for `partialClosed = true` positions:
+```
+BUY: if bid - entry >= trailStart → newSl = bid - trailDist, only move up
+SELL: if entry - ask >= trailStart → newSl = ask + trailDist, only move down
+```
+Uses CopyTicks for real-time bid/ask (fallback to SymbolInfoTick).
+
+### Invalid Position Handler
+
+`CheckInvalidPositions` per LTF bar close (after UpdateLTF):
+```
+for each position:
+  skip if PnL >= 0 (never touch profitable)
+  skip if TP already at entry (one-shot)
+  skip if entryTime >= g_ltfLastBarTime (grace 1 bar)
+
+  Condition 1: entryPrice not in any active zone → entry premise broken
+  Condition 2: |PnL| > InpPosMaxLoss → loss too high
+
+  If invalid: PositionModify(ticket, curSl, entryPrice)
+```
+
+### Aggregate SL
+
+Pooled budget per direction, same SL price for all positions:
+```
+1. Single loop: totalVolume + weightedSum (entryPrice × volume)
+2. avgEntry = weightedSum / totalVolume
+3. slPoints = budget / (totalVolume × valuePerPointPerLot)
+4. commonSl = avgEntry ± slPoints × g_point
+5. Apply same commonSl to all positions in direction
+6. Skip if already within 0.5 point
 ```
 
 ### Batch Close-All vs Daily Close-All
@@ -189,25 +259,15 @@ if POSITION_PROFIT >= InpPartialCloseProfit AND not yet partial-closed:
 
 ### Final Close-All
 
-Measured from g_startingBalance (persisted via GlobalVariable). Once hit,
-entry blocked permanently until input reset.
-
-### Aggregate SL
-
-Safety net: tightest active max loss budget applied to ALL positions in
-a direction as a single pool. Same slPoints distance from entry for every
-position in the direction (mirrors AjipIDM). Per-direction budget not
-halved — worst case one direction at a time. Preserves TP, skips modify
-if new SL is within 0.5 point of current.
+Measured from g_startingBalance. Once hit, entry blocked permanently.
 
 ---
 
 ## Batch CSV Report
 
-One row per batch flush. Columns: `CloseTime, CloseReason, PositionCount,
+One row per batch flush. Columns: CloseTime, CloseReason, PositionCount,
 Wins, Losses, BreakEven, TotalRealizedPnL, SumMFE, SumMAE, FirstEntryTime,
-LastEntryTime`. File: `AjipSnD_Batches_<symbol>_<login>.csv` in
-`Common\\Files`.
+LastEntryTime. File: `AjipSnD_Batches_<symbol>_<login>.csv` in `Common\\Files`.
 
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
 `BATCH_MAX_LOSS`, `BATCH_FLAT`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
@@ -216,45 +276,21 @@ Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
 
 ## Timezone Offset
 
-`InpTimezoneOffset` (default 0 = UTC) shifts all time-based calculations
-to prop firm local time:
-
-- **GetLocalDayStart()** — converts server time to local, truncates to
-  midnight, converts back to server time for `HistorySelect`.
-- **GetDailyPnL** / **GetWeekPnL** / **GetMonthPnL** — all use local
-  day/week/month boundaries.
-- **InSession** — session start/end compared against local hour:minute.
-
-Example: offset `-4` (EST) → daily reset at 04:00 UTC, session times
-interpreted in EST. Default `0` preserves old server-time behavior.
+`InpTimezoneOffset` (default 0 = UTC) shifts all time-based calculations:
+- GetLocalDayStart(), GetDailyPnL, GetWeekPnL, GetMonthPnL, InSession
+- Example: offset `-4` (EST) → daily reset at 04:00 UTC
 
 ---
 
 ## Info Panel
 
-22-line dashboard drawn via `OBJ_LABEL` on `OBJ_RECTANGLE_LABEL` background
-(185×364 px, Consolas 9):
-
+22-line dashboard via OBJ_LABEL on OBJ_RECTANGLE_LABEL background:
 ```
 AjipSnD v1.0
-LTF Trend: UP (M1)        ← trend + timeframe
-HTF Trend: DOWN (M15)
-Demands:   2              ← active zone counts
-Supplies:  1
-Entries:   3              ← open position count
-
-Today P/L: 123.45         ← green/red colored
-Week P/L:  456.78
-Month P/L: -12.34
-
-Final:     active         ← TARGET / MAX LOSS / active / disabled
-Daily:     TARGET
-Batch:     active
-
-Cooldown:  3m left        ← Xm left / clear / disabled
-Session:   OPEN           ← OPEN / CLOSED / all day
-News:      clear          ← BLOCKED / clear / disabled
-
-Open MFE:  12.34          ← summed across positions
-Open MAE:  -5.67
+LTF Trend: UP (M1)       HTF Trend: DOWN (M15)
+Demands: 2   Supplies: 1   Entries: 3
+Today P/L: 123.45   Week P/L: 456.78   Month P/L: -12.34
+Final: active   Daily: TARGET   Batch: active
+Cooldown: clear   Session: OPEN   News: clear
+Open MFE: 12.34   Open MAE: -5.67
 ```
