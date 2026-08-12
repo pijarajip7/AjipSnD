@@ -152,10 +152,18 @@ void CheckPendingOrders()
    int n = ArraySize(g_pendingOrders);
    if(n == 0) return;
 
-   MqlTick tick;
-   SymbolInfoTick(_Symbol, tick);
-   double bid = tick.bid;
-   double ask = tick.ask;
+   MqlTick ticks[1];
+   double bid = 0, ask = 0;
+   if(CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, 1) == 1)
+     {
+      bid = ticks[0].bid;
+      ask = ticks[0].ask;
+     }
+   else if(SymbolInfoTick(_Symbol, ticks[0]))
+     {
+      bid = ticks[0].bid;
+      ask = ticks[0].ask;
+     }
 
    for(int i = n - 1; i >= 0; i--)
      {
@@ -479,10 +487,18 @@ void CheckTrailingStop()
   {
    if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
 
-   MqlTick tick;
-   SymbolInfoTick(_Symbol, tick);
-   double bid = tick.bid;
-   double ask = tick.ask;
+   MqlTick ticks[1];
+   double bid = 0, ask = 0;
+   if(CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, 1) == 1)
+     {
+      bid = ticks[0].bid;
+      ask = ticks[0].ask;
+     }
+   else if(SymbolInfoTick(_Symbol, ticks[0]))
+     {
+      bid = ticks[0].bid;
+      ask = ticks[0].ask;
+     }
    double trailDist  = InpTrailDistancePoints * g_point;
    double trailStart = InpTrailStartPoints * g_point;
 
