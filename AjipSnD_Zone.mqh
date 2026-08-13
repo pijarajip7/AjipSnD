@@ -329,6 +329,18 @@ bool InvalidateHtfZones(const MqlRates &bar)
    return(anyChange);
   }
 
+//---- Draw a single HTF zone rectangle ----
+void DrawHtfZoneRect(string name, datetime time, double price1, double price2, color clr)
+  {
+   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, TimeCurrent(), price2))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_FILL, true);
+  }
+
 //---- Draw all active HTF zones as rectangles ----
 void DrawAllHtfZones()
   {
@@ -343,32 +355,27 @@ void DrawAllHtfZones()
          ObjectDelete(0, objName);
      }
 
+   // Validated demand zones (blue)
    for(int i = 0; i < ArraySize(g_htfDemandZones); i++)
-     {
-      string name = prefix + "Demand_" + IntegerToString(i);
-      if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0,
-                       g_htfDemandZones[i].time, g_htfDemandZones[i].high,
-                       TimeCurrent(), g_htfDemandZones[i].low))
-         continue;
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrDodgerBlue);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
-      ObjectSetInteger(0, name, OBJPROP_FILL, true);
-     }
+      DrawHtfZoneRect(prefix + "Demand_" + IntegerToString(i),
+                      g_htfDemandZones[i].time, g_htfDemandZones[i].high,
+                      g_htfDemandZones[i].low, clrDodgerBlue);
 
+   // Validated supply zones (red)
    for(int i = 0; i < ArraySize(g_htfSupplyZones); i++)
+      DrawHtfZoneRect(prefix + "Supply_" + IntegerToString(i),
+                      g_htfSupplyZones[i].time, g_htfSupplyZones[i].low,
+                      g_htfSupplyZones[i].high, clrOrangeRed);
+
+   // Pending (unvalidated) zone — distinct colour
+   if(InpRequireZoneValidation && g_htfAwaitingValidation)
      {
-      string name = prefix + "Supply_" + IntegerToString(i);
-      if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0,
-                       g_htfSupplyZones[i].time, g_htfSupplyZones[i].low,
-                       TimeCurrent(), g_htfSupplyZones[i].high))
-         continue;
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrOrangeRed);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
-      ObjectSetInteger(0, name, OBJPROP_FILL, true);
+      if(g_htfPendingZone.isDemand)
+         DrawHtfZoneRect(prefix + "Demand_PENDING", g_htfPendingZone.time,
+                         g_htfPendingZone.high, g_htfPendingZone.low, clrSteelBlue);
+      else
+         DrawHtfZoneRect(prefix + "Supply_PENDING", g_htfPendingZone.time,
+                         g_htfPendingZone.low, g_htfPendingZone.high, clrIndianRed);
      }
   }
 

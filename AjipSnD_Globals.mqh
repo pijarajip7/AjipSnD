@@ -24,6 +24,7 @@ struct SnDZone
    double   low;         // zone bottom
    double   sweepHigh;   // highest wick above high that failed to break (0=none)
    double   sweepLow;    // lowest wick below low that failed to break (0=none)
+   double   confirmLevel;// confirming bar's high (demand) / low (supply) — follow-through validation level
    datetime time;        // bar time when zone was confirmed
    bool     isDemand;    // true=demand, false=supply
    int      index;       // index in the active zones array (for reference)
@@ -70,6 +71,13 @@ SnDZone        g_ltfSupplyZones[];
 ENUM_TREND     g_ltfTrend          = TREND_DOWN;
 SnDZone        g_ltfCandidate;
 datetime       g_ltfLastBarTime    = 0;
+
+// ---- Zone follow-through validation ----
+// LTF: always-on. HTF: gated by InpRequireZoneValidation.
+SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
+bool           g_ltfAwaitingValidation = false;
+SnDZone        g_htfPendingZone;              // HTF zone awaiting follow-through validation
+bool           g_htfAwaitingValidation = false;
 
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];

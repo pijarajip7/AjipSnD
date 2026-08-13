@@ -101,19 +101,35 @@ break di tengah replay langsung dihapus.
 
 ---
 
+## Zone Validation (Follow-through)
+
+Setelah zona dikonfirmasi oleh bar X, zona harus tervalidasi oleh follow-through
+sebelum boleh dipakai. Konfirmasi + follow-through:
+
+- Demand: bar X close > candidate.high/sweepHigh → butuh bar berikutnya close > barX.high
+- Supply: bar X close < candidate.low/sweepLow → butuh bar berikutnya close < barX.low
+
+Aturan:
+- LTF: validasi SELALU aktif — entry ditunda sampai follow-through muncul.
+- HTF: gated oleh `InpRequireZoneValidation` (default true).
+- Validasi harus selesai SEBELUM zona opposite terbentuk; kalau opposite duluan → zona gagal (discard, no entry).
+- HTF zona belum tervalidasi digambar beda warna (pending), belum jadi retest area aktif.
+
+---
+
 ## Entry Rules
 
 Entry pakai **pending order** (BUY LIMIT / SELL LIMIT), bukan market order.
 
 ```
 BUY LIMIT:
-  - LTF demand zone confirmed
+  - LTF demand zone confirmed + VALIDATED (follow-through close > barX.high)
   - BUY LIMIT at confirmed.high inside ANY active HTF demand zone
   - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(BUY, demand.high)
   - One-shot per LTF zone (g_ltfZonePendingTime)
 
 SELL LIMIT:
-  - LTF supply zone confirmed
+  - LTF supply zone confirmed + VALIDATED (follow-through close < barX.low)
   - SELL LIMIT at confirmed.low inside ANY active HTF supply zone
   - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(SELL, supply.low)
 ```
@@ -132,6 +148,7 @@ SELL LIMIT:
 HTF (InpHtfTimeframe, e.g., M15):
   └─ Detect Supply & Demand zones from bar data
   └─ Active zones = retest areas for pending placement + validation
+  └─ Zone confirmed → (optional) follow-through validation → active (gated by InpRequireZoneValidation)
   └─ After zone confirmed → trend flips → detect next zone
   └─ Zone management: max InpMaxZones, lower demand / higher supply invalidates older
   └─ Zone invalidation: close breaks zone boundary → remove from array + chart
@@ -139,7 +156,7 @@ HTF (InpHtfTimeframe, e.g., M15):
 
 LTF (InpTimeframe, e.g., M1):
   └─ Detect Supply & Demand zones independently
-  └─ When LTF zone confirmed + limit price inside HTF zone → PLACE PENDING
+  └─ When LTF zone confirmed + VALIDATED + limit price inside HTF zone → PLACE PENDING
   └─ Per LTF bar close: CheckInvalidPositions, CheckEntryCleanup
 ```
 

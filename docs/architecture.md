@@ -11,6 +11,7 @@ InpHtfTimeframe    = PERIOD_M15   — HTF, retest zones timeframe
 InpCandlesInit     = 50           — Lookback bars for initial trend
 InpMaxZones        = 2            — Max active zones per type
 InpMinZoneGapPoints = 0           — Min gap to NEWEST opposite HTF zone for entry (0=disabled)
+InpRequireZoneValidation = true   — Require HTF zone follow-through before active (LTF always on)
 InpHtfMaFilter     = false        — HTF MA direction filter
 ```
 
@@ -145,13 +146,15 @@ LTF update (new closed bar gate):
 
 ```
 1. bar = rates[1] (latest closed bar)
-2. ProcessZoneBar(bar) → check if zone confirmed
-3. If zone CONFIRMED:
-   a. AddDemandZone / AddSupplyZone → manage active zones
-   b. Compute limit price: BUY LIMIT at demand.high, SELL LIMIT at supply.low
-   c. Check if limit price is inside HTF zone
-   d. One-shot check (confirmed.time != g_ltfZonePendingTime)
-   e. ZoneGapBlocked + EntryGateBlocked → PlacePendingOrder
+2. Follow-through validation (ALWAYS-ON):
+   - awaiting: demand → bar.close > pending.confirmLevel? supply → bar.close < pending.confirmLevel?
+   - passed → PlaceEntryForZone (inside HTF + ZoneGapBlocked + EntryGateBlocked → PlacePendingOrder)
+3. ProcessZoneBar(bar) → check if zone confirmed
+4. If zone CONFIRMED:
+   a. Opposite formed first → pending zone fails (discarded, no entry)
+   b. confirmLevel = bar.high (demand) / bar.low (supply)
+   c. AddDemandZone / AddSupplyZone (data-only)
+   d. Hold for follow-through validation (g_ltfPendingZone + g_ltfAwaitingValidation)
 ```
 
 ---
@@ -160,9 +163,13 @@ LTF update (new closed bar gate):
 
 ```
 1. bar = rates[1]
-2. InvalidateHtfZones(bar) — remove zones broken by this bar
-3. ProcessZoneBar(bar) → if zone confirmed → AddDemandZone/AddSupplyZone
-4. DrawAllHtfZones() — always, zone rectangles extend to TimeCurrent()
+2. InvalidateHtfZones(bar) — remove validated zones broken by this bar
+3. Follow-through validation (gated by InpRequireZoneValidation):
+   - awaiting + bar.close beyond confirmLevel → promote pending to active (AddDemandZone/AddSupplyZone)
+4. ProcessZoneBar(bar) → if zone confirmed:
+   - InpRequireZoneValidation=true: opposite formed first → pending fails; hold new zone for validation
+   - InpRequireZoneValidation=false: AddDemandZone/AddSupplyZone immediately
+5. DrawAllHtfZones() — always; pending zone drawn in distinct colour
 ```
 
 ---
@@ -171,7 +178,7 @@ LTF update (new closed bar gate):
 
 | Action | Trigger |
 |--------|---------|
-| Place | LTF zone confirmed + limit price inside HTF zone + gates pass |
+| Place | LTF zone VALIDATED (follow-through) + limit price inside HTF zone + gates pass |
 | Cancel | Zone replaced (new better zone of same type → CancelPendingForZone) |
 | Cancel | Pending price drifts outside HTF zone (CheckPendingOrders per-tick) |
 | Cancel | Close-all (daily/final/session → CancelAllPendingOrders; batch TIDAK cancel) |
@@ -186,7 +193,8 @@ One-shot: `g_ltfZonePendingTime` prevents duplicate pendings per LTF zone.
 
 ```
 HTF zones: OBJ_RECTANGLE, dotted, filled, background
-  Demand → clrDodgerBlue (width 2), Supply → clrOrangeRed (width 2)
+  Validated demand → clrDodgerBlue, Supply → clrOrangeRed (width 2)
+  Pending (unvalidated) → clrSteelBlue (demand) / clrIndianRed (supply)
   Redrawn via DrawAllHtfZones() on EVERY HTF bar close
   Zones extend from zone.time to TimeCurrent()
 

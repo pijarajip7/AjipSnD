@@ -105,6 +105,47 @@ void InitHTFStructure()
      }
   }
 
+//---- Place entry for a validated LTF zone (follow-through passed) ----
+void PlaceEntryForZone(const SnDZone &confirmed)
+  {
+   double limitPrice;
+   int    dir;
+   if(confirmed.isDemand)
+     {
+      limitPrice = confirmed.high;  // BUY LIMIT at demand.high
+      dir = 1;
+     }
+   else
+     {
+      limitPrice = confirmed.low;   // SELL LIMIT at supply.low
+      dir = -1;
+     }
+
+   // Limit price must sit inside an active (validated) HTF zone
+   bool insideHtf = confirmed.isDemand
+                    ? IsPriceInDemandZone(limitPrice, g_htfDemandZones)
+                    : IsPriceInSupplyZone(limitPrice, g_htfSupplyZones);
+   if(!insideHtf) return;
+
+   int htfZoneCount = confirmed.isDemand
+                      ? ArraySize(g_htfDemandZones)
+                      : ArraySize(g_htfSupplyZones);
+   if(htfZoneCount == 0) return;
+
+   // One-shot per LTF zone
+   if(confirmed.time == g_ltfZonePendingTime) return;
+
+   PrintFormat("AjipSnD: LTF %s zone VALIDATED — placing %s LIMIT at %.5f",
+               confirmed.isDemand ? "DEMAND" : "SUPPLY",
+               dir == 1 ? "BUY" : "SELL", limitPrice);
+
+   if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
+     {
+      PlacePendingOrder(dir, limitPrice, confirmed.time);
+      g_ltfZonePendingTime = confirmed.time;
+     }
+  }
+
 //---- Update LTF on new closed bar ----
 void UpdateLTF(const MqlRates &rates[], int count)
   {
@@ -118,71 +159,56 @@ void UpdateLTF(const MqlRates &rates[], int count)
 
    g_ltfLastBarTime = bar.time;
 
-   // Check if this was the bar that confirmed a zone
-   ENUM_TREND trendBefore = g_ltfTrend;
-   SnDZone oldCandidate = g_ltfCandidate;
+   //---- Follow-through validation (LTF always-on) ----
+   if(g_ltfAwaitingValidation)
+     {
+      bool passed = g_ltfPendingZone.isDemand
+                    ? (bar.close > g_ltfPendingZone.confirmLevel)
+                    : (bar.close < g_ltfPendingZone.confirmLevel);
+      if(passed)
+        {
+         PlaceEntryForZone(g_ltfPendingZone);
+         g_ltfAwaitingValidation = false;
+        }
+     }
 
+   //---- Process this bar for zone confirmation ----
    SnDZone confirmed;
    ZeroMemory(confirmed);
    bool zoneConfirmed = ProcessZoneBar(bar, g_ltfTrend, g_ltfCandidate, confirmed);
 
    if(zoneConfirmed)
      {
+      // Opposite zone formed before validation → pending zone fails (no entry)
+      if(g_ltfAwaitingValidation && confirmed.isDemand != g_ltfPendingZone.isDemand)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: LTF %s zone validation FAILED — opposite zone formed first",
+                        g_ltfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
+         g_ltfAwaitingValidation = false;
+        }
+
+      confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
+
+      // Add to zone array (data-only — keeps count/logging consistent)
       if(confirmed.isDemand)
         {
          AddDemandZone(g_ltfDemandZones, confirmed);
-         PrintFormat("AjipSnD: LTF DEMAND zone confirmed! [%.5f, %.5f] at %s",
-                     confirmed.low, confirmed.high, TimeToString(confirmed.time));
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: LTF DEMAND zone confirmed! [%.5f, %.5f] at %s",
+                        confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
       else
         {
          AddSupplyZone(g_ltfSupplyZones, confirmed);
-         PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
-                     confirmed.low, confirmed.high, TimeToString(confirmed.time));
-        }
-      // Candidate is now seeded by ProcessZoneBar (confirming bar becomes first opposite candidate)
-
-      //---- Place pending order ----
-      double limitPrice;
-      int    dir;
-      if(confirmed.isDemand)
-        {
-         limitPrice = confirmed.high;  // BUY LIMIT at demand.high
-         dir = 1;
-        }
-      else
-        {
-         limitPrice = confirmed.low;   // SELL LIMIT at supply.low
-         dir = -1;
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
+                        confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
 
-      // Check if limit price is inside HTF zone
-      bool insideHtf = confirmed.isDemand
-                       ? IsPriceInDemandZone(limitPrice, g_htfDemandZones)
-                       : IsPriceInSupplyZone(limitPrice, g_htfSupplyZones);
-
-      if(insideHtf)
-        {
-         int htfZoneCount = confirmed.isDemand
-                            ? ArraySize(g_htfDemandZones)
-                            : ArraySize(g_htfSupplyZones);
-         if(htfZoneCount > 0)
-           {
-            // One-shot per LTF zone
-            if(confirmed.time != g_ltfZonePendingTime)
-              {
-               PrintFormat("AjipSnD: LTF %s zone CONFIRMED — placing %s LIMIT at %.5f",
-                           confirmed.isDemand ? "DEMAND" : "SUPPLY",
-                           dir == 1 ? "BUY" : "SELL", limitPrice);
-
-               if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
-                 {
-                  PlacePendingOrder(dir, limitPrice, confirmed.time);
-                  g_ltfZonePendingTime = confirmed.time;
-                 }
-              }
-           }
-        }
+      // Hold for follow-through validation
+      g_ltfPendingZone = confirmed;
+      g_ltfAwaitingValidation = true;
      }
   }
 
@@ -198,29 +224,79 @@ void UpdateHTF(const MqlRates &rates[], int count)
 
    g_htfLastBarTime = bar.time;
 
-   // Invalidate zones that have been broken by price action
+   // Invalidate active zones broken by price action
    InvalidateHtfZones(bar);
 
+   //---- Follow-through validation (HTF gated by input) ----
+   if(InpRequireZoneValidation && g_htfAwaitingValidation)
+     {
+      bool passed = g_htfPendingZone.isDemand
+                    ? (bar.close > g_htfPendingZone.confirmLevel)
+                    : (bar.close < g_htfPendingZone.confirmLevel);
+      if(passed)
+        {
+         if(g_htfPendingZone.isDemand)
+           {
+            AddDemandZone(g_htfDemandZones, g_htfPendingZone);
+            if(InpEnableLog)
+               PrintFormat("AjipSnD: HTF DEMAND zone VALIDATED [%.5f, %.5f]",
+                           g_htfPendingZone.low, g_htfPendingZone.high);
+           }
+         else
+           {
+            AddSupplyZone(g_htfSupplyZones, g_htfPendingZone);
+            if(InpEnableLog)
+               PrintFormat("AjipSnD: HTF SUPPLY zone VALIDATED [%.5f, %.5f]",
+                           g_htfPendingZone.low, g_htfPendingZone.high);
+           }
+         g_htfAwaitingValidation = false;
+        }
+     }
+
+   //---- Process this bar for zone confirmation ----
    SnDZone confirmed;
    ZeroMemory(confirmed);
    if(ProcessZoneBar(bar, g_htfTrend, g_htfCandidate, confirmed))
      {
-      if(confirmed.isDemand)
+      confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
+
+      if(InpRequireZoneValidation)
         {
-         AddDemandZone(g_htfDemandZones, confirmed);
-         PrintFormat("AjipSnD: HTF DEMAND zone confirmed! [%.5f, %.5f]",
-                     confirmed.low, confirmed.high);
+         // Opposite zone formed before validation → pending zone fails
+         if(g_htfAwaitingValidation && confirmed.isDemand != g_htfPendingZone.isDemand)
+           {
+            if(InpEnableLog)
+               PrintFormat("AjipSnD: HTF %s zone validation FAILED — opposite zone formed first",
+                           g_htfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
+            g_htfAwaitingValidation = false;
+           }
+
+         // Hold for validation (unvalidated → drawn in pending color)
+         g_htfPendingZone = confirmed;
+         g_htfAwaitingValidation = true;
         }
       else
         {
-         AddSupplyZone(g_htfSupplyZones, confirmed);
-         PrintFormat("AjipSnD: HTF SUPPLY zone confirmed! [%.5f, %.5f]",
-                     confirmed.low, confirmed.high);
+         // Validation disabled → activate immediately
+         if(confirmed.isDemand)
+           {
+            AddDemandZone(g_htfDemandZones, confirmed);
+            if(InpEnableLog)
+               PrintFormat("AjipSnD: HTF DEMAND zone confirmed! [%.5f, %.5f]",
+                           confirmed.low, confirmed.high);
+           }
+         else
+           {
+            AddSupplyZone(g_htfSupplyZones, confirmed);
+            if(InpEnableLog)
+               PrintFormat("AjipSnD: HTF SUPPLY zone confirmed! [%.5f, %.5f]",
+                           confirmed.low, confirmed.high);
+           }
         }
-      // Candidate seeded by ProcessZoneBar
      }
 
-   // Redraw every HTF bar close — zone rectangles extend to current time
+   // Redraw every HTF bar close — validated zones extend to current time,
+   // pending zone drawn in distinct color.
    DrawAllHtfZones();
   }
 
