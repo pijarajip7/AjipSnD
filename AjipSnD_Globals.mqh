@@ -63,6 +63,17 @@ struct EntryTracker
    double   mae;            // worst POSITION_PROFIT seen ($)
    bool     partialClosed;  // true once one-time partial close fired
    double   atrAtEntry;     // HTF ATR frozen at entry — partial close target scale
+   //--- Structural SL mode ---
+   // initialVolume exists because partial-close detection used to compare the
+   // live volume against InpFixedLot, which stops being a constant the moment
+   // lot size is derived from stop distance.
+   double   initialVolume;   // volume at entry, before any partial close
+   bool     hasStructuralSl; // SL came from the zone, so aggregate SL must not touch it
+   double   slPrice;         // structural SL price (0=none)
+   double   tpPrice;         // structural TP price (0=none)
+   double   riskUsd;         // intended risk at entry — denominator for R-multiples
+   double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
+   datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
   };
 
 // Pending order tracking (BUY LIMIT / SELL LIMIT)
@@ -73,6 +84,9 @@ struct PendingOrder
    double   price;     // limit price
    datetime zoneTime;  // LTF zone time that triggered this order
    double   slPrice;   // structural SL frozen at placement (0=none / batch mode)
+   double   lot;       // volume actually submitted
+   double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
+   double   atrLtf;    // LTF ATR at placement — carried through to the position
   };
 
 //==================================================================

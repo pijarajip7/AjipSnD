@@ -44,6 +44,14 @@ input group "Structural Stop Loss (experimental)"
 // in one binary so the Strategy Tester can A/B them without recompiling.
 input bool   InpStructuralSlMode  = false; // Enable structural SL mode (false=batch architecture, unchanged)
 input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the HTF zone's far edge, in LTF ATR
+// Risk per trade in account currency; lot is derived from it and the stop
+// distance. 0 = fall back to InpFixedLot (same pattern as InpPartialCloseAtr /
+// InpBatchMaxProfitAtr). Default 15 rather than a smaller figure because the
+// broker's minimum lot puts a floor under achievable risk: with 0.01 min lot and
+// the measured XAUUSD stop distances, a $5 budget is unreachable on 64% of
+// trades and the realised average lands near $10 anyway. At $15 only 19% are
+// floored and the realised average matches the target.
+input double InpRiskPerTrade      = 15.0;  // Risk per trade ($, structural mode; 0=use InpFixedLot)
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)

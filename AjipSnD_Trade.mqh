@@ -42,7 +42,12 @@ ulong OpenTrade(bool isBuy, double entry)
 //==================================================================
 // ADD ENTRY to tracking
 //==================================================================
-void AddEntry(ulong ticket, int dir, double entryPrice)
+// The PendingOrder is passed through so the position inherits what the order
+// already knew — its structural stop, the risk it was sized for, and the LTF
+// zone that triggered it. Without that hand-off the link between a trade and
+// its originating zone is lost at the moment of the fill, and the per-trade CSV
+// has nothing to join back to the zone log on.
+void AddEntry(ulong ticket, int dir, double entryPrice, const PendingOrder &po)
   {
    int sz = ArraySize(g_entries);
    ArrayResize(g_entries, sz + 1);
@@ -54,6 +59,16 @@ void AddEntry(ulong ticket, int dir, double entryPrice)
    g_entries[sz].mae          = 0.0;
    g_entries[sz].partialClosed = false;
    g_entries[sz].atrAtEntry   = GetAtrValue(true);
+
+   g_entries[sz].initialVolume   = PositionSelectByTicket(ticket)
+                                   ? PositionGetDouble(POSITION_VOLUME)
+                                   : po.lot;
+   g_entries[sz].hasStructuralSl = (po.slPrice > 0.0);
+   g_entries[sz].slPrice         = po.slPrice;
+   g_entries[sz].tpPrice         = 0.0;   // set in the take-profit step
+   g_entries[sz].riskUsd         = po.riskUsd;
+   g_entries[sz].atrLtfAtEntry   = po.atrLtf;
+   g_entries[sz].zoneTime        = po.zoneTime;
 
    // First entry of batch
    if(!g_batchActive)
@@ -115,13 +130,61 @@ double ClampToStopsLevel(int dir, double price, double slPrice)
    return(NormalizeDouble(widened, g_digits));
   }
 
+//---- Lot sized so that hitting slDistance costs about InpRiskPerTrade ----
+// Rounds DOWN to the broker's volume step: rounding up would spend more than
+// the risk budget, and the budget is the whole point. Returns InpFixedLot
+// unchanged whenever risk sizing cannot apply, matching the fallback pattern
+// InpPartialCloseAtr and InpBatchMaxProfitAtr already use.
+//
+// The broker's minimum lot puts a hard floor under achievable risk. When the
+// computed lot lands under it the position is opened at the minimum anyway
+// rather than skipped — dropping those trades would systematically discard the
+// widest-stop setups and bias the sample — but the real risk is returned
+// through actualRisk so the caller can log the overshoot instead of hiding it.
+double LotForRisk(double slDistance, double &actualRisk)
+  {
+   actualRisk = 0.0;
+   double fallback = NormalizeDouble(InpFixedLot, 8);
+
+   if(InpRiskPerTrade <= 0 || slDistance <= 0) return(fallback);
+
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0) return(fallback);
+
+   double lossPerLot = slDistance * (tickValue / tickSize);
+   if(lossPerLot <= 0) return(fallback);
+
+   double lot = InpRiskPerTrade / lossPerLot;
+   if(g_volStep > 0)
+      lot = MathFloor(lot / g_volStep) * g_volStep;
+   if(lot < g_volMin) lot = g_volMin;
+   if(lot > g_volMax) lot = g_volMax;
+
+   lot = NormalizeDouble(lot, 8);
+   actualRisk = lot * lossPerLot;
+   return(lot);
+  }
+
 //---- Place pending order at limit price ----
 // slPrice = 0.0 places a naked order, exactly as the batch architecture always
 // has; a non-zero value attaches the structural stop from the outset so the
 // position is never unprotected, not even for the tick that fills it.
+//
+// Order matters here: the SL is clamped to the broker's stop level BEFORE the
+// lot is sized, because the clamp can widen the stop and the lot has to be
+// sized against the distance actually submitted, not the one first requested.
 ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice)
   {
-   double lot = NormalizeDouble(InpFixedLot, 8);
+   slPrice = ClampToStopsLevel(dir, price, slPrice);
+
+   double slDistance = (slPrice > 0.0)
+                       ? ((dir == 1) ? (price - slPrice) : (slPrice - price))
+                       : 0.0;
+
+   double actualRisk = 0.0;
+   double lot = LotForRisk(slDistance, actualRisk);
+
    if(lot < g_volMin || lot > g_volMax)
      {
       PrintFormat("AjipSnD: Pending %s skip — lot %.2f outside broker range",
@@ -129,7 +192,10 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice
       return(0);
      }
 
-   slPrice = ClampToStopsLevel(dir, price, slPrice);
+   if(actualRisk > 0 && InpRiskPerTrade > 0
+      && actualRisk > InpRiskPerTrade * 1.10)
+      PrintFormat("AjipSnD: risk overshoot — min lot %.2f on a %.1f pt stop risks %.2f, budget %.2f",
+                  lot, slDistance / g_point, actualRisk, InpRiskPerTrade);
 
    string comment = StringFormat("AjipSnD %s", dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
    bool ok;
@@ -156,6 +222,9 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice
    g_pendingOrders[sz].price    = price;
    g_pendingOrders[sz].zoneTime = zoneTime;
    g_pendingOrders[sz].slPrice  = slPrice;
+   g_pendingOrders[sz].lot      = lot;
+   g_pendingOrders[sz].riskUsd  = actualRisk;
+   g_pendingOrders[sz].atrLtf   = GetAtrValue(false);
 
    return(ticket);
   }
@@ -241,7 +310,7 @@ void CheckPendingOrders()
             // Match direction with pending
             if(dir != g_pendingOrders[i].dir) continue;
 
-            AddEntry(t, dir, PositionGetDouble(POSITION_PRICE_OPEN));
+            AddEntry(t, dir, PositionGetDouble(POSITION_PRICE_OPEN), g_pendingOrders[i]);
             PrintFormat("AjipSnD: Pending filled! Ticket=%I64u dir=%s fill=%.5f",
                         t, dir == 1 ? "BUY" : "SELL",
                         PositionGetDouble(POSITION_PRICE_OPEN));
@@ -1072,6 +1141,10 @@ void RecalculateAggregateSL()
         {
          if(g_entries[i].dir != dir) continue;
          if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+         // A structural stop is the position's own risk statement — the pooled
+         // budget must neither move it nor count its volume, or the shared
+         // slPoints figure would be computed against size it does not govern.
+         if(g_entries[i].hasStructuralSl) continue;
          // Skip if already has a protective SL (partialClosed + SL != 0 = safe)
          if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
          double vol = PositionGetDouble(POSITION_VOLUME);
@@ -1095,6 +1168,7 @@ void RecalculateAggregateSL()
         {
          if(g_entries[i].dir != dir) continue;
          if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+         if(g_entries[i].hasStructuralSl) continue;   // same reason as the sum above
          if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
 
          double curSl = PositionGetDouble(POSITION_SL);
