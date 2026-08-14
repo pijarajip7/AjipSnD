@@ -55,6 +55,13 @@ InpMaxPositionsPerDir = 0     — Max positions+pendings per direction (0=disabl
 InpMaxRiskOvershoot   = 1.25  — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
 
+**Diagnostics — excursion grid** (see the Excursion CSV section below)
+```
+InpExcursionLog     = false — First-touch grid per entry opportunity (offline SL/TP surface)
+InpExcursionBars    = 240   — Horizon tracked after the limit is touched (M1 bars)
+InpExcursionArmBars = 60    — How long an untouched limit stays armed (M1 bars)
+```
+
 **Risk Management — Final** (permanen, lintas hari)
 ```
 InpFinalProfitTarget = 0.0  — Close all + stop entry PERMANENTLY
@@ -557,6 +564,66 @@ Portfolio-level closes (daily, session, final) are deliberately left alone —
 they are risk limits, not trade exits. When they do fire they truncate a trade,
 which is why `exit_reason` in the trade CSV matters: truncated trades can be
 segmented out of an R analysis instead of silently polluting it.
+
+---
+
+## Excursion CSV (first-touch grid)
+
+`InpExcursionLog=false` by default. One row per entry **opportunity**:
+`AjipSnD_Excursion_<symbol>_<login>.csv` in `Common\\Files`.
+
+### Why stamps, not maxima
+
+MFE/MAE prove a level was reached but not *when*, so they cannot say which of
+two levels came first — exactly what a stop-and-target pair asks. Run #4 hit
+that wall: at a symmetric 2.0 ATR bracket the true win rate was bounded only to
+[32%, 61%], with breakeven at 50%. The data could not decide.
+
+Recording the first-touch **time** of each level removes the ambiguity. For any
+(SL, TP) pair on the grid the outcome is whichever stamp is smaller, so a single
+run yields the entire expectancy surface — including targets the EA never
+traded, which no amount of re-reading the trade log can recover. Verified
+against brute force on 4000 synthetic paths: 676,000 resolutions, zero
+mismatches.
+
+Grid, in LTF ATR at arm time — dense where the current target sits, sparse
+further out where a target is only plausible:
+
+```
+0.25  0.50  0.75  1.00  1.25  1.50  2.00  2.50  3.00  4.00  5.00  6.00  8.00
+```
+
+`f025`..`f800` are seconds from trigger to first favorable touch, `a025`..`a800`
+the adverse side, `-1` = never reached inside the horizon. Equal stamps on both
+sides mean the same second and are the one unresolvable case: bound them, do not
+guess.
+
+### Decoupled on purpose
+
+The tracker arms on a validated zone **before** the entry gates and keeps
+recording after any real position closed. The position cap and the exit policy
+both change *which entries exist*, so a surface computed only over filled trades
+would quietly re-introduce the coupling the instrument exists to remove.
+`filled`, `blocked_gap`, `blocked_gate` and `blocked_cap` are recorded per row,
+so the actually-traded subset stays isolable offline.
+
+Trigger and excursion are read off the side of the book the matching order acts
+on — a BUY LIMIT fills on Ask, and its stop and target both trigger on Bid — so
+an offline resolution matches a real fill rather than approximating it.
+
+| input | default | meaning |
+|---|---|---|
+| `InpExcursionLog` | false | master switch; every entry point returns immediately when off |
+| `InpExcursionBars` | 240 | horizon tracked after the limit is touched (M1 bars = 4h) |
+| `InpExcursionArmBars` | 60 | how long an untouched limit stays armed |
+
+An untouched arm still writes its row with `triggered=0`. That is not waste: the
+arm-to-fill ratio is the direct measure of the passive-limit adverse selection
+run #4 identified, where 91.6% of resting orders filled and 97.4% filled at the
+proximal edge.
+
+`session_end_sec` records when `InSession()` first failed, so a session-close
+policy can be applied offline instead of being baked into the run.
 
 ---
 
