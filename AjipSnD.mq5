@@ -8,9 +8,14 @@
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
-#property version     "1.00"
+#property version     "1.05"
 #property strict
 #property description "AjipSnD — Supply & Demand zone-based EA"
+
+// Bump this with any change that alters backtest output. OnInit prints it, so
+// a stale .ex5 is visible in the Experts log instead of being inferred later
+// from CSVs that match the previous run.
+#define EA_BUILD "1.05-excursion"
 
 #include <Trade\Trade.mqh>
 
@@ -157,6 +162,20 @@ input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal,
 //==================================================================
 int OnInit()
   {
+   // Build banner — always printed, never gated by InpEnableLog.
+   // Run #5 was lost to a stale .ex5: the tester silently reran the previous
+   // binary, and the only way that surfaced was three CSVs that matched the
+   // previous run byte for byte. A version line and the state of the inputs
+   // that only exist in newer builds makes a stale binary visible in one
+   // glance at the Experts log, before hours of tester time are spent.
+   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) | %s %s",
+               EA_BUILD,
+               InpStructuralSlMode ? "ON" : "off",
+               InpMaxRiskOvershoot,
+               InpExcursionLog ? "ON" : "off",
+               InpExcursionBars, InpExcursionArmBars,
+               _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
+
    // Cache symbol info
    g_digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
