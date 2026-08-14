@@ -106,7 +106,7 @@ void InitHTFStructure()
   }
 
 //---- Place entry for a validated LTF zone (follow-through passed) ----
-void PlaceEntryForZone(const SnDZone &confirmed)
+bool PlaceEntryForZone(const SnDZone &confirmed)
   {
    double limitPrice;
    int    dir;
@@ -125,15 +125,15 @@ void PlaceEntryForZone(const SnDZone &confirmed)
    bool insideHtf = confirmed.isDemand
                     ? IsPriceInDemandZone(limitPrice, g_htfDemandZones)
                     : IsPriceInSupplyZone(limitPrice, g_htfSupplyZones);
-   if(!insideHtf) return;
+   if(!insideHtf) return(false);
 
    int htfZoneCount = confirmed.isDemand
                       ? ArraySize(g_htfDemandZones)
                       : ArraySize(g_htfSupplyZones);
-   if(htfZoneCount == 0) return;
+   if(htfZoneCount == 0) return(false);
 
    // One-shot per LTF zone
-   if(confirmed.time == g_ltfZonePendingTime) return;
+   if(confirmed.time == g_ltfZonePendingTime) return(false);
 
    PrintFormat("AjipSnD: LTF %s zone VALIDATED — placing %s LIMIT at %.5f",
                confirmed.isDemand ? "DEMAND" : "SUPPLY",
@@ -143,7 +143,9 @@ void PlaceEntryForZone(const SnDZone &confirmed)
      {
       PlacePendingOrder(dir, limitPrice, confirmed.time);
       g_ltfZonePendingTime = confirmed.time;
+      return(true);
      }
+   return(false);
   }
 
 //---- Update LTF on new closed bar ----
@@ -159,6 +161,10 @@ void UpdateLTF(const MqlRates &rates[], int count)
 
    g_ltfLastBarTime = bar.time;
 
+   // Quality tracker per-bar stats (excursions, first touch)
+   if(InpZoneQualityLog)
+      UpdateZoneTracking(bar, false);
+
    //---- Follow-through validation (LTF always-on) ----
    if(g_ltfAwaitingValidation)
      {
@@ -167,7 +173,9 @@ void UpdateLTF(const MqlRates &rates[], int count)
                     : (bar.close < g_ltfPendingZone.confirmLevel);
       if(passed)
         {
-         PlaceEntryForZone(g_ltfPendingZone);
+         MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
+         if(PlaceEntryForZone(g_ltfPendingZone))
+            MarkZoneEntryPlaced(g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          g_ltfAwaitingValidation = false;
         }
      }
@@ -185,6 +193,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF %s zone validation FAILED — opposite zone formed first",
                         g_ltfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
+         LogZoneOutcome("FAILED_OPPOSITE", false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          g_ltfAwaitingValidation = false;
         }
 
@@ -206,6 +215,14 @@ void UpdateLTF(const MqlRates &rates[], int count)
                         confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
 
+      // Quality tracking: metrics + CONFIRM row (tracker copy carries isHtf=false)
+      if(InpZoneQualityLog)
+        {
+         SnDZone tracked = confirmed;
+         TrackZone(tracked, false, bar);
+         ZoneCsvWrite("CONFIRM", tracked, "");
+        }
+
       // Hold for follow-through validation
       g_ltfPendingZone = confirmed;
       g_ltfAwaitingValidation = true;
@@ -224,6 +241,11 @@ void UpdateHTF(const MqlRates &rates[], int count)
 
    g_htfLastBarTime = bar.time;
 
+   // Quality tracker per-bar stats BEFORE invalidation, so the
+   // invalidating bar's excursion is captured in the OUTCOME row
+   if(InpZoneQualityLog)
+      UpdateZoneTracking(bar, true);
+
    // Invalidate active zones broken by price action
    InvalidateHtfZones(bar);
 
@@ -235,6 +257,7 @@ void UpdateHTF(const MqlRates &rates[], int count)
                     : (bar.close < g_htfPendingZone.confirmLevel);
       if(passed)
         {
+         MarkZoneValidated(true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
          if(g_htfPendingZone.isDemand)
            {
             AddDemandZone(g_htfDemandZones, g_htfPendingZone);
@@ -259,6 +282,7 @@ void UpdateHTF(const MqlRates &rates[], int count)
    if(ProcessZoneBar(bar, g_htfTrend, g_htfCandidate, confirmed))
      {
       confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
+      confirmed.isHtf = true;  // HTF zones carry TF key for outcome logging
 
       if(InpRequireZoneValidation)
         {
@@ -268,6 +292,7 @@ void UpdateHTF(const MqlRates &rates[], int count)
             if(InpEnableLog)
                PrintFormat("AjipSnD: HTF %s zone validation FAILED — opposite zone formed first",
                            g_htfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
+            LogZoneOutcome("FAILED_OPPOSITE", true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
             g_htfAwaitingValidation = false;
            }
 
@@ -292,6 +317,14 @@ void UpdateHTF(const MqlRates &rates[], int count)
                PrintFormat("AjipSnD: HTF SUPPLY zone confirmed! [%.5f, %.5f]",
                            confirmed.low, confirmed.high);
            }
+        }
+
+      // Quality tracking: metrics + CONFIRM row
+      if(InpZoneQualityLog)
+        {
+         SnDZone tracked = confirmed;
+         TrackZone(tracked, true, bar);
+         ZoneCsvWrite("CONFIRM", tracked, "");
         }
      }
 

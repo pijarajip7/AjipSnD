@@ -208,6 +208,25 @@ Per LTF bar close (bukan per-tick), setelah UpdateLTF.
 
 ---
 
+## Zone Quality Logging (CSV)
+
+Setiap zona yang dikonfirmasi live (LTF & HTF) dicatat ke CSV untuk analisis
+kualitas — `InpZoneQualityLog` (default true).
+
+- **CONFIRM row**: atribut kualitas saat zona terbentuk — displacement
+  (`disp_body_atr`, `disp_range_atr`), lebar zona (`width_atr`), `base_bars`,
+  sweep flag, trend saat konfirmasi.
+- **OUTCOME row**: nasib zona — `VALIDATED`, `FAILED_OPPOSITE`, `INVALIDATED`,
+  `REPLACED`, `EXPIRED`, `UNRESOLVED` — plus statistik perilaku sejak
+  konfirmasi (excursion, first touch, `fav_after_touch_pts`).
+
+Tujuan: kumpulkan data dulu, lalu analisis korelasi atribut → outcome, dan
+jadikan atribut yang terbukti sebagai filter entry.
+
+File: `AjipSnD_Zones_<symbol>_<login>.csv` di `Common\Files`.
+
+---
+
 ## Init
 
 ```

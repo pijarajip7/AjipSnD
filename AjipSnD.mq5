@@ -78,6 +78,7 @@ input int              InpPanelY      = 50;                 // Panel Y offset
 
 input group "Diagnostics"
 input bool InpEnableLog = true;  // Enable Print/PrintFormat output
+input bool InpZoneQualityLog = true;  // Log zone quality metrics to CSV for backtest analysis
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -122,6 +123,10 @@ int OnInit()
 
    // Capture starting balance
    CaptureStartingBalance();
+
+   // ATR handles for zone quality metrics
+   g_atrLtfHandle = iATR(_Symbol, InpTimeframe, 14);
+   g_atrHtfHandle = iATR(_Symbol, InpHtfTimeframe, 14);
 
    // Recover tracking for positions from earlier EA run
    RebuildTrackedPositions();
@@ -248,6 +253,14 @@ void OnTick()
 //==================================================================
 void OnDeinit(const int reason)
   {
+   // Flush zone quality tracker rows that never reached an outcome
+   if(InpZoneQualityLog)
+      FlushUnresolvedZoneOutcomes();
+
+   // Release ATR handles
+   if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
+   if(g_atrHtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrHtfHandle);
+
    ObjectsDeleteAll(0, g_objPrefix);
    Print("AjipSnD: EA removed. Reason=", reason);
   }

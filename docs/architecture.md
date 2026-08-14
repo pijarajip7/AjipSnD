@@ -81,6 +81,7 @@ InpPanelCorner = CORNER_LEFT_UPPER / InpPanelX = 20 / InpPanelY = 50
 **Diagnostics**
 ```
 InpEnableLog = true  — Toggle Print/PrintFormat output
+InpZoneQualityLog = true — Log zone quality metrics to CSV for backtest analysis
 ```
 
 **Multi-Account Orchestrator**
@@ -280,6 +281,45 @@ LastEntryTime. File: `AjipSnD_Batches_<symbol>_<login>.csv` in `Common\\Files`.
 
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
 `BATCH_MAX_LOSS`, `BATCH_FLAT`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
+
+---
+
+## Zone Quality CSV (backtest analysis)
+
+`InpZoneQualityLog=true` (default). Live-confirmed zones (LTF + HTF) are tracked
+from confirmation to outcome. Two row types join via `tf,type,zone_time`:
+
+```
+CONFIRM   — written at zone confirmation; quality attributes measured at that moment
+OUTCOME   — written when fate is known; behavior stats accumulated since confirm
+```
+
+Outcomes: `VALIDATED`, `FAILED_OPPOSITE`, `INVALIDATED`, `REPLACED`, `EXPIRED`,
+`UNRESOLVED` (flushed on OnDeinit).
+
+Quality attributes (CONFIRM):
+```
+atr, width_atr, disp_body_atr, disp_range_atr  — displacement / width vs ATR
+base_bars        — bars candidate stayed alive before confirmation (1=impulsive)
+swept_low/high   — liquidity grab recorded on candidate
+trend_at_confirm — trend of this TF when zone confirmed
+```
+
+Behavior stats (OUTCOME):
+```
+bars_since, bars_to_touch, touched, touch_depth_pts
+max_fav_pts, max_adv_pts, fav_after_touch_pts
+validated, entry_placed
+```
+
+Tracker: `g_zoneTracker[]` (SnDZone copies with `isHtf` key). Stats updated per
+bar via `UpdateZoneTracking()` — HTF before invalidation so the breaking bar is
+captured. ATR via `iATR(14)` handles (LTF + HTF) created in OnInit.
+
+File: `AjipSnD_Zones_<symbol>_<login>.csv` in `Common\Files`.
+
+Purpose: collect data now; later analyze which attributes predict good outcomes,
+then turn winners into entry filters.
 
 ---
 

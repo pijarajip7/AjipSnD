@@ -45,11 +45,13 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.isDemand = true;
             candidate.sweepHigh = 0;
             candidate.sweepLow  = 0;
+            candidate.baseBars  = 0;
            }
         }
       
       if(candidate.time != 0)
         {
+         candidate.baseBars++;
          // Update low if deeper wick
          if(bar.low < candidate.low)
             candidate.low = bar.low;
@@ -111,11 +113,13 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.isDemand = false;
             candidate.sweepHigh = 0;
             candidate.sweepLow  = 0;
+            candidate.baseBars  = 0;
            }
         }
       
       if(candidate.time != 0)
         {
+         candidate.baseBars++;
          if(bar.high > candidate.high)
             candidate.high = bar.high;
          
@@ -175,20 +179,22 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
       if(newZone.low < zones[i].low)
         {
          // New zone is LOWER → old zone deactivated, cancel its pending
+         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          CancelPendingForZone(true, zones[i].time);
          ArrayRemove(zones, i, 1);
         }
      }
-   
+  
    // Add new zone
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-   
+  
    // Enforce InpMaxZones
    while(ArraySize(zones) > InpMaxZones)
      {
       // Remove oldest (index 0)
+      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
       ArrayRemove(zones, 0, 1);
      }
   }
@@ -200,17 +206,19 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
       if(newZone.high > zones[i].high)
         {
          // New zone is HIGHER → old zone deactivated, cancel its pending
+         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          CancelPendingForZone(false, zones[i].time);
          ArrayRemove(zones, i, 1);
         }
      }
-   
+  
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-   
+  
    while(ArraySize(zones) > InpMaxZones)
      {
+      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
       ArrayRemove(zones, 0, 1);
      }
   }
@@ -304,6 +312,7 @@ bool InvalidateHtfZones(const MqlRates &bar)
             PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] sweepLow=%.5f bar.close=%.5f",
                         g_htfDemandZones[i].low, g_htfDemandZones[i].high,
                         g_htfDemandZones[i].sweepLow, bar.close);
+         LogZoneOutcome("INVALIDATED", true, g_htfDemandZones[i].isDemand, g_htfDemandZones[i].time);
          ArrayRemove(g_htfDemandZones, i, 1);
          anyChange = true;
         }
@@ -321,6 +330,7 @@ bool InvalidateHtfZones(const MqlRates &bar)
             PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] sweepHigh=%.5f bar.close=%.5f",
                         g_htfSupplyZones[i].low, g_htfSupplyZones[i].high,
                         g_htfSupplyZones[i].sweepHigh, bar.close);
+         LogZoneOutcome("INVALIDATED", true, g_htfSupplyZones[i].isDemand, g_htfSupplyZones[i].time);
          ArrayRemove(g_htfSupplyZones, i, 1);
          anyChange = true;
         }
@@ -377,6 +387,222 @@ void DrawAllHtfZones()
          DrawHtfZoneRect(prefix + "Supply_PENDING", g_htfPendingZone.time,
                          g_htfPendingZone.low, g_htfPendingZone.high, clrIndianRed);
      }
+  }
+
+//==================================================================
+// ZONE QUALITY TRACKER — CSV backtest analysis log.
+// Live-confirmed zones are tracked from confirmation to outcome.
+// One row per event; CONFIRM + OUTCOME join via TF/isDemand/zone_time.
+//==================================================================
+
+//---- CSV filename (Common\Files) ----
+string ZoneCsvFilename()
+  {
+   return("AjipSnD_Zones_" + _Symbol + "_"
+          + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv");
+  }
+
+//---- Append one zone event row ----
+void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
+  {
+   string filename = ZoneCsvFilename();
+   bool exists = FileIsExist(filename, FILE_COMMON);
+
+   int handle = FileOpen(filename, FILE_COMMON | FILE_WRITE | FILE_READ | FILE_TXT, 0, CP_UTF8);
+   if(handle == INVALID_HANDLE)
+     {
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: Cannot open zone CSV %s", filename);
+      return;
+     }
+
+   // Header if new file
+   if(!exists)
+     {
+      FileWrite(handle,
+         "action,outcome,tf,type,zone_time,high,low,confirm_close,confirm_level",
+         "atr,width_atr,disp_body_atr,disp_range_atr,base_bars",
+         "swept_low,swept_high,validated,entry_placed",
+         "bars_since,bars_to_touch,touched,touch_depth_pts",
+         "max_fav_pts,max_adv_pts,fav_after_touch_pts,trend_at_confirm");
+     }
+   else
+      FileSeek(handle, 0, SEEK_END);
+
+   FileWrite(handle,
+      action, outcome,
+      zone.isHtf ? "HTF" : "LTF",
+      zone.isDemand ? "DEMAND" : "SUPPLY",
+      TimeToString(zone.time, TIME_DATE | TIME_SECONDS),
+      DoubleToString(zone.high, g_digits),
+      DoubleToString(zone.low, g_digits),
+      DoubleToString(zone.confirmClose, g_digits),
+      DoubleToString(zone.confirmLevel, g_digits),
+      DoubleToString(zone.atrAtConfirm, g_digits),
+      DoubleToString(zone.widthAtr, 2),
+      DoubleToString(zone.dispBodyAtr, 2),
+      DoubleToString(zone.dispRangeAtr, 2),
+      IntegerToString(zone.baseBars),
+      zone.sweepLow > 0 ? "1" : "0",
+      zone.sweepHigh > 0 ? "1" : "0",
+      zone.validated ? "1" : "0",
+      zone.entryPlaced ? "1" : "0",
+      IntegerToString(zone.barsSinceConfirm),
+      IntegerToString(zone.barsToTouch),
+      zone.touched ? "1" : "0",
+      DoubleToString(zone.touchDepthPts, 1),
+      DoubleToString(zone.maxFavPts, 1),
+      DoubleToString(zone.maxAdvPts, 1),
+      DoubleToString(zone.favAfterTouchPts, 1),
+      zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN");
+
+   FileClose(handle);
+  }
+
+//---- Fill quality metrics + register in tracker ----
+void TrackZone(SnDZone &zone, bool htf, const MqlRates &confirmBar)
+  {
+   zone.isHtf          = htf;
+   zone.trendAtConfirm = htf ? g_htfTrend : g_ltfTrend;
+   zone.confirmClose   = confirmBar.close;
+   zone.validated      = false;
+   zone.entryPlaced    = false;
+   zone.trackingActive = true;
+   zone.touched        = false;
+   zone.barsSinceConfirm  = 0;
+   zone.barsToTouch       = 0;
+   zone.touchDepthPts     = 0.0;
+   zone.maxFavPts         = 0.0;
+   zone.maxAdvPts         = 0.0;
+   zone.favAfterTouchPts  = 0.0;
+
+   zone.atrAtConfirm = GetAtrValue(htf);
+   double width = zone.high - zone.low;
+   double body  = MathAbs(confirmBar.close - confirmBar.open);
+   double range = confirmBar.high - confirmBar.low;
+   if(zone.atrAtConfirm > 0)
+     {
+      zone.widthAtr     = width / zone.atrAtConfirm;
+      zone.dispBodyAtr  = body  / zone.atrAtConfirm;
+      zone.dispRangeAtr = range / zone.atrAtConfirm;
+     }
+
+   int sz = ArraySize(g_zoneTracker);
+   ArrayResize(g_zoneTracker, sz + 1);
+   g_zoneTracker[sz] = zone;
+  }
+
+//---- Per-bar stats: excursions, first touch ----
+void UpdateZoneTracking(const MqlRates &bar, bool htf)
+  {
+   int n = ArraySize(g_zoneTracker);
+   for(int i = 0; i < n; i++)
+     {
+      if(!g_zoneTracker[i].trackingActive) continue;
+      if(g_zoneTracker[i].isHtf != htf) continue;
+      if(bar.time <= g_zoneTracker[i].time) continue; // skip confirmation bar itself
+
+      g_zoneTracker[i].barsSinceConfirm++;
+      double base = g_zoneTracker[i].confirmClose;
+
+      if(g_zoneTracker[i].isDemand)
+        {
+         // Favorable = up (BUY side) — stored in points
+         double fav  = (bar.high - base) / g_point;
+         double adv  = (base - bar.low) / g_point;
+         if(fav > g_zoneTracker[i].maxFavPts) g_zoneTracker[i].maxFavPts = fav;
+         if(adv > g_zoneTracker[i].maxAdvPts) g_zoneTracker[i].maxAdvPts = adv;
+
+         // First touch: wick re-enters zone range [low, high]
+         if(!g_zoneTracker[i].touched && bar.low <= g_zoneTracker[i].high)
+           {
+            g_zoneTracker[i].touched       = true;
+            g_zoneTracker[i].barsToTouch   = g_zoneTracker[i].barsSinceConfirm;
+            double depth = (g_zoneTracker[i].high - bar.low) / g_point;
+            if(depth < 0) depth = 0;
+            g_zoneTracker[i].touchDepthPts = depth;
+           }
+         if(g_zoneTracker[i].touched)
+           {
+            double favT = (bar.high - base) / g_point;
+            if(favT > g_zoneTracker[i].favAfterTouchPts)
+               g_zoneTracker[i].favAfterTouchPts = favT;
+           }
+        }
+      else
+        {
+         // Favorable = down (SELL side) — stored in points
+         double fav  = (base - bar.low) / g_point;
+         double adv  = (bar.high - base) / g_point;
+         if(fav > g_zoneTracker[i].maxFavPts) g_zoneTracker[i].maxFavPts = fav;
+         if(adv > g_zoneTracker[i].maxAdvPts) g_zoneTracker[i].maxAdvPts = adv;
+
+         // First touch: wick re-enters zone range [low, high]
+         if(!g_zoneTracker[i].touched && bar.high >= g_zoneTracker[i].low)
+           {
+            g_zoneTracker[i].touched       = true;
+            g_zoneTracker[i].barsToTouch   = g_zoneTracker[i].barsSinceConfirm;
+            double depth = (bar.high - g_zoneTracker[i].low) / g_point;
+            if(depth < 0) depth = 0;
+            g_zoneTracker[i].touchDepthPts = depth;
+           }
+         if(g_zoneTracker[i].touched)
+           {
+            double favT = (base - bar.low) / g_point;
+            if(favT > g_zoneTracker[i].favAfterTouchPts)
+               g_zoneTracker[i].favAfterTouchPts = favT;
+           }
+        }
+     }
+  }
+
+//---- Find a tracked zone by TF + type + confirmation time ----
+int FindTrackedZone(bool htf, bool isDemand, datetime zoneTime)
+  {
+   for(int i = 0; i < ArraySize(g_zoneTracker); i++)
+     {
+      if(g_zoneTracker[i].isHtf == htf &&
+         g_zoneTracker[i].isDemand == isDemand &&
+         g_zoneTracker[i].time == zoneTime)
+         return(i);
+     }
+   return(-1);
+  }
+
+//---- Log outcome + stop tracking ----
+void LogZoneOutcome(string outcome, bool htf, bool isDemand, datetime zoneTime)
+  {
+   int i = FindTrackedZone(htf, isDemand, zoneTime);
+   if(i < 0) return;
+
+   ZoneCsvWrite("OUTCOME", g_zoneTracker[i], outcome);
+   g_zoneTracker[i].trackingActive = false;
+  }
+
+//---- Mark a tracked zone as validated (still collecting outcome) ----
+void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
+  {
+   int i = FindTrackedZone(htf, isDemand, zoneTime);
+   if(i >= 0) g_zoneTracker[i].validated = true;
+  }
+
+//---- Mark entry placed for a tracked LTF zone ----
+void MarkZoneEntryPlaced(bool isDemand, datetime zoneTime)
+  {
+   int i = FindTrackedZone(false, isDemand, zoneTime);
+   if(i >= 0) g_zoneTracker[i].entryPlaced = true;
+  }
+
+//---- Flush unresolved trackers on EA deinit ----
+void FlushUnresolvedZoneOutcomes()
+  {
+   for(int i = 0; i < ArraySize(g_zoneTracker); i++)
+     {
+      if(!g_zoneTracker[i].trackingActive) continue;
+      ZoneCsvWrite("OUTCOME", g_zoneTracker[i], "UNRESOLVED");
+      g_zoneTracker[i].trackingActive = false;
+     }
+   ArrayFree(g_zoneTracker);
   }
 
 #endif // AJIPSND_ZONE_MQH

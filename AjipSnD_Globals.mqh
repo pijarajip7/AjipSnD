@@ -28,6 +28,25 @@ struct SnDZone
    datetime time;        // bar time when zone was confirmed
    bool     isDemand;    // true=demand, false=supply
    int      index;       // index in the active zones array (for reference)
+   //--- Quality tracking (CSV backtest analysis) ---
+   bool     isHtf;            // tracker key: which timeframe this zone belongs to
+   bool     validated;        // follow-through validation passed
+   int      trendAtConfirm;   // trend of this TF at confirmation (1=UP, -1=DOWN)
+   int      baseBars;         // bars candidate stayed alive before confirmation (1=impulsive)
+   double   confirmClose;     // close of the confirming bar
+   double   atrAtConfirm;     // ATR value at confirmation
+   double   widthAtr;         // zone width / ATR
+   double   dispBodyAtr;      // confirming bar body / ATR (displacement)
+   double   dispRangeAtr;     // confirming bar range / ATR
+   bool     trackingActive;   // true while outcome stats are being collected
+   bool     entryPlaced;      // pending order was placed for this zone (LTF)
+   bool     touched;          // wick re-entered zone range after confirmation
+   int      barsSinceConfirm; // closed bars since confirmation
+   int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
+   double   touchDepthPts;    // penetration depth of first touch (points)
+   double   maxFavPts;        // max favorable excursion from confirmClose (points)
+   double   maxAdvPts;        // max adverse excursion from confirmClose (points)
+   double   favAfterTouchPts; // best favorable excursion after first touch (points)
   };
 
 // Entry tracking (multi-position, per-ticket)
@@ -100,6 +119,10 @@ int            g_digits;
 double         g_point;
 double         g_volMin, g_volMax, g_volStep;
 
+// ---- ATR handles for zone quality metrics ----
+int            g_atrLtfHandle = INVALID_HANDLE;
+int            g_atrHtfHandle = INVALID_HANDLE;
+
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
 
@@ -118,12 +141,25 @@ datetime       g_lastHeartbeatTime = 0;
 //---- Symbol info cache ----
 datetime       g_ltfZonePendingTime  = 0;  // last LTF zone time that placed a pending order
 
-//---- Pending orders ----
+// ---- Pending orders ----
 PendingOrder   g_pendingOrders[];
+
+// ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
+SnDZone        g_zoneTracker[];
 
 //==================================================================
 // HELPER FUNCTIONS
 //==================================================================
+
+//---- Get ATR value (last closed bar) for zone quality metrics ----
+double GetAtrValue(bool htf)
+  {
+   int handle = htf ? g_atrHtfHandle : g_atrLtfHandle;
+   if(handle == INVALID_HANDLE) return(0.0);
+   double buf[1];
+   if(CopyBuffer(handle, 0, 1, 1, buf) != 1) return(0.0);
+   return(buf[0]);
+  }
 
 //---- Classify limit status (generic, reused for daily + batch) ----
 ENUM_LIMIT_STATUS ClassifyLimitStatus(double total, double maxProfit, double maxLoss)
