@@ -34,6 +34,12 @@ void InitLTFStructure()
       ZeroMemory(confirmed);
       if(ProcessZoneBar(rates[i], g_ltfTrend, g_ltfCandidate, confirmed))
         {
+         // Replay zones are gated too, so the filter also applies right after
+         // start. ATR here is the current reading rather than the one at this
+         // historical bar — an approximation, but these seed zones are
+         // short-lived and are replaced by live-measured ones.
+         ComputeZoneMetrics(confirmed, false, rates[i]);
+
          if(confirmed.isDemand)
             AddDemandZone(g_ltfDemandZones, confirmed);
          else
@@ -80,6 +86,9 @@ void InitHTFStructure()
       ZeroMemory(confirmed);
       if(ProcessZoneBar(rates[i], g_htfTrend, g_htfCandidate, confirmed))
         {
+         // Same approximation as the LTF replay above
+         ComputeZoneMetrics(confirmed, true, rates[i]);
+
          if(confirmed.isDemand)
             AddDemandZone(g_htfDemandZones, confirmed);
          else
@@ -199,6 +208,9 @@ void UpdateLTF(const MqlRates &rates[], int count)
 
       confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
 
+      // Metrics + quality gate — before the zone is stored anywhere
+      ComputeZoneMetrics(confirmed, false, bar);
+
       // Add to zone array (data-only — keeps count/logging consistent)
       if(confirmed.isDemand)
         {
@@ -219,7 +231,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
       if(InpZoneQualityLog)
         {
          SnDZone tracked = confirmed;
-         TrackZone(tracked, false, bar);
+         TrackZone(tracked, false);
          ZoneCsvWrite("CONFIRM", tracked, "");
         }
 
@@ -282,7 +294,10 @@ void UpdateHTF(const MqlRates &rates[], int count)
    if(ProcessZoneBar(bar, g_htfTrend, g_htfCandidate, confirmed))
      {
       confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
-      confirmed.isHtf = true;  // HTF zones carry TF key for outcome logging
+
+      // Metrics + quality gate — also sets isHtf, the tracker key for outcome
+      // logging. Must run before the zone is held as pending or activated.
+      ComputeZoneMetrics(confirmed, true, bar);
 
       if(InpRequireZoneValidation)
         {
@@ -323,7 +338,7 @@ void UpdateHTF(const MqlRates &rates[], int count)
       if(InpZoneQualityLog)
         {
          SnDZone tracked = confirmed;
-         TrackZone(tracked, true, bar);
+         TrackZone(tracked, true);
          ZoneCsvWrite("CONFIRM", tracked, "");
         }
      }
@@ -474,8 +489,12 @@ void DrawPanel()
    PANEL_LABEL("", clrWhite);
    PANEL_LABEL(StringFormat("LTF Trend: %s (%s)", trendStr, ShortTF(InpTimeframe)), clrWhite);
    PANEL_LABEL(StringFormat("HTF Trend: %s (%s)", htfTrendStr, ShortTF(InpHtfTimeframe)), clrWhite);
-   PANEL_LABEL(StringFormat("Demands:   %d", ArraySize(g_htfDemandZones)), clrWhite);
-   PANEL_LABEL(StringFormat("Supplies:  %d", ArraySize(g_htfSupplyZones)), clrWhite);
+   // "tradeable/total" — zones failing the quality gate still exist as
+   // structure but are not offered as entry areas
+   int demTradeable = CountTradeableZones(g_htfDemandZones);
+   int supTradeable = CountTradeableZones(g_htfSupplyZones);
+   PANEL_LABEL(StringFormat("Demands:   %d/%d", demTradeable, ArraySize(g_htfDemandZones)), clrWhite);
+   PANEL_LABEL(StringFormat("Supplies:  %d/%d", supTradeable, ArraySize(g_htfSupplyZones)), clrWhite);
    PANEL_LABEL(StringFormat("Entries:   %d", nOpen), clrWhite);
    
    // ---- PnL section ----

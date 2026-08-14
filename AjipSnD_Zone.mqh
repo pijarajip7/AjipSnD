@@ -27,6 +27,41 @@ bool IsBullBar(const MqlRates &bar)
    return(bar.close > bar.open);
   }
 
+//---- Fill ATR-normalised metrics + evaluate the entry quality gate ----
+// Runs for every confirmed zone regardless of InpZoneQualityLog, because
+// qualityPass gates entries. Backtest over two separate 12-month XAUUSD
+// periods: neither threshold does anything on its own — width alone and
+// displacement alone both leave the MFE/MAE ratio at the baseline. Together
+// they lift median MFE without moving MAE, and that held out of sample.
+void ComputeZoneMetrics(SnDZone &zone, bool htf, const MqlRates &confirmBar)
+  {
+   zone.isHtf        = htf;
+   zone.confirmClose = confirmBar.close;
+   zone.atrAtConfirm = GetAtrValue(htf);
+
+   double width = zone.high - zone.low;
+   double body  = MathAbs(confirmBar.close - confirmBar.open);
+   double range = confirmBar.high - confirmBar.low;
+
+   if(zone.atrAtConfirm <= 0)
+     {
+      // No ATR reading — metrics are unmeasurable. Fail open so a broken
+      // indicator handle cannot silently stop all trading, but say so.
+      zone.widthAtr = zone.dispBodyAtr = zone.dispRangeAtr = 0.0;
+      zone.qualityPass = true;
+      PrintFormat("AjipSnD: ATR unavailable on %s — zone quality gate skipped for this zone",
+                  htf ? "HTF" : "LTF");
+      return;
+     }
+
+   zone.widthAtr     = width / zone.atrAtConfirm;
+   zone.dispBodyAtr  = body  / zone.atrAtConfirm;
+   zone.dispRangeAtr = range / zone.atrAtConfirm;
+
+   zone.qualityPass = (InpMaxZoneWidthAtr <= 0 || zone.widthAtr    <  InpMaxZoneWidthAtr)
+                   && (InpMinDispBodyAtr  <= 0 || zone.dispBodyAtr >= InpMinDispBodyAtr);
+  }
+
 //---- Process one bar for zone detection, return true if zone confirmed ----
 bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
                     SnDZone &candidate, SnDZone &confirmed)
@@ -223,26 +258,40 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
      }
   }
 
-//---- Check if price is inside any active demand zone ----
+//---- Check if price is inside any TRADEABLE active demand zone ----
+// Zones failing the quality gate stay in the array — they keep taking part in
+// replacement, expiry and invalidation exactly as before, so zone lifecycle and
+// the CSV log are unchanged — but they are not offered as entry areas.
 bool IsPriceInDemandZone(double price, const SnDZone &zones[])
   {
    for(int i = 0; i < ArraySize(zones); i++)
      {
+      if(!zones[i].qualityPass) continue;
       if(price <= zones[i].high && price >= zones[i].low)
          return(true);
      }
    return(false);
   }
 
-//---- Check if price is inside any active supply zone ----
+//---- Check if price is inside any TRADEABLE active supply zone ----
 bool IsPriceInSupplyZone(double price, const SnDZone &zones[])
   {
    for(int i = 0; i < ArraySize(zones); i++)
      {
+      if(!zones[i].qualityPass) continue;
       if(price >= zones[i].low && price <= zones[i].high)
          return(true);
      }
    return(false);
+  }
+
+//---- Count zones that passed the quality gate (panel display) ----
+int CountTradeableZones(const SnDZone &zones[])
+  {
+   int n = 0;
+   for(int i = 0; i < ArraySize(zones); i++)
+      if(zones[i].qualityPass) n++;
+   return(n);
   }
 
 //---- Find initial trend from N bars: highest first = DOWN, lowest first = UP ----
@@ -430,7 +479,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "action", "outcome", "tf", "type", "zone_time",
          "high", "low", "confirm_close", "confirm_level",
          "atr", "width_atr", "disp_body_atr", "disp_range_atr", "base_bars",
-         "swept_low", "swept_high", "validated", "entry_placed",
+         "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
          "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm");
      }
@@ -455,6 +504,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       zone.sweepHigh > 0 ? "1" : "0",
       zone.validated ? "1" : "0",
       zone.entryPlaced ? "1" : "0",
+      zone.qualityPass ? "1" : "0",
       IntegerToString(zone.barsSinceConfirm),
       IntegerToString(zone.barsToTouch),
       zone.touched ? "1" : "0",
@@ -467,12 +517,11 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
    FileClose(handle);
   }
 
-//---- Fill quality metrics + register in tracker ----
-void TrackZone(SnDZone &zone, bool htf, const MqlRates &confirmBar)
+//---- Register a zone in the quality tracker ----
+// Metrics must already be filled by ComputeZoneMetrics().
+void TrackZone(SnDZone &zone, bool htf)
   {
-   zone.isHtf          = htf;
    zone.trendAtConfirm = htf ? g_htfTrend : g_ltfTrend;
-   zone.confirmClose   = confirmBar.close;
    zone.validated      = false;
    zone.entryPlaced    = false;
    zone.trackingActive = true;
@@ -483,17 +532,6 @@ void TrackZone(SnDZone &zone, bool htf, const MqlRates &confirmBar)
    zone.maxFavPts         = 0.0;
    zone.maxAdvPts         = 0.0;
    zone.favAfterTouchPts  = 0.0;
-
-   zone.atrAtConfirm = GetAtrValue(htf);
-   double width = zone.high - zone.low;
-   double body  = MathAbs(confirmBar.close - confirmBar.open);
-   double range = confirmBar.high - confirmBar.low;
-   if(zone.atrAtConfirm > 0)
-     {
-      zone.widthAtr     = width / zone.atrAtConfirm;
-      zone.dispBodyAtr  = body  / zone.atrAtConfirm;
-      zone.dispRangeAtr = range / zone.atrAtConfirm;
-     }
 
    int sz = ArraySize(g_zoneTracker);
    ArrayResize(g_zoneTracker, sz + 1);

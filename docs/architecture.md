@@ -12,8 +12,28 @@ InpCandlesInit     = 50           — Lookback bars for initial trend
 InpMaxZones        = 2            — Max active zones per type
 InpMinZoneGapPoints = 0           — Min gap to NEWEST opposite HTF zone for entry (0=disabled)
 InpRequireZoneValidation = true   — Require HTF zone follow-through before active (LTF always on)
+InpMaxZoneWidthAtr = 1.25         — Max zone width / ATR to allow entry (0=disabled)
+InpMinDispBodyAtr  = 1.00         — Min confirming-bar body / ATR to allow entry (0=disabled)
 InpHtfMaFilter     = false        — HTF MA direction filter
 ```
+
+### Zone Quality Gate
+
+`ComputeZoneMetrics()` runs at every zone confirmation (live + init replay),
+independent of `InpZoneQualityLog`, and sets `zone.qualityPass`. Zones that
+fail stay in the active arrays — replacement, expiry, invalidation and CSV
+logging are untouched — but `IsPriceInDemandZone()` / `IsPriceInSupplyZone()`
+skip them, so they are never offered as entry areas. Panel shows
+`tradeable/total`.
+
+Both thresholds must pass together. Backtested on two separate 12-month
+XAUUSD periods (threshold fitted on the first, validated once on the second):
+neither does anything alone — width alone and displacement alone both leave
+the MFE/MAE ratio at baseline. Combined they lift median MFE from 1.45 to
+1.98 ATR with MAE unchanged, keeping ~13% of HTF zones.
+
+If ATR is unavailable the gate fails open and prints a warning, so a broken
+indicator handle cannot silently stop all trading.
 
 **Entry & Trade Sizing**
 ```
@@ -309,8 +329,13 @@ Behavior stats (OUTCOME):
 ```
 bars_since, bars_to_touch, touched, touch_depth_pts
 max_fav_pts, max_adv_pts, fav_after_touch_pts
-validated, entry_placed
+validated, entry_placed, quality_pass
 ```
+
+File is written as `FILE_CSV|FILE_ANSI` with `,` and CP_UTF8 — `FILE_TXT`
+writes every field with no separator at all, which makes the log
+unparseable. Header is one argument per column so the field counts cannot
+drift apart.
 
 Tracker: `g_zoneTracker[]` (SnDZone copies with `isHtf` key). Stats updated per
 bar via `UpdateZoneTracking()` — HTF before invalidation so the breaking bar is

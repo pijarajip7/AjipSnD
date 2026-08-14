@@ -28,6 +28,8 @@ struct SnDZone
    datetime time;        // bar time when zone was confirmed
    bool     isDemand;    // true=demand, false=supply
    int      index;       // index in the active zones array (for reference)
+   //--- Quality gate (entry filter) ---
+   bool     qualityPass;      // zone width + displacement passed the entry filter
    //--- Quality tracking (CSV backtest analysis) ---
    bool     isHtf;            // tracker key: which timeframe this zone belongs to
    bool     validated;        // follow-through validation passed

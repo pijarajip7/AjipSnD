@@ -24,6 +24,8 @@ input int              InpCandlesInit    = 50;          // Lookback candles for 
 input int              InpMaxZones       = 2;           // Max active zones per type (demand/supply)
 input int              InpMinZoneGapPoints = 0;        // Min gap (points) to NEWEST opposite HTF zone for entry (0=disabled)
 input bool             InpRequireZoneValidation = true; // Require HTF zone follow-through before active (LTF always on)
+input double           InpMaxZoneWidthAtr = 1.25;      // Max HTF zone width / ATR to allow entry (0=disabled)
+input double           InpMinDispBodyAtr  = 1.00;      // Min confirming-bar body / ATR to allow entry (0=disabled)
 input bool             InpHtfMaFilter    = false;       // Enable HTF MA direction filter (BUY only above MA, SELL only below)
 input int              InpHtfMaPeriod    = 50;          // HTF MA period (only if InpHtfMaFilter=true)
 input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
