@@ -45,6 +45,15 @@ InpDeviation    = 10     — Slippage (points)
 InpMagicNumber  = 99002  — Magic number
 ```
 
+**Structural Stop Loss** (experimental — see the section below)
+```
+InpStructuralSlMode   = false — Master switch (false=batch architecture, unchanged)
+InpZoneSlBufferAtr    = 0.5   — SL buffer beyond the HTF zone's far edge, in LTF ATR
+InpRiskPerTrade       = 15.0  — Risk per trade ($); lot derived from it (0=use InpFixedLot)
+InpTakeProfitAtr      = 1.0   — TP distance from entry, in LTF ATR (0=no TP)
+InpMaxPositionsPerDir = 0     — Max positions+pendings per direction (0=disabled)
+```
+
 **Risk Management — Final** (permanen, lintas hari)
 ```
 InpFinalProfitTarget = 0.0  — Close all + stop entry PERMANENTLY
@@ -412,6 +421,144 @@ File: `AjipSnD_Zones_<symbol>_<login>.csv` in `Common\Files`.
 
 Purpose: collect data now; later analyze which attributes predict good outcomes,
 then turn winners into entry filters.
+
+---
+
+## Structural SL Mode (experimental)
+
+A second risk architecture living beside the batch one in the same binary, so
+the Strategy Tester can A/B them without recompiling. `InpStructuralSlMode=false`
+skips every path it adds; the batch architecture is untouched.
+
+**Why it exists.** Measured over two 12-month XAUUSD periods, the batch
+architecture runs about 1 percentage point above the win rate it needs to break
+even (88–90% actual against an 88–94% requirement), and that win rate is
+manufactured by having no stop at all. Positions are opened naked —
+`BuyLimit(..., 0.0, 0.0, ...)` — and the only protection is a pooled dollar
+budget applied afterwards, which lets a loser run until it either recovers or
+consumes the whole daily allowance. Wins average $13–26; a bad day costs $227–280,
+so one bad day erases 9–20 wins while only 10–13 are available to pay for it.
+
+**The trade shape it replaces.** One position per zone, with a hard stop beyond
+the structure that justified the trade and a target measured from the entry.
+Win rate is expected to fall sharply — 83–84% of entries eventually reach 1.0
+LTF ATR if you wait indefinitely, and a stop stops the waiting. It has to be
+judged on expectancy, never on win rate.
+
+### The stop is anchored to the HTF zone, not the LTF zone
+
+The LTF zone is the trigger; the HTF zone is the thesis. Entry sits at the LTF
+zone's near edge, but the entry is only allowed when that price falls inside a
+live HTF zone, so either could anchor the stop. Measured on the entries that
+actually happened:
+
+| | median distance from entry | stop touched |
+|---|---|---|
+| LTF far edge | 1995 pts (1.21 LTF ATR) | 59% |
+| HTF far edge | 5765 pts (3.34 LTF ATR) | 17% |
+| median adverse excursion | 3293 pts | — |
+
+The third row settles it: the typical move against the trade is deeper than the
+LTF zone is wide, so an LTF-anchored stop sits inside ordinary noise. Price
+leaving the LTF zone means the timing was wrong; price leaving the HTF zone
+means the reason was.
+
+The cost is reward:risk. A stop 3x wider needs a 3x smaller multiple for the
+same target, which is why `InpTakeProfitAtr` is capped in practice around 1.0:
+at 2.0 LTF ATR only 61% of entries ever travel far enough, already short of the
+66% such a reward:risk needs to break even.
+
+`FindContainingZoneIdx()` is the single containment rule; `IsPriceInDemandZone`
+and `IsPriceInSupplyZone` are wrappers over it. Where several zones contain the
+price the furthest far edge wins — never a tighter stop than another equally
+valid zone would have justified.
+
+### Lot follows the stop
+
+`LotForRisk()` sizes so that hitting the stop costs about `InpRiskPerTrade`,
+rounding **down** to the volume step so the budget is a ceiling. Sizing happens
+after the stops-level clamp, since the clamp can widen the stop.
+
+The broker's minimum lot puts a floor under achievable risk, and on XAUUSD that
+floor is high: 0.01 lots cost roughly a dollar per price unit of stop distance,
+and stop distances run 3.9–12.6 price units across the quartiles. A $5 budget is
+therefore unreachable on 64% of entries, with realised risk averaging $10.37 —
+risk sizing collapsing into fixed lots with extra steps. `InpRiskPerTrade`
+defaults to 15.0, where only 19% are floored and the realised average matches
+the target. Entries whose computed lot falls under the minimum are still placed,
+because dropping them would systematically discard the widest-stop setups, but
+the overshoot is logged.
+
+Because risk is per-trade and `InpMaxPositionsPerDir` caps concurrency, total
+simultaneous risk is bounded by construction — 2 directions x
+`InpRiskPerTrade` — which is what makes the daily allowance redundant here
+rather than merely unused.
+
+### One position per direction
+
+`InpMaxPositionsPerDir` counts open positions **and resting limit orders**.
+Counting only what is open would let several limits sit in the book and fill
+together, so the rule would hold on average and fail exactly when several zones
+confirm in a row. It is separate from `InpMaxTotalLots`, which caps volume —
+and volume stops mapping to a position count once lot size varies.
+
+### What stands down
+
+Structural mode gives each trade exactly two outcomes so the result can be
+stated in R. Everything else that writes SL or TP is disabled:
+
+| | why it would interfere |
+|---|---|
+| `CheckPartialClose` | splits P&L across two fills while `riskUsd` covers the whole position — and its breakeven step calls `PositionModify(ticket, entry, 0.0)`, zeroing the TP |
+| `CheckTrailingStop` | walks the stop away from the zone justifying it |
+| `CheckInvalidPositions` | overwrites the TP with a breakeven one; the structural stop already *is* the invalidation rule |
+| `CheckBatchTargetCloseAll` | the old architecture's primary exit, firing at an HTF-ATR-scaled threshold (~4.1x the LTF ATR the target uses) |
+| `RecalculateAggregateSL` | skips structural positions in **both** its loops — leaving their volume in the pooled total would compute the shared stop distance against size the budget does not govern |
+
+The batch target is gated in code rather than left to the preset: a preset that
+forgot it would still run, and would quietly measure something else.
+
+Portfolio-level closes (daily, session, final) are deliberately left alone —
+they are risk limits, not trade exits. When they do fire they truncate a trade,
+which is why `exit_reason` in the trade CSV matters: truncated trades can be
+segmented out of an R analysis instead of silently polluting it.
+
+---
+
+## Trade CSV (per-position)
+
+`InpTradeLog=true` (default). One row per closed position:
+`AjipSnD_Trades_<symbol>_<login>.csv` in `Common\\Files`, written from every
+path that removes an entry.
+
+```
+entry_time, exit_time, dir, entry_price, exit_price, sl_price, tp_price,
+sl_dist_pts, sl_dist_atr, lot, risk_usd, exit_reason, pnl_usd, pnl_r,
+mfe_usd, mae_usd, mfe_r, mae_r, atr_ltf, atr_htf, structural, ltf_zone_time
+```
+
+The batch CSV cannot serve this purpose. Its `CloseReason` explains why a
+*batch* was flushed, so a stop-out and a target hit both arrive as `BATCH_FLAT`
+— the EA only notices the position is gone. And its dollar P&L stops being
+comparable across trades once lot size varies with stop distance.
+
+Two columns carry most of the value:
+
+- **`pnl_r`** — P&L over the risk the trade was sized for. The only thing that
+  makes trades with different lot sizes comparable. It is 0 in batch mode,
+  where no per-trade risk was ever defined.
+- **`ltf_zone_time`** — the join key back to the zone CSV, connecting a trade's
+  outcome to the characteristics of the zone that produced it. The two could
+  previously only be measured separately. This is why `zoneTime` is threaded
+  from `PendingOrder` into `EntryTracker` at the fill.
+
+`exit_reason` comes from `DEAL_REASON` on the closing deal, so `SL` and `TP`
+reflect what the broker did rather than an inference. That lookup also sums
+profit + swap + **commission** across the position's deals and prefers that
+figure, since R should be net of costs. On the close-all path the deal may not
+have settled — the same history-timing gap the batch accounting works around —
+so the caller's value and close reason are used as fallbacks. In structural mode
+the dominant exits are broker-side and settle before they are read.
 
 ---
 
