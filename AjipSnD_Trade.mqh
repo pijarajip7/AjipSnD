@@ -664,23 +664,30 @@ void FlushBatchCSV(string reason)
    string filename = "AjipSnD_Batches_" + _Symbol + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
    bool exists = FileIsExist(filename, FILE_COMMON);
 
-   int handle = FileOpen(filename, FILE_COMMON | FILE_WRITE | FILE_READ | FILE_TXT, 0, CP_UTF8);
+   // FILE_CSV makes FileWrite insert the delimiter between fields; with plain
+   // FILE_TXT every field is concatenated into one unparseable string. The
+   // header hid this, being a single comma-containing literal. FILE_ANSI is
+   // what makes the CP_UTF8 codepage apply — without it the file is UTF-16.
+   int handle = FileOpen(filename,
+                         FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
+                         ',', CP_UTF8);
    if(handle == INVALID_HANDLE)
      {
       PrintFormat("AjipSnD: Cannot open batch CSV %s", filename);
       return;
      }
 
-   // Write header if new file
+   // Header if new file — one argument per column, so the delimiter count
+   // always matches the data row below
    if(!exists)
      {
-      FileSeek(handle, 0, SEEK_END);
-      FileWrite(handle, "CloseTime,CloseReason,PositionCount,Wins,Losses,BreakEven,TotalRealizedPnL,SumMFE,SumMAE,FirstEntryTime,LastEntryTime");
+      FileWrite(handle,
+                "CloseTime", "CloseReason", "PositionCount", "Wins", "Losses",
+                "BreakEven", "TotalRealizedPnL", "SumMFE", "SumMAE",
+                "FirstEntryTime", "LastEntryTime");
      }
    else
-     {
       FileSeek(handle, 0, SEEK_END);
-     }
 
    FileWrite(handle,
              TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
