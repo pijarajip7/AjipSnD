@@ -745,31 +745,29 @@ void ResetBatchAccumulator()
   }
 
 //==================================================================
-// CLOSE ALL AND FLUSH BATCH (atomic).
-// Capture POSITION_PROFIT BEFORE closing to avoid history-timing gap
-// where the deal hasn't settled yet. Always flush if anything accumulated.
+// CLOSE ALL AND FLUSH BATCH.
+// Snapshot POSITION_PROFIT BEFORE closing to avoid the history-timing gap
+// where the deal hasn't settled yet, but only bank a position once the close
+// has actually removed it. Flush once the batch is flat.
 //==================================================================
 void CloseAllAndFlushBatch(string reason)
   {
    int n = ArraySize(g_entries);
 
-   // ---- Accumulate from live position profit BEFORE closing ----
-   // This avoids the history-deal timing gap after PositionClose.
-   for(int i = n - 1; i >= 0; i--)
+   // ---- Snapshot live P&L BEFORE closing ----
+   // Once PositionClose succeeds the position is gone and the deal may not
+   // have settled into history yet, so the open position is the only reliable
+   // source for its profit. Index-aligned with g_entries; nothing between here
+   // and the banking loop below resizes that array (CancelAllPendingOrders
+   // touches g_pendingOrders, CloseAllPositions touches neither).
+   double net[];
+   ArrayResize(net, n);
+   for(int i = 0; i < n; i++)
      {
-      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-
-      double profit = PositionGetDouble(POSITION_PROFIT);
-      double swap   = PositionGetDouble(POSITION_SWAP);
-      double net    = profit + swap;  // commission only on deal, not position
-
-      g_batchCount++;
-      g_batchRealizedPnl += net;
-      g_batchMfeSum += g_entries[i].mfe;
-      g_batchMaeSum += g_entries[i].mae;
-      if(net > 0)       g_batchWins++;
-      else if(net < 0)  g_batchLosses++;
-      else              g_batchBreakEven++;
+      net[i] = 0.0;
+      if(PositionSelectByTicket(g_entries[i].ticket))
+         net[i] = PositionGetDouble(POSITION_PROFIT)
+                + PositionGetDouble(POSITION_SWAP);  // commission is on the deal, not the position
      }
 
    // ---- Cancel pending orders (except batch close-all — trading continues) ----
@@ -779,14 +777,48 @@ void CloseAllAndFlushBatch(string reason)
    // ---- Close all positions ----
    CloseAllPositions();
 
-   // ---- Remove entries whose positions are now gone ----
-   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+   // ---- Bank ONLY what actually closed ----
+   // A close can be rejected — market closed over a holiday, trade context
+   // busy — and the position then survives the call. Banking it anyway (which
+   // is what this function used to do, before CloseAllPositions was even
+   // called) wrote a batch row for positions still open and reset the
+   // accumulator; the next tick found the same trigger still true and repeated
+   // the whole thing, so one stalled close produced hundreds of duplicate rows
+   // carrying a zeroed FirstEntryTime. A 12-month XAUUSD backtest turned up 759
+   // such rows over three holiday sessions, inflating position counts ~2.5x.
+   // MathMin guards net[] against a future caller that adds entries mid-close:
+   // an out-of-range read halts the EA outright, and only the snapshot's own
+   // indices carry a P&L figure anyway.
+   for(int i = MathMin(ArraySize(g_entries), n) - 1; i >= 0; i--)
      {
-      if(!PositionSelectByTicket(g_entries[i].ticket))
-         RemoveEntry(i);
+      if(PositionSelectByTicket(g_entries[i].ticket))
+         continue;                      // still open — retry on the next tick
+
+      g_batchCount++;
+      g_batchRealizedPnl += net[i];
+      g_batchMfeSum += g_entries[i].mfe;
+      g_batchMaeSum += g_entries[i].mae;
+      if(net[i] > 0)       g_batchWins++;
+      else if(net[i] < 0)  g_batchLosses++;
+      else                 g_batchBreakEven++;
+
+      RemoveEntry(i);
      }
 
-   // ---- Always flush if anything was accumulated ----
+   // ---- Flush once the batch is actually flat ----
+   // Waiting for flat keeps one CSV row per batch even when a close needed
+   // several attempts, instead of fragmenting it into one row per attempt.
+   // Every caller re-checks its trigger each tick, so a stalled close simply
+   // retries until it lands; CheckEntryCleanup() flushes as BATCH_FLAT if the
+   // positions go away by some other route first.
+   int remaining = ArraySize(g_entries);
+   if(remaining > 0)
+     {
+      PrintFormat("AjipSnD: %s close incomplete — %d position(s) still open, "
+                  "batch flush deferred", reason, remaining);
+      return;
+     }
+
    if(g_batchCount > 0)
      {
       FlushBatchCSV(reason);

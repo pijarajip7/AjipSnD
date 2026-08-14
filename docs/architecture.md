@@ -336,6 +336,33 @@ LastEntryTime. File: `AjipSnD_Batches_<symbol>_<login>.csv` in `Common\\Files`.
 Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
 `BATCH_MAX_LOSS`, `BATCH_FLAT`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
 
+### A row means positions actually closed
+
+`CloseAllAndFlushBatch()` banks a position only after the close has removed
+it, and flushes only once the batch is flat. This matters because
+`PositionClose` can be rejected — market closed over a holiday, trade context
+busy — and every caller re-checks its trigger on the next tick.
+
+The function used to bank all open positions *before* calling
+`CloseAllPositions()` and flush regardless of the outcome. When a close was
+rejected the positions survived, but the row was written and the accumulator
+reset anyway; the next tick found the same trigger still true and repeated the
+whole sequence. One stalled close therefore produced hundreds of duplicate
+rows, recognisable by a `FirstEntryTime` of `1970.01.01 00:00:00` (the zeroed
+`g_batchFirstEntryTime`), a `PositionCount` that never decreases, and a
+`TotalRealizedPnL` that drifts slightly per row because it is re-read from
+still-open positions. Two 12-month XAUUSD runs contained 759 such rows across
+three holiday sessions, inflating counted positions to 2.5x the number of
+entries the zone log recorded — enough to reverse the sign of an A/B comparison
+if read at face value.
+
+Deferring the flush until the batch is flat keeps one row per batch when a
+close needs several attempts, rather than fragmenting it into one row per
+attempt (which would corrupt batch-level statistics just as badly). A deferred
+flush logs `close incomplete — N position(s) still open`. If the remaining
+positions disappear by another route first, `CheckEntryCleanup()` flushes the
+batch as `BATCH_FLAT`.
+
 ---
 
 ## Zone Quality CSV (backtest analysis)
