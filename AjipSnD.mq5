@@ -15,7 +15,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "1.05-excursion"
+#define EA_BUILD "1.06-stopprobe"
 
 #include <Trade\Trade.mqh>
 
@@ -140,6 +140,11 @@ input bool InpTradeLog       = true;  // Log zone quality metrics to CSV for bac
 input bool InpExcursionLog   = false; // Log first-touch grid per entry opportunity (offline SL/TP surface)
 input int  InpExcursionBars  = 240;   // Horizon tracked after the limit is touched (M1 bars)
 input int  InpExcursionArmBars = 60;  // How long an untouched limit stays armed (M1 bars)
+// Arms a STOP-entry ladder alongside the traded limit on every zone: same edge,
+// opposite direction of fill, plus 0.25/0.50/1.00 ATR of demanded proof. Costs
+// four extra observation records per zone and places no orders. This is the one
+// entry axis run #5 could not rank, because only the limit was ever observed.
+input bool InpStopEntryProbe = false; // Also observe stop-entry variants (measurement only)
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -168,12 +173,13 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) | %s %s",
+   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s | %s %s",
                EA_BUILD,
                InpStructuralSlMode ? "ON" : "off",
                InpMaxRiskOvershoot,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
+               InpStopEntryProbe ? "ON" : "off",
                _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
 
    // Cache symbol info

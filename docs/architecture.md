@@ -60,6 +60,7 @@ InpMaxRiskOvershoot   = 1.25  — Cap on actual/budgeted risk when min lot floor
 InpExcursionLog     = false — First-touch grid per entry opportunity (offline SL/TP surface)
 InpExcursionBars    = 240   — Horizon tracked after the limit is touched (M1 bars)
 InpExcursionArmBars = 60    — How long an untouched limit stays armed (M1 bars)
+InpStopEntryProbe   = false — Also observe stop-entry variants (5 records/zone, no orders)
 ```
 
 **Risk Management — Final** (permanen, lintas hari)
@@ -624,6 +625,37 @@ proximal edge.
 
 `session_end_sec` records when `InSession()` first failed, so a session-close
 policy can be applied offline instead of being baked into the run.
+
+### Stop-entry probe
+
+`InpStopEntryProbe=false` by default. When on, every zone arms **five** records
+instead of one: the traded limit, plus stops at 0.00 / 0.25 / 0.50 / 1.00 ATR
+beyond the same edge. `entry_kind` and `offset_atr` separate them.
+
+The traded entry is a limit at the zone's proximal edge, so it fills while price
+is moving *into* the zone — selected for exactly the moves that keep going. Run
+#4/#5 measured that cost: 91.6% of resting orders filled, 97.4% at the proximal
+edge, and the entry ran ~4pp below a driftless walk at every one of 169
+geometries, a leak of 100–200 points that spread cannot explain.
+
+A stop at the **same level** inverts the selection: it fills only once price has
+come back out through the edge. Same zone, same price, opposite direction of
+fill — nothing else about the setup changes, which is what makes the comparison
+an isolation of the fill mechanism rather than of the setup.
+
+Two details carry the design:
+
+- **Priming.** A stop record is inert until price actually enters the zone. At
+  validation price sits *beyond* the zone, so an unprimed BUY STOP would fire on
+  the arming tick and measure a market order wearing a stop order's name. The
+  stop's own timeout runs from priming, not from arming: waiting for price to
+  revisit the zone is not evidence about the entry.
+- **One record per offset.** The excursion origin moves with the entry price,
+  and an origin shift cannot be reconstructed from another origin's stamps — so
+  each rung is observed separately rather than derived.
+
+The probe places no orders. `filled` stays exclusive to the limit record, since
+that is still the only entry the EA trades.
 
 ---
 
