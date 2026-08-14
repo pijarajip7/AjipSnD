@@ -53,6 +53,9 @@ void RebuildTrackedPositions()
    g_batchActive         = true;
    g_batchFirstEntryTime = firstTime;
    g_batchLastEntryTime  = lastTime;
+   // Batch's original starting ATR is not recoverable on restart — use the
+   // current reading, same fallback used for atrAtEntry above.
+   g_batchAtrAtStart     = GetAtrValue(true);
 
    if(InpEnableLog) PrintFormat("AjipSnD: Rebuilt tracking for %d pre-existing position(s) on restart.", recovered);
   }

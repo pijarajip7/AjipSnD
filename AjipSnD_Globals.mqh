@@ -116,6 +116,7 @@ int            g_batchBreakEven      = 0;
 double         g_batchRealizedPnl    = 0.0;
 double         g_batchMfeSum         = 0.0;
 double         g_batchMaeSum         = 0.0;
+double         g_batchAtrAtStart     = 0.0;  // HTF ATR frozen at first entry — batch target scale
 datetime       g_lastBatchEndTime    = 0;
 
 // ---- Symbol info cache ----

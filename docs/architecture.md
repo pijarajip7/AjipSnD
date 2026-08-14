@@ -60,8 +60,9 @@ InpDailyMaxLoss   = 280.0  — Close all + block entries rest of day
 
 **Risk Management — Batch**
 ```
-InpBatchMaxProfit       = 20.0  — Close batch only
-InpBatchMaxLoss         = 0.0   — Close batch only
+InpBatchMaxProfitAtr    = 1.0   — Target as x HTF ATR (frozen at batch start) x current open volume (0=use fixed $)
+InpBatchMaxProfit       = 20.0  — Fixed $ batch target, used when InpBatchMaxProfitAtr=0
+InpBatchMaxLoss         = 0.0   — Close batch only (always $ — not ATR-scaled)
 InpBatchCooldownMinutes = 11    — Cooldown after batch flat
 ```
 
@@ -297,8 +298,28 @@ Pooled budget per direction, same SL price for all positions:
 | | Batch | Daily |
 |---|---|---|
 | Total | g_batchRealizedPnl + floating | GetDailyPnL() + floating |
+| Target | BatchProfitThreshold() — ATR x volume, or fixed $ | InpDailyMaxProfit (always $) |
 | Effect | Close batch only | Close all + block entries rest of day |
 | After hit | New batch can start immediately | No entries until next day |
+
+`BatchProfitThreshold()` returns `InpBatchMaxProfitAtr x g_batchAtrAtStart x
+(tickValue/tickSize) x totalOpenVolume`, falling back to the fixed
+`InpBatchMaxProfit` when the ATR mode is off or no ATR/volume reading is
+available. `g_batchAtrAtStart` is the HTF ATR frozen at the batch's first
+entry (`AddEntry()`); `totalOpenVolume` is summed live from `g_entries[]` each
+check, so a batch running more size needs a proportionally bigger move to
+close. Scaling by volume matters because floating PnL scales with volume —
+without it, a 10-position batch and a 1-position batch would cap at the same
+dollar figure despite very different size.
+
+A backtest comparing the zone quality gate ON vs OFF across two 12-month
+XAUUSD periods found `BATCH_TARGET` realizing ~$20 on average in every run —
+regardless of volatility regime or entries filtered — because a fixed dollar
+cap always lands near itself the moment it's crossed. That flatness is what
+motivated the ATR scaling: it made it structurally impossible for a
+better-quality batch to bank a bigger win than a mediocre one.
+
+`InpBatchMaxLoss` is unaffected — still a plain dollar figure, not ATR-scaled.
 
 ### Final Close-All
 

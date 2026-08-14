@@ -48,7 +48,8 @@ input double InpDailyMaxProfit = 60.0;   // Daily target — close all + block e
 input double InpDailyMaxLoss   = 280.0;  // Daily max loss — close all + block entries rest of day (0=disabled)
 
 input group "Risk Management — Batch"
-input double InpBatchMaxProfit       = 20.0;  // Batch target — close batch only, new entries allowed (0=disabled)
+input double InpBatchMaxProfitAtr    = 1.0;   // Batch target as x HTF ATR frozen at batch start, x current open volume (0=use fixed $)
+input double InpBatchMaxProfit       = 20.0;  // Fixed $ batch target — used when InpBatchMaxProfitAtr=0 (0=disabled)
 input double InpBatchMaxLoss         = 0.0;   // Batch max loss — close batch only, new entries allowed (0=disabled)
 input int    InpBatchCooldownMinutes = 11;     // Cooldown after batch flat before new batch (0=disabled)
 

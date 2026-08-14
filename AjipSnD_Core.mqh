@@ -509,7 +509,10 @@ void DrawPanel()
    PANEL_LABEL("Final:     " + s, LimitCol(s));
    s = LimitTxt(InpDailyMaxProfit, InpDailyMaxLoss, todayPnl + floating);
    PANEL_LABEL("Daily:     " + s, LimitCol(s));
-   s = LimitTxt(InpBatchMaxProfit, InpBatchMaxLoss, g_batchRealizedPnl + floating);
+   // BatchProfitThreshold(), not raw InpBatchMaxProfit — otherwise this
+   // status lags/misreads once InpBatchMaxProfitAtr is active, since the
+   // real trigger is a live ATR x volume figure, not the fixed $ input.
+   s = LimitTxt(BatchProfitThreshold(), InpBatchMaxLoss, g_batchRealizedPnl + floating);
    PANEL_LABEL("Batch:     " + s, LimitCol(s));
    
    // ---- Cooldown / Session / News ----

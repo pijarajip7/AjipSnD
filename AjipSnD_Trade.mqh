@@ -60,6 +60,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice)
      {
       g_batchActive = true;
       g_batchFirstEntryTime = TimeCurrent();
+      g_batchAtrAtStart = GetAtrValue(true);
      }
    g_batchLastEntryTime = TimeCurrent();
   }
@@ -740,6 +741,7 @@ void ResetBatchAccumulator()
    g_batchRealizedPnl    = 0.0;
    g_batchMfeSum         = 0.0;
    g_batchMaeSum         = 0.0;
+   g_batchAtrAtStart     = 0.0;
   }
 
 //==================================================================
@@ -793,16 +795,52 @@ void CloseAllAndFlushBatch(string reason)
      }
   }
 
+//---- Batch profit-close trigger in account currency ----
+// With InpBatchMaxProfitAtr > 0 the target scales with the HTF ATR frozen at
+// batch start AND the batch's current open volume, so a batch running more
+// size needs a proportionally bigger move to close, and the target keeps its
+// meaning whether XAUUSD is calm or volatile. A fixed dollar cap does
+// neither: a live backtest comparison found BATCH_TARGET realizing ~$20 on
+// average in every run regardless of regime or how many positions were in
+// the batch — a hard cap always lands near itself, which is exactly why it
+// discards whatever excursion advantage a larger or better-timed batch
+// accumulated. ATR is taken at batch start rather than live, matching how
+// InpPartialCloseAtr freezes ATR at position entry.
+double BatchProfitThreshold()
+  {
+   if(InpBatchMaxProfitAtr <= 0 || g_batchAtrAtStart <= 0)
+      return(InpBatchMaxProfit);
+
+   double totalVolume = 0.0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(PositionSelectByTicket(g_entries[i].ticket))
+         totalVolume += PositionGetDouble(POSITION_VOLUME);
+     }
+   if(totalVolume <= 0)
+      return(InpBatchMaxProfit);
+
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0)
+      return(InpBatchMaxProfit);
+
+   return(InpBatchMaxProfitAtr * g_batchAtrAtStart * (tickValue / tickSize) * totalVolume);
+  }
+
 //==================================================================
 // CHECK BATCH CLOSE-ALL — TARGET only (gated by news)
 //==================================================================
 void CheckBatchTargetCloseAll()
   {
-   if(InpBatchMaxProfit <= 0) return;
+   if(InpBatchMaxProfit <= 0 && InpBatchMaxProfitAtr <= 0) return;
+   double threshold = BatchProfitThreshold();
+   if(threshold <= 0) return;
+
    double total = g_batchRealizedPnl + GetFloatingPnL();
-   if(total >= InpBatchMaxProfit)
+   if(total >= threshold)
      {
-      PrintFormat("AjipSnD: BATCH TARGET HIT (%.2f >= %.2f) — closing batch", total, InpBatchMaxProfit);
+      PrintFormat("AjipSnD: BATCH TARGET HIT (%.2f >= %.2f) — closing batch", total, threshold);
       CloseAllAndFlushBatch("BATCH_TARGET");
      }
   }
