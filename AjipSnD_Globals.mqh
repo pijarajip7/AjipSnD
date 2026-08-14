@@ -84,6 +84,7 @@ struct PendingOrder
    double   price;     // limit price
    datetime zoneTime;  // LTF zone time that triggered this order
    double   slPrice;   // structural SL frozen at placement (0=none / batch mode)
+   double   tpPrice;   // structural TP frozen at placement (0=none)
    double   lot;       // volume actually submitted
    double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
    double   atrLtf;    // LTF ATR at placement — carried through to the position
@@ -269,6 +270,30 @@ bool MaxTotalLotsReached(int dir)
         }
      }
    return(total + InpFixedLot > InpMaxTotalLots);
+  }
+
+//---- Open positions + resting limit orders in a direction ----
+// Pendings are counted because the cap is about how many positions can come to
+// exist, and a resting limit is a position that has not happened yet. Counting
+// only what is already open would let several limits sit in the book at once
+// and fill together, quietly breaking a "one position per direction" rule.
+int DirectionalExposureCount(int dir)
+  {
+   int n = 0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+      if(g_entries[i].dir == dir && PositionSelectByTicket(g_entries[i].ticket))
+         n++;
+   for(int i = 0; i < ArraySize(g_pendingOrders); i++)
+      if(g_pendingOrders[i].dir == dir && OrderSelect(g_pendingOrders[i].ticket))
+         n++;
+   return(n);
+  }
+
+//---- Position count cap per direction reached? ----
+bool MaxPositionsReached(int dir)
+  {
+   if(InpMaxPositionsPerDir <= 0) return(false);
+   return(DirectionalExposureCount(dir) >= InpMaxPositionsPerDir);
   }
 
 //---- Batch cooldown active? ----

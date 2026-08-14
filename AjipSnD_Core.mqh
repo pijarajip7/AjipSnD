@@ -143,6 +143,7 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
    // (3293 pts) exceeds the LTF zone's own width (1995 pts), so that stop is
    // touched ~59% of the time versus ~17% for the HTF anchor.
    double slPrice = 0.0;
+   double tpPrice = 0.0;
    if(InpStructuralSlMode)
      {
       double atrLtf = GetAtrValue(false);
@@ -155,6 +156,16 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
       slPrice = confirmed.isDemand
                 ? NormalizeDouble(g_htfDemandZones[htfIdx].low  - buffer, g_digits)
                 : NormalizeDouble(g_htfSupplyZones[htfIdx].high + buffer, g_digits);
+
+      // Target measured from the entry in LTF ATR, not from the zone: the stop
+      // is anchored to structure, the target to how far price actually travels.
+      if(InpTakeProfitAtr > 0)
+        {
+         double reach = InpTakeProfitAtr * atrLtf;
+         tpPrice = confirmed.isDemand
+                   ? NormalizeDouble(limitPrice + reach, g_digits)
+                   : NormalizeDouble(limitPrice - reach, g_digits);
+        }
      }
 
    // (the old ArraySize()==0 guard here is redundant: htfIdx >= 0 can only come
@@ -163,13 +174,13 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
    // One-shot per LTF zone
    if(confirmed.time == g_ltfZonePendingTime) return(false);
 
-   PrintFormat("AjipSnD: LTF %s zone VALIDATED — placing %s LIMIT at %.5f (SL %.5f)",
+   PrintFormat("AjipSnD: LTF %s zone VALIDATED — placing %s LIMIT at %.5f (SL %.5f, TP %.5f)",
                confirmed.isDemand ? "DEMAND" : "SUPPLY",
-               dir == 1 ? "BUY" : "SELL", limitPrice, slPrice);
+               dir == 1 ? "BUY" : "SELL", limitPrice, slPrice, tpPrice);
 
    if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
      {
-      PlacePendingOrder(dir, limitPrice, confirmed.time, slPrice);
+      PlacePendingOrder(dir, limitPrice, confirmed.time, slPrice, tpPrice);
       g_ltfZonePendingTime = confirmed.time;
       return(true);
      }

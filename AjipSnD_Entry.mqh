@@ -131,6 +131,12 @@ bool EntryGateBlocked(int dir)
                                    dir == 1 ? "BUY" : "SELL");
       return(true);
      }
+   if(MaxPositionsReached(dir))
+     {
+      if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — %d position(s)/pending already open for %s",
+                                   InpMaxPositionsPerDir, dir == 1 ? "BUY" : "SELL");
+      return(true);
+     }
    if(HedgeBlocked(dir))
      {
       if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — Hedging disabled, opposite side open for %s",

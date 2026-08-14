@@ -52,6 +52,18 @@ input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the HTF zone's fa
 // trades and the realised average lands near $10 anyway. At $15 only 19% are
 // floored and the realised average matches the target.
 input double InpRiskPerTrade      = 15.0;  // Risk per trade ($, structural mode; 0=use InpFixedLot)
+// Target distance in LTF ATR. Deliberately NOT reusing InpBatchMaxProfitAtr:
+// that one is scaled by HTF ATR, which measures ~4.1x the LTF ATR, so a value
+// of 1.0 there is a ~4.1 LTF-ATR target. Against a stop at the HTF zone's far
+// edge, targets of 2.0 LTF ATR and beyond are unreachable — the share of
+// entries that ever travel that far (61%) is already below the win rate such a
+// reward:risk needs to break even (66%).
+input double InpTakeProfitAtr     = 1.0;   // TP distance in LTF ATR (0=no TP)
+// Counts open positions AND resting limit orders in the direction. 0 keeps the
+// batch architecture's unlimited accumulation; the structural preset sets 1.
+// Separate from InpMaxTotalLots, which caps volume — and volume stops mapping
+// to a position count the moment lot size varies with stop distance.
+input int    InpMaxPositionsPerDir = 0;    // Max positions+pendings per direction (0=disabled)
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)

@@ -65,7 +65,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const PendingOrder &po)
                                    : po.lot;
    g_entries[sz].hasStructuralSl = (po.slPrice > 0.0);
    g_entries[sz].slPrice         = po.slPrice;
-   g_entries[sz].tpPrice         = 0.0;   // set in the take-profit step
+   g_entries[sz].tpPrice         = po.tpPrice;
    g_entries[sz].riskUsd         = po.riskUsd;
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
    g_entries[sz].zoneTime        = po.zoneTime;
@@ -106,28 +106,31 @@ double GetFloatingPnL()
 // PENDING ORDER — BUY LIMIT / SELL LIMIT
 //==================================================================
 
-//---- Push an SL out to the broker's minimum stop distance if it sits too close ----
-// SYMBOL_TRADE_STOPS_LEVEL is the closest an SL may sit to the order price;
-// inside it the order is rejected outright. A structural stop is normally far
-// wider than this, so the clamp should almost never fire — but a zone whose far
-// edge nearly touches the limit price would otherwise lose the whole entry.
-// Widening is the safe direction: it can only make the stop less tight than the
-// zone justified, never more.
-double ClampToStopsLevel(int dir, double price, double slPrice)
+//---- Push an SL or TP out to the broker's minimum stop distance ----
+// SYMBOL_TRADE_STOPS_LEVEL is the closest either level may sit to the order
+// price; inside it the order is rejected outright. Structural levels are
+// normally far wider, so this should rarely fire — but a zone edge nearly
+// touching the limit price would otherwise cost the whole entry.
+//
+// isStopLoss flips which side of the price the level belongs on: an SL sits
+// against the trade, a TP with it. For a BUY that means SL below and TP above;
+// for a SELL the reverse. Widening is the only legal direction in both cases.
+double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
   {
-   if(slPrice <= 0.0) return(slPrice);
+   if(level <= 0.0) return(level);
 
    long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   if(stopsLevel <= 0) return(slPrice);
+   if(stopsLevel <= 0) return(level);
 
+   int    side    = isStopLoss ? -dir : dir;   // +1 = level above price
    double minDist = stopsLevel * g_point;
-   double dist    = (dir == 1) ? (price - slPrice) : (slPrice - price);
-   if(dist >= minDist) return(slPrice);
+   double dist    = side * (level - price);
+   if(dist >= minDist) return(level);
 
-   double widened = (dir == 1) ? (price - minDist) : (price + minDist);
-   PrintFormat("AjipSnD: SL %.5f inside broker stops level (%.1f pts) — widened to %.5f",
-               slPrice, (double)stopsLevel, widened);
-   return(NormalizeDouble(widened, g_digits));
+   double widened = NormalizeDouble(price + side * minDist, g_digits);
+   PrintFormat("AjipSnD: %s %.5f inside broker stops level (%.1f pts) — widened to %.5f",
+               isStopLoss ? "SL" : "TP", level, (double)stopsLevel, widened);
+   return(widened);
   }
 
 //---- Lot sized so that hitting slDistance costs about InpRiskPerTrade ----
@@ -174,9 +177,11 @@ double LotForRisk(double slDistance, double &actualRisk)
 // Order matters here: the SL is clamped to the broker's stop level BEFORE the
 // lot is sized, because the clamp can widen the stop and the lot has to be
 // sized against the distance actually submitted, not the one first requested.
-ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice)
+ulong PlacePendingOrder(int dir, double price, datetime zoneTime,
+                        double slPrice, double tpPrice)
   {
-   slPrice = ClampToStopsLevel(dir, price, slPrice);
+   slPrice = ClampToStopsLevel(dir, price, slPrice, true);
+   tpPrice = ClampToStopsLevel(dir, price, tpPrice, false);
 
    double slDistance = (slPrice > 0.0)
                        ? ((dir == 1) ? (price - slPrice) : (slPrice - price))
@@ -200,9 +205,9 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice
    string comment = StringFormat("AjipSnD %s", dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
    bool ok;
    if(dir == 1)
-      ok = trade.BuyLimit(lot, price, _Symbol, slPrice, 0.0, ORDER_TIME_GTC, 0, comment);
+      ok = trade.BuyLimit(lot, price, _Symbol, slPrice, tpPrice, ORDER_TIME_GTC, 0, comment);
    else
-      ok = trade.SellLimit(lot, price, _Symbol, slPrice, 0.0, ORDER_TIME_GTC, 0, comment);
+      ok = trade.SellLimit(lot, price, _Symbol, slPrice, tpPrice, ORDER_TIME_GTC, 0, comment);
 
    if(!ok)
      {
@@ -211,8 +216,8 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice
      }
 
    ulong ticket = trade.ResultOrder();
-   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f, SL=%.5f",
-               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price, slPrice);
+   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f, SL=%.5f, TP=%.5f",
+               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price, slPrice, tpPrice);
 
    // Track pending order
    int sz = ArraySize(g_pendingOrders);
@@ -222,6 +227,7 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice
    g_pendingOrders[sz].price    = price;
    g_pendingOrders[sz].zoneTime = zoneTime;
    g_pendingOrders[sz].slPrice  = slPrice;
+   g_pendingOrders[sz].tpPrice  = tpPrice;
    g_pendingOrders[sz].lot      = lot;
    g_pendingOrders[sz].riskUsd  = actualRisk;
    g_pendingOrders[sz].atrLtf   = GetAtrValue(false);
@@ -557,6 +563,13 @@ double PartialCloseThreshold(double atrAtEntry, double volume)
 
 void CheckPartialClose()
   {
+   // Structural mode gives each trade exactly two outcomes, SL or TP, so that a
+   // result can be stated in R. Partial close breaks that twice over: it splits
+   // the realised P&L across two fills while riskUsd was computed for the whole
+   // position, and its breakeven step calls PositionModify(ticket, entry, 0.0),
+   // which zeroes the take profit outright.
+   if(InpStructuralSlMode) return;
+
    if(InpPartialClosePercent <= 0) return;
    if(InpPartialCloseProfit <= 0 && InpPartialCloseAtr <= 0) return;
 
@@ -626,6 +639,9 @@ void CheckPartialClose()
 //==================================================================
 void CheckTrailingStop()
   {
+   // Would walk the structural stop away from the zone that justified it.
+   if(InpStructuralSlMode) return;
+
    if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
 
    MqlTick ticks[1];
@@ -688,6 +704,12 @@ void CheckTrailingStop()
 //==================================================================
 void CheckInvalidPositions()
   {
+   // Overwrites the take profit with a breakeven one. In structural mode the
+   // stop already IS the invalidation rule — price leaving the HTF zone is
+   // exactly what it is placed beyond — so this would be a second, competing
+   // answer to the same question.
+   if(InpStructuralSlMode) return;
+
    if(InpPosMaxLoss <= 0) return;  // feature disabled
 
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
@@ -964,6 +986,13 @@ double BatchProfitThreshold()
 //==================================================================
 void CheckBatchTargetCloseAll()
   {
+   // The batch target is the old architecture's primary exit and would close
+   // positions before their own take profit, at a threshold scaled by HTF ATR
+   // — roughly 4.1x the LTF ATR the target is expressed in. Gated in code
+   // rather than left to the preset, because a preset that forgot it would
+   // still run and quietly measure the wrong thing.
+   if(InpStructuralSlMode) return;
+
    if(InpBatchMaxProfit <= 0 && InpBatchMaxProfitAtr <= 0) return;
    double threshold = BatchProfitThreshold();
    if(threshold <= 0) return;
