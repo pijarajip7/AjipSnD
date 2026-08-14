@@ -408,7 +408,13 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
    string filename = ZoneCsvFilename();
    bool exists = FileIsExist(filename, FILE_COMMON);
 
-   int handle = FileOpen(filename, FILE_COMMON | FILE_WRITE | FILE_READ | FILE_TXT, 0, CP_UTF8);
+   // FILE_CSV makes FileWrite insert the delimiter between fields; with plain
+   // FILE_TXT every field is concatenated into one unparseable string.
+   // FILE_ANSI is what makes the CP_UTF8 codepage apply — without it the file
+   // is written as UTF-16.
+   int handle = FileOpen(filename,
+                         FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
+                         ',', CP_UTF8);
    if(handle == INVALID_HANDLE)
      {
       if(InpEnableLog)
@@ -416,15 +422,17 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       return;
      }
 
-   // Header if new file
+   // Header if new file — one argument per column, so the delimiter count
+   // always matches the data rows below
    if(!exists)
      {
       FileWrite(handle,
-         "action,outcome,tf,type,zone_time,high,low,confirm_close,confirm_level",
-         "atr,width_atr,disp_body_atr,disp_range_atr,base_bars",
-         "swept_low,swept_high,validated,entry_placed",
-         "bars_since,bars_to_touch,touched,touch_depth_pts",
-         "max_fav_pts,max_adv_pts,fav_after_touch_pts,trend_at_confirm");
+         "action", "outcome", "tf", "type", "zone_time",
+         "high", "low", "confirm_close", "confirm_level",
+         "atr", "width_atr", "disp_body_atr", "disp_range_atr", "base_bars",
+         "swept_low", "swept_high", "validated", "entry_placed",
+         "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
+         "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -557,11 +565,15 @@ void UpdateZoneTracking(const MqlRates &bar, bool htf)
   }
 
 //---- Find a tracked zone by TF + type + confirmation time ----
+// Only zones still collecting stats are matched. A resolved zone keeps its
+// slot in the array, and matching it again would write a second OUTCOME row
+// carrying frozen stats (UpdateZoneTracking skips inactive entries).
 int FindTrackedZone(bool htf, bool isDemand, datetime zoneTime)
   {
    for(int i = 0; i < ArraySize(g_zoneTracker); i++)
      {
-      if(g_zoneTracker[i].isHtf == htf &&
+      if(g_zoneTracker[i].trackingActive &&
+         g_zoneTracker[i].isHtf == htf &&
          g_zoneTracker[i].isDemand == isDemand &&
          g_zoneTracker[i].time == zoneTime)
          return(i);
