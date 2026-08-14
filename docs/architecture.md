@@ -52,6 +52,7 @@ InpZoneSlBufferAtr    = 0.5   — SL buffer beyond the HTF zone's far edge, in L
 InpRiskPerTrade       = 15.0  — Risk per trade ($); lot derived from it (0=use InpFixedLot)
 InpTakeProfitAtr      = 1.0   — TP distance from entry, in LTF ATR (0=no TP)
 InpMaxPositionsPerDir = 0     — Max positions+pendings per direction (0=disabled)
+InpMaxRiskOvershoot   = 1.25  — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
 
 **Risk Management — Final** (permanen, lintas hari)
@@ -485,14 +486,48 @@ and stop distances run 3.9–12.6 price units across the quartiles. A $5 budget 
 therefore unreachable on 64% of entries, with realised risk averaging $10.37 —
 risk sizing collapsing into fixed lots with extra steps. `InpRiskPerTrade`
 defaults to 15.0, where only 19% are floored and the realised average matches
-the target. Entries whose computed lot falls under the minimum are still placed,
-because dropping them would systematically discard the widest-stop setups, but
-the overshoot is logged.
+the target.
+
+Where the floor bites, the position can only be opened by risking **more** than
+the budget, and `InpMaxRiskOvershoot` decides how much more is tolerable. Run #4
+accepted the floor unconditionally, and the result was a risk cap that leaked:
+5.2% of trades exceeded the budget and the worst risked $38.26 against $15 —
+2.5x, on a 18.4-ATR stop. The worst single loss of the run, -$31.49, was not
+slippage; it was sized that way on purpose.
+
+The cap is a multiple rather than a hard 1.00 because volume-step rounding puts
+many entries barely over the line. Measured against run #4:
+
+| `InpMaxRiskOvershoot` | entries dropped | worst risk left |
+|---|---|---|
+| 1.00 | 5.8% | $15.00 |
+| **1.25** (default) | **3.4%** | **$18.73** |
+| 1.50 | 1.3% | $22.38 |
+| 0 (no cap) | 0% | $38.26 |
+
+Expectancy is unchanged at -0.065 R at every threshold, so the cap bounds the
+tail without touching the edge — and 0 restores the run #4 behaviour for an
+unbiased measurement pass, where discarding the widest-stop setups would skew
+the sample.
 
 Because risk is per-trade and `InpMaxPositionsPerDir` caps concurrency, total
 simultaneous risk is bounded by construction — 2 directions x
-`InpRiskPerTrade` — which is what makes the daily allowance redundant here
-rather than merely unused.
+`InpRiskPerTrade` x `InpMaxRiskOvershoot` — which is what makes the daily
+allowance redundant here rather than merely unused.
+
+### entry_placed means an order exists
+
+`PlaceEntryForZone()` returns whether an order was actually accepted, not
+whether a zone was worth trading. It used to return `true` before knowing:
+entries rejected by the broker's volume range or by a failed send were latched
+and still recorded as `entry_placed=1` in the zone CSV. Adding a risk cap would
+have widened that gap by roughly 60 phantom rows per run.
+
+The zone is still latched on a rejected entry — the same setup would be
+re-evaluated identically on the next tick, so retrying only floods the log — but
+the CSV column now tracks orders, not intentions. This corrects the column in
+batch mode too; trading behaviour there is unchanged, but `entry_placed` counts
+from run #4 and earlier are not directly comparable.
 
 ### One position per direction
 

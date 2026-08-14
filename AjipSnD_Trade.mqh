@@ -140,10 +140,15 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 // InpPartialCloseAtr and InpBatchMaxProfitAtr already use.
 //
 // The broker's minimum lot puts a hard floor under achievable risk. When the
-// computed lot lands under it the position is opened at the minimum anyway
-// rather than skipped — dropping those trades would systematically discard the
-// widest-stop setups and bias the sample — but the real risk is returned
-// through actualRisk so the caller can log the overshoot instead of hiding it.
+// computed lot lands under it the position can only be opened by risking more
+// than the budget, so InpMaxRiskOvershoot decides: accept the floor while the
+// overshoot stays within tolerance, otherwise return 0 and let the caller skip
+// the entry. Either way the real figure comes back through actualRisk, so the
+// overshoot is logged rather than hidden.
+//
+// Returns 0.0 to mean "do not trade this setup" — distinct from the fallback
+// path above it, which returns InpFixedLot to mean "risk sizing does not apply
+// here". Callers must treat 0.0 as a skip, not as a lot.
 double LotForRisk(double slDistance, double &actualRisk)
   {
    actualRisk = 0.0;
@@ -161,7 +166,22 @@ double LotForRisk(double slDistance, double &actualRisk)
    double lot = InpRiskPerTrade / lossPerLot;
    if(g_volStep > 0)
       lot = MathFloor(lot / g_volStep) * g_volStep;
-   if(lot < g_volMin) lot = g_volMin;
+
+   if(lot < g_volMin)
+     {
+      double floorRisk = g_volMin * lossPerLot;
+      if(InpMaxRiskOvershoot > 0
+         && floorRisk > InpRiskPerTrade * InpMaxRiskOvershoot)
+        {
+         PrintFormat("AjipSnD: entry skipped — min lot %.2f on a %.1f pt stop risks %.2f, "
+                     "budget %.2f, cap %.2f",
+                     g_volMin, slDistance / g_point, floorRisk, InpRiskPerTrade,
+                     InpRiskPerTrade * InpMaxRiskOvershoot);
+         return(0.0);
+        }
+      lot = g_volMin;
+     }
+
    if(lot > g_volMax) lot = g_volMax;
 
    lot = NormalizeDouble(lot, 8);
@@ -189,6 +209,11 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime,
 
    double actualRisk = 0.0;
    double lot = LotForRisk(slDistance, actualRisk);
+
+   // 0.0 is LotForRisk's skip signal — the risk cap already logged the reason,
+   // so returning quietly here avoids a second, misleading "outside broker
+   // range" line for a decision that was deliberate.
+   if(lot <= 0.0) return(0);
 
    if(lot < g_volMin || lot > g_volMax)
      {

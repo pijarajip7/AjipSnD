@@ -64,6 +64,16 @@ input double InpTakeProfitAtr     = 1.0;   // TP distance in LTF ATR (0=no TP)
 // Separate from InpMaxTotalLots, which caps volume — and volume stops mapping
 // to a position count the moment lot size varies with stop distance.
 input int    InpMaxPositionsPerDir = 0;    // Max positions+pendings per direction (0=disabled)
+// The broker's minimum lot puts a hard floor under achievable risk: once the
+// stop is wide enough that the budget buys less than volMin, the position can
+// only be opened by risking MORE than the budget. This caps how much more.
+// Measured on run #4, where the floor was accepted unconditionally: 5.2% of
+// trades exceeded the budget and the worst risked $38.26 against $15 — 2.5x.
+// 1.25 is not a hard 1.00 because volume-step rounding puts many trades barely
+// over the line; at 1.00 it would drop 5.8% of entries, at 1.25 only 3.4%,
+// while still capping the observed tail at $18.73. 0 = accept any overshoot,
+// which restores the run #4 behaviour for an unbiased measurement pass.
+input double InpMaxRiskOvershoot   = 1.25;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)

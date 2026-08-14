@@ -180,9 +180,15 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
 
    if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
      {
-      PlacePendingOrder(dir, limitPrice, confirmed.time, slPrice, tpPrice);
+      ulong ticket = PlacePendingOrder(dir, limitPrice, confirmed.time, slPrice, tpPrice);
+
+      // Latch the zone either way: a setup rejected by the risk cap, the broker's
+      // volume range or a failed send would be re-evaluated identically on the
+      // next tick, so retrying only floods the log. The return value reports
+      // whether an order actually exists — that is what feeds entry_placed in the
+      // zone CSV, and it used to read 1 for orders that were never sent.
       g_ltfZonePendingTime = confirmed.time;
-      return(true);
+      return(ticket > 0);
      }
    return(false);
   }
