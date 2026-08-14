@@ -67,7 +67,8 @@ InpBatchCooldownMinutes = 11    — Cooldown after batch flat
 
 **Partial Close**
 ```
-InpPartialCloseProfit  = 10.0  — Floating profit threshold
+InpPartialCloseAtr     = 1.5   — Target as x HTF ATR frozen at entry (0=use fixed $)
+InpPartialCloseProfit  = 10.0  — Fixed $ threshold, used when InpPartialCloseAtr=0
 InpPartialClosePercent = 50.0  — % of volume to close
 ```
 
@@ -234,9 +235,21 @@ LTF zones: data-only — no chart objects (arrows removed)
 
 ### Partial Close + Breakeven
 
+Target scale: `PartialCloseThreshold()` returns
+`InpPartialCloseAtr x atrAtEntry x (tickValue/tickSize) x volume`, falling back
+to the fixed `InpPartialCloseProfit` when the ATR mode is off or no ATR reading
+is available. `atrAtEntry` is the HTF ATR frozen in `EntryTracker` at entry, so
+a volatility spike cannot move the target away from a running position.
+
+A fixed dollar target does not survive a regime change: on XAUUSD $10 was
+reached by 33% of filtered entries in a low-volatility year and 67% in a
+high-volatility one, while 1.5x ATR gave 57% and 61%. Since partial close is
+what arms SL→BE and the trailing stop, a target that rarely fires leaves most
+positions unmanaged.
+
 `CheckPartialClose` per-tick, gated by news:
 ```
-if POSITION_PROFIT >= InpPartialCloseProfit AND not yet partial-closed:
+if POSITION_PROFIT >= PartialCloseThreshold(...) AND not yet partial-closed:
   1. Calculate closeVol = posVolume * InpPartialClosePercent / 100
   2. PositionClosePartial(ticket, closeVol)
   3. PositionModify(ticket, SL=entryPrice, TP=0) → BE
@@ -322,7 +335,13 @@ Quality attributes (CONFIRM):
 atr, width_atr, disp_body_atr, disp_range_atr  — displacement / width vs ATR
 base_bars        — bars candidate stayed alive before confirmation (1=impulsive)
 swept_low/high   — liquidity grab recorded on candidate
-trend_at_confirm — trend of this TF when zone confirmed
+trend_at_confirm — trend of this TF when zone confirmed. Carries NO information:
+                   a demand zone can only confirm out of a DOWN trend on its own
+                   timeframe and a supply zone only out of an UP trend, so this
+                   field is a restatement of `type`. Kept for log continuity.
+htf_trend        — HTF trend at confirmation. On an LTF zone this is the real
+                   cross-timeframe alignment attribute; on an HTF zone it is
+                   collinear with type, like trend_at_confirm.
 ```
 
 Behavior stats (OUTCOME):

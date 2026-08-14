@@ -39,6 +39,13 @@ void ComputeZoneMetrics(SnDZone &zone, bool htf, const MqlRates &confirmBar)
    zone.confirmClose = confirmBar.close;
    zone.atrAtConfirm = GetAtrValue(htf);
 
+   // HTF trend at this moment. On an LTF zone this is the cross-timeframe
+   // alignment attribute; trendAtConfirm cannot carry it, because a demand
+   // zone only ever confirms out of a DOWN trend on its own timeframe and a
+   // supply zone only out of an UP trend, making that field a restatement of
+   // isDemand rather than information.
+   zone.htfTrendAtConfirm = (int)g_htfTrend;
+
    double width = zone.high - zone.low;
    double body  = MathAbs(confirmBar.close - confirmBar.open);
    double range = confirmBar.high - confirmBar.low;
@@ -481,7 +488,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "atr", "width_atr", "disp_body_atr", "disp_range_atr", "base_bars",
          "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
-         "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm");
+         "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
+         "htf_trend");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -512,7 +520,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.maxFavPts, 1),
       DoubleToString(zone.maxAdvPts, 1),
       DoubleToString(zone.favAfterTouchPts, 1),
-      zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN");
+      zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
+      zone.htfTrendAtConfirm == (int)TREND_UP ? "UP" : "DOWN");
 
    FileClose(handle);
   }

@@ -32,6 +32,7 @@ struct SnDZone
    bool     qualityPass;      // zone width + displacement passed the entry filter
    //--- Quality tracking (CSV backtest analysis) ---
    bool     isHtf;            // tracker key: which timeframe this zone belongs to
+   int      htfTrendAtConfirm;// HTF trend when this zone confirmed (LTF: cross-TF alignment)
    bool     validated;        // follow-through validation passed
    int      trendAtConfirm;   // trend of this TF at confirmation (1=UP, -1=DOWN)
    int      baseBars;         // bars candidate stayed alive before confirmation (1=impulsive)
@@ -61,6 +62,7 @@ struct EntryTracker
    double   mfe;            // best POSITION_PROFIT seen ($)
    double   mae;            // worst POSITION_PROFIT seen ($)
    bool     partialClosed;  // true once one-time partial close fired
+   double   atrAtEntry;     // HTF ATR frozen at entry — partial close target scale
   };
 
 // Pending order tracking (BUY LIMIT / SELL LIMIT)

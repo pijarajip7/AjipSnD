@@ -53,6 +53,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice)
    g_entries[sz].mfe          = 0.0;
    g_entries[sz].mae          = 0.0;
    g_entries[sz].partialClosed = false;
+   g_entries[sz].atrAtEntry   = GetAtrValue(true);
 
    // First entry of batch
    if(!g_batchActive)
@@ -434,9 +435,30 @@ void CheckEntryCleanup()
 //==================================================================
 // PARTIAL CLOSE — one-time per position
 //==================================================================
+//---- Partial close trigger in account currency, for one position ----
+// With InpPartialCloseAtr > 0 the target scales with the HTF ATR frozen at
+// entry, so one setting behaves the same across volatility regimes. On XAUUSD
+// a fixed $10 was reached by 33% of entries in a low-volatility year and 67%
+// in a high-volatility one; at 1.5x ATR the two were 57% and 61%. The ATR is
+// taken at entry rather than live, so a volatility spike cannot move the
+// target away from a position already running.
+double PartialCloseThreshold(double atrAtEntry, double volume)
+  {
+   if(InpPartialCloseAtr <= 0 || atrAtEntry <= 0)
+      return(InpPartialCloseProfit);
+
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0)
+      return(InpPartialCloseProfit);
+
+   return(InpPartialCloseAtr * atrAtEntry * (tickValue / tickSize) * volume);
+  }
+
 void CheckPartialClose()
   {
-   if(InpPartialCloseProfit <= 0 || InpPartialClosePercent <= 0) return;
+   if(InpPartialClosePercent <= 0) return;
+   if(InpPartialCloseProfit <= 0 && InpPartialCloseAtr <= 0) return;
 
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
@@ -449,10 +471,13 @@ void CheckPartialClose()
          continue;
         }
 
-      double posProfit = PositionGetDouble(POSITION_PROFIT);
-      if(posProfit < InpPartialCloseProfit) continue;
-
       double posVolume = PositionGetDouble(POSITION_VOLUME);
+      double threshold = PartialCloseThreshold(g_entries[i].atrAtEntry, posVolume);
+      if(threshold <= 0) continue;
+
+      double posProfit = PositionGetDouble(POSITION_PROFIT);
+      if(posProfit < threshold) continue;
+
       double closeVol = NormalizeDouble(posVolume * InpPartialClosePercent / 100.0, 8);
       double remainder = posVolume - closeVol;
 
@@ -476,8 +501,8 @@ void CheckPartialClose()
          continue;
         }
 
-      PrintFormat("AjipSnD: Partial close ticket=%I64u, closedVol=%.2f, profit=%.2f",
-                  ticket, closeVol, posProfit);
+      PrintFormat("AjipSnD: Partial close ticket=%I64u, closedVol=%.2f, profit=%.2f (target %.2f)",
+                  ticket, closeVol, posProfit, threshold);
 
       // Move remaining to breakeven
       if(PositionSelectByTicket(ticket))

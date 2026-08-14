@@ -53,7 +53,8 @@ input double InpBatchMaxLoss         = 0.0;   // Batch max loss — close batch 
 input int    InpBatchCooldownMinutes = 11;     // Cooldown after batch flat before new batch (0=disabled)
 
 input group "Partial Close"
-input double InpPartialCloseProfit  = 10.0;  // Floating profit ($) to trigger one-time partial close (0=disabled)
+input double InpPartialCloseAtr     = 1.5;   // Partial close target as x HTF ATR frozen at entry (0=use fixed $)
+input double InpPartialCloseProfit  = 10.0;  // Fixed floating profit ($) trigger — used when InpPartialCloseAtr=0
 input double InpPartialClosePercent = 50.0;  // % of volume to close at partial-close threshold
 
 input group "Trailing Stop"

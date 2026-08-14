@@ -38,6 +38,11 @@ void RebuildTrackedPositions()
       double curVol = PositionGetDouble(POSITION_VOLUME);
       g_entries[idx].partialClosed = (curVol < InpFixedLot - g_volStep * 0.5);
 
+      // ATR at the original entry is not recoverable on restart — use the
+      // current reading. If the handle is not calculated yet this returns 0
+      // and PartialCloseThreshold falls back to the fixed dollar target.
+      g_entries[idx].atrAtEntry = GetAtrValue(true);
+
       if(firstTime == 0 || entryTime < firstTime) firstTime = entryTime;
       if(entryTime > lastTime) lastTime = entryTime;
       recovered++;
