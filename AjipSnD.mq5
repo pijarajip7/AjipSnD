@@ -126,6 +126,15 @@ input bool InpZoneQualityLog = true;
 // varies with stop distance. pnl_r is empty in batch mode, where no per-trade
 // risk was ever defined.
 input bool InpTradeLog       = true;  // Log zone quality metrics to CSV for backtest analysis
+// First-touch grid logger. Pure observation — it places no orders and changes
+// no decision — but it is the only record that preserves WHICH of two levels
+// price reached first, which is what any (SL, TP) pair actually asks. One run
+// with this on yields the whole expectancy surface offline, including targets
+// the EA never traded. Off by default: it writes a row per opportunity and
+// costs a few comparisons per tick.
+input bool InpExcursionLog   = false; // Log first-touch grid per entry opportunity (offline SL/TP surface)
+input int  InpExcursionBars  = 240;   // Horizon tracked after the limit is touched (M1 bars)
+input int  InpExcursionArmBars = 60;  // How long an untouched limit stays armed (M1 bars)
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -136,6 +145,7 @@ input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal,
 // INCLUDES
 //==================================================================
 #include "AjipSnD_Globals.mqh"
+#include "AjipSnD_Excursion.mqh"
 #include "AjipSnD_Zone.mqh"
 #include "AjipSnD_News.mqh"
 #include "AjipSnD_Trade.mqh"
@@ -214,6 +224,9 @@ void OnTick()
 
    // 1. Update MFE/MAE
    UpdateMfeMae();
+
+   // 1a. First-touch grid (diagnostic only — observes, never decides)
+   UpdateExcursions();
 
    // 1b. Check pending orders — remove if outside HTF zone, detect fills
    CheckPendingOrders();
@@ -303,6 +316,10 @@ void OnDeinit(const int reason)
    // Flush zone quality tracker rows that never reached an outcome
    if(InpZoneQualityLog)
       FlushUnresolvedZoneOutcomes();
+
+   // Excursion records still inside their horizon — the tail of the run is
+   // otherwise lost, and on a backtest that tail is the final trading day.
+   FlushExcursions();
 
    // Release ATR handles
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);

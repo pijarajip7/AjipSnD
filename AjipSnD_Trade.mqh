@@ -342,6 +342,7 @@ void CheckPendingOrders()
             if(dir != g_pendingOrders[i].dir) continue;
 
             AddEntry(t, dir, PositionGetDouble(POSITION_PRICE_OPEN), g_pendingOrders[i]);
+            ExcursionMarkFilled(dir, g_pendingOrders[i].zoneTime);
             PrintFormat("AjipSnD: Pending filled! Ticket=%I64u dir=%s fill=%.5f",
                         t, dir == 1 ? "BUY" : "SELL",
                         PositionGetDouble(POSITION_PRICE_OPEN));

@@ -178,7 +178,21 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
                confirmed.isDemand ? "DEMAND" : "SUPPLY",
                dir == 1 ? "BUY" : "SELL", limitPrice, slPrice, tpPrice);
 
-   if(!ZoneGapBlocked(confirmed) && !EntryGateBlocked(dir))
+   // Evaluated once and reused so the excursion record carries the same verdict
+   // the order path acts on. The && keeps the original short-circuit: the gate
+   // is only consulted when the gap check passed, so its logging is unchanged.
+   bool gapBlocked  = ZoneGapBlocked(confirmed);
+   bool gateBlocked = (!gapBlocked) && EntryGateBlocked(dir);
+
+   // Armed before the gates deliberately — a setup the cap or the session
+   // filter rejected is still an observation about where price goes next, and
+   // the surface is only decoupled from the exit policy if those are kept.
+   ExcursionArm(dir, limitPrice, confirmed.time,
+                confirmed.isDemand ? g_htfDemandZones[htfIdx].time
+                                   : g_htfSupplyZones[htfIdx].time,
+                slPrice, gapBlocked, gateBlocked, MaxPositionsReached(dir));
+
+   if(!gapBlocked && !gateBlocked)
      {
       ulong ticket = PlacePendingOrder(dir, limitPrice, confirmed.time, slPrice, tpPrice);
 
