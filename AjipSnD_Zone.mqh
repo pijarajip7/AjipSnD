@@ -269,27 +269,49 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
 // Zones failing the quality gate stay in the array — they keep taking part in
 // replacement, expiry and invalidation exactly as before, so zone lifecycle and
 // the CSV log are unchanged — but they are not offered as entry areas.
-bool IsPriceInDemandZone(double price, const SnDZone &zones[])
+//---- Index of the zone containing price, or -1 ----
+// Single source of truth for "is this price inside a tradeable zone". The
+// bool wrappers below delegate here so the containment rule cannot drift
+// between the entry check and the stop-loss anchor.
+//
+// When several zones contain the price, the one whose FAR edge sits furthest
+// away wins. That only matters to callers wanting the zone itself: a
+// structural stop is placed beyond the far edge, so picking the furthest is
+// the conservative choice — it never yields a stop tighter than some other
+// equally valid zone would have justified.
+int FindContainingZoneIdx(double price, const SnDZone &zones[], bool isDemand)
   {
+   int    best     = -1;
+   double bestEdge = 0.0;
+
    for(int i = 0; i < ArraySize(zones); i++)
      {
       if(!zones[i].qualityPass) continue;
-      if(price <= zones[i].high && price >= zones[i].low)
-         return(true);
+      if(price < zones[i].low || price > zones[i].high) continue;
+
+      // Demand: stop goes below, so the lowest low is furthest.
+      // Supply: stop goes above, so the highest high is furthest.
+      double farEdge = isDemand ? zones[i].low : zones[i].high;
+      if(best < 0
+         || (isDemand  && farEdge < bestEdge)
+         || (!isDemand && farEdge > bestEdge))
+        {
+         best     = i;
+         bestEdge = farEdge;
+        }
      }
-   return(false);
+   return(best);
+  }
+
+bool IsPriceInDemandZone(double price, const SnDZone &zones[])
+  {
+   return(FindContainingZoneIdx(price, zones, true) >= 0);
   }
 
 //---- Check if price is inside any TRADEABLE active supply zone ----
 bool IsPriceInSupplyZone(double price, const SnDZone &zones[])
   {
-   for(int i = 0; i < ArraySize(zones); i++)
-     {
-      if(!zones[i].qualityPass) continue;
-      if(price >= zones[i].low && price <= zones[i].high)
-         return(true);
-     }
-   return(false);
+   return(FindContainingZoneIdx(price, zones, false) >= 0);
   }
 
 //---- Count zones that passed the quality gate (panel display) ----

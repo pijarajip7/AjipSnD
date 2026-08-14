@@ -38,6 +38,13 @@ input double InpPosMaxLoss   = 0.0;    // Max floating loss per position ($) bef
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
 
+input group "Structural Stop Loss (experimental)"
+// Master switch. When false every code path added for this mode is skipped and
+// behaviour is identical to the batch architecture. The two live side by side
+// in one binary so the Strategy Tester can A/B them without recompiling.
+input bool   InpStructuralSlMode  = false; // Enable structural SL mode (false=batch architecture, unchanged)
+input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the HTF zone's far edge, in LTF ATR
+
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
 input double InpFinalMaxLoss      = 0.0;  // Overall max loss — close all + stop PERMANENTLY (0=disabled)

@@ -72,6 +72,7 @@ struct PendingOrder
    int      dir;       // 1=BUY LIMIT, -1=SELL LIMIT
    double   price;     // limit price
    datetime zoneTime;  // LTF zone time that triggered this order
+   double   slPrice;   // structural SL frozen at placement (0=none / batch mode)
   };
 
 //==================================================================

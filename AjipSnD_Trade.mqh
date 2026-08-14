@@ -91,8 +91,35 @@ double GetFloatingPnL()
 // PENDING ORDER — BUY LIMIT / SELL LIMIT
 //==================================================================
 
+//---- Push an SL out to the broker's minimum stop distance if it sits too close ----
+// SYMBOL_TRADE_STOPS_LEVEL is the closest an SL may sit to the order price;
+// inside it the order is rejected outright. A structural stop is normally far
+// wider than this, so the clamp should almost never fire — but a zone whose far
+// edge nearly touches the limit price would otherwise lose the whole entry.
+// Widening is the safe direction: it can only make the stop less tight than the
+// zone justified, never more.
+double ClampToStopsLevel(int dir, double price, double slPrice)
+  {
+   if(slPrice <= 0.0) return(slPrice);
+
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel <= 0) return(slPrice);
+
+   double minDist = stopsLevel * g_point;
+   double dist    = (dir == 1) ? (price - slPrice) : (slPrice - price);
+   if(dist >= minDist) return(slPrice);
+
+   double widened = (dir == 1) ? (price - minDist) : (price + minDist);
+   PrintFormat("AjipSnD: SL %.5f inside broker stops level (%.1f pts) — widened to %.5f",
+               slPrice, (double)stopsLevel, widened);
+   return(NormalizeDouble(widened, g_digits));
+  }
+
 //---- Place pending order at limit price ----
-ulong PlacePendingOrder(int dir, double price, datetime zoneTime)
+// slPrice = 0.0 places a naked order, exactly as the batch architecture always
+// has; a non-zero value attaches the structural stop from the outset so the
+// position is never unprotected, not even for the tick that fills it.
+ulong PlacePendingOrder(int dir, double price, datetime zoneTime, double slPrice)
   {
    double lot = NormalizeDouble(InpFixedLot, 8);
    if(lot < g_volMin || lot > g_volMax)
@@ -102,12 +129,14 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime)
       return(0);
      }
 
+   slPrice = ClampToStopsLevel(dir, price, slPrice);
+
    string comment = StringFormat("AjipSnD %s", dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
    bool ok;
    if(dir == 1)
-      ok = trade.BuyLimit(lot, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
+      ok = trade.BuyLimit(lot, price, _Symbol, slPrice, 0.0, ORDER_TIME_GTC, 0, comment);
    else
-      ok = trade.SellLimit(lot, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
+      ok = trade.SellLimit(lot, price, _Symbol, slPrice, 0.0, ORDER_TIME_GTC, 0, comment);
 
    if(!ok)
      {
@@ -116,8 +145,8 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime)
      }
 
    ulong ticket = trade.ResultOrder();
-   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f",
-               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price);
+   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f, SL=%.5f",
+               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price, slPrice);
 
    // Track pending order
    int sz = ArraySize(g_pendingOrders);
@@ -126,6 +155,7 @@ ulong PlacePendingOrder(int dir, double price, datetime zoneTime)
    g_pendingOrders[sz].dir      = dir;
    g_pendingOrders[sz].price    = price;
    g_pendingOrders[sz].zoneTime = zoneTime;
+   g_pendingOrders[sz].slPrice  = slPrice;
 
    return(ticket);
   }
