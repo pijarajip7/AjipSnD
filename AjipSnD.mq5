@@ -109,7 +109,13 @@ input int              InpPanelY      = 50;                 // Panel Y offset
 
 input group "Diagnostics"
 input bool InpEnableLog = true;  // Enable Print/PrintFormat output
-input bool InpZoneQualityLog = true;  // Log zone quality metrics to CSV for backtest analysis
+input bool InpZoneQualityLog = true;
+// One row per closed position. Written in both architectures: the batch CSV
+// records why a BATCH closed, which cannot distinguish a stop-out from a target
+// hit, and its dollar P&L stops being comparable across trades once lot size
+// varies with stop distance. pnl_r is empty in batch mode, where no per-trade
+// risk was ever defined.
+input bool InpTradeLog       = true;  // Log zone quality metrics to CSV for backtest analysis
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit

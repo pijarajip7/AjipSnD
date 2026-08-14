@@ -467,10 +467,12 @@ void UpdateMfeMae()
 // ACCUMULATE BATCH STATS — fold closed position into batch.
 // Tries live POSITION_PROFIT first (fast, accurate), falls back to
 // history deals if position no longer selectable (e.g., CheckEntryCleanup).
+// Returns the realised figure so the per-trade log can record the same number
+// the batch accounting used, instead of deriving its own and disagreeing.
 //==================================================================
-void AccumulateBatchStats(int idx)
+double AccumulateBatchStats(int idx)
   {
-   if(idx < 0 || idx >= ArraySize(g_entries)) return;
+   if(idx < 0 || idx >= ArraySize(g_entries)) return(0.0);
 
    double realized = 0.0;
 
@@ -511,6 +513,141 @@ void AccumulateBatchStats(int idx)
    if(realized > 0)       g_batchWins++;
    else if(realized < 0)  g_batchLosses++;
    else                   g_batchBreakEven++;
+
+   return(realized);
+  }
+
+//==================================================================
+// PER-TRADE CSV — one row per closed position.
+//
+// The batch CSV cannot answer this experiment's questions. Its CloseReason
+// describes why a BATCH was flushed, so a stop-out and a target hit both
+// arrive as BATCH_FLAT — the EA only notices the position is gone. And its
+// P&L is in dollars, which stop being comparable across trades the moment lot
+// size varies with stop distance. This log records the exit reason the broker
+// actually used and normalises P&L by the risk the trade was sized for, so
+// results are stated in R.
+//
+// ltf_zone_time is the join key back to the zone CSV: it is what finally
+// connects a trade's outcome to the characteristics of the zone that produced
+// it. Until now the two could only ever be measured separately.
+//==================================================================
+string DealReasonText(long reason)
+  {
+   switch((int)reason)
+     {
+      case DEAL_REASON_CLIENT:   return("CLIENT");
+      case DEAL_REASON_MOBILE:   return("MOBILE");
+      case DEAL_REASON_WEB:      return("WEB");
+      case DEAL_REASON_EXPERT:   return("EXPERT");
+      case DEAL_REASON_SL:       return("SL");
+      case DEAL_REASON_TP:       return("TP");
+      case DEAL_REASON_SO:       return("STOPOUT");
+      case DEAL_REASON_ROLLOVER: return("ROLLOVER");
+      case DEAL_REASON_VMARGIN:  return("VMARGIN");
+      case DEAL_REASON_SPLIT:    return("SPLIT");
+     }
+   return("OTHER");
+  }
+
+void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
+  {
+   if(!InpTradeLog) return;
+   if(idx < 0 || idx >= ArraySize(g_entries)) return;
+
+   ulong  ticket   = g_entries[idx].ticket;
+   double exitPx   = 0.0;
+   double dealPnl  = 0.0;
+   bool   haveDeal = false;
+   string reason   = fallbackReason;
+
+   // Closing deal carries both the exit price and the reason the broker
+   // applied. On the close-all path the deal may not have settled yet — that
+   // is the timing gap the batch accounting already works around — so this is
+   // best-effort and falls back to what the caller knows.
+   if(HistorySelect(g_entries[idx].entryTime, TimeCurrent() + 1))
+     {
+      int ndeals = HistoryDealsTotal();
+      for(int i = 0; i < ndeals; i++)
+        {
+         ulong d = HistoryDealGetTicket(i);
+         if(d == 0) continue;
+         if(HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagicNumber) continue;
+         if((ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID) != ticket) continue;
+
+         dealPnl += HistoryDealGetDouble(d, DEAL_PROFIT)
+                  + HistoryDealGetDouble(d, DEAL_SWAP)
+                  + HistoryDealGetDouble(d, DEAL_COMMISSION);
+
+         if(HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            exitPx   = HistoryDealGetDouble(d, DEAL_PRICE);
+            reason   = DealReasonText(HistoryDealGetInteger(d, DEAL_REASON));
+            haveDeal = true;
+           }
+        }
+     }
+
+   // Deal figures include commission; the snapshot the batch path passes in
+   // does not. Prefer the deal when it settled — R is meant to be net.
+   double pnl = haveDeal ? dealPnl : fallbackPnl;
+
+   double risk    = g_entries[idx].riskUsd;
+   double slDist  = 0.0;
+   if(g_entries[idx].slPrice > 0.0)
+      slDist = (g_entries[idx].dir == 1)
+               ? (g_entries[idx].entryPrice - g_entries[idx].slPrice)
+               : (g_entries[idx].slPrice - g_entries[idx].entryPrice);
+
+   string filename = "AjipSnD_Trades_" + _Symbol + "_"
+                   + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
+   bool exists = FileIsExist(filename, FILE_COMMON);
+
+   int h = FileOpen(filename,
+                    FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
+                    ',', CP_UTF8);
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("AjipSnD: Cannot open trade CSV %s", filename);
+      return;
+     }
+
+   if(!exists)
+      FileWrite(h,
+                "entry_time", "exit_time", "dir", "entry_price", "exit_price",
+                "sl_price", "tp_price", "sl_dist_pts", "sl_dist_atr",
+                "lot", "risk_usd", "exit_reason", "pnl_usd", "pnl_r",
+                "mfe_usd", "mae_usd", "mfe_r", "mae_r",
+                "atr_ltf", "atr_htf", "structural", "ltf_zone_time");
+   else
+      FileSeek(h, 0, SEEK_END);
+
+   FileWrite(h,
+             TimeToString(g_entries[idx].entryTime, TIME_DATE | TIME_SECONDS),
+             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+             g_entries[idx].dir == 1 ? "BUY" : "SELL",
+             DoubleToString(g_entries[idx].entryPrice, g_digits),
+             DoubleToString(exitPx, g_digits),
+             DoubleToString(g_entries[idx].slPrice, g_digits),
+             DoubleToString(g_entries[idx].tpPrice, g_digits),
+             DoubleToString(slDist / g_point, 1),
+             DoubleToString(g_entries[idx].atrLtfAtEntry > 0
+                            ? slDist / g_entries[idx].atrLtfAtEntry : 0.0, 3),
+             DoubleToString(g_entries[idx].initialVolume, 2),
+             DoubleToString(risk, 2),
+             reason,
+             DoubleToString(pnl, 2),
+             DoubleToString(risk > 0 ? pnl / risk : 0.0, 3),
+             DoubleToString(g_entries[idx].mfe, 2),
+             DoubleToString(g_entries[idx].mae, 2),
+             DoubleToString(risk > 0 ? g_entries[idx].mfe / risk : 0.0, 3),
+             DoubleToString(risk > 0 ? g_entries[idx].mae / risk : 0.0, 3),
+             DoubleToString(g_entries[idx].atrLtfAtEntry, g_digits),
+             DoubleToString(g_entries[idx].atrAtEntry, g_digits),
+             g_entries[idx].hasStructuralSl ? "1" : "0",
+             TimeToString(g_entries[idx].zoneTime, TIME_DATE | TIME_SECONDS));
+
+   FileClose(h);
   }
 
 //==================================================================
@@ -523,7 +660,10 @@ void CheckEntryCleanup()
      {
       if(!PositionSelectByTicket(g_entries[i].ticket))
         {
-         AccumulateBatchStats(i);
+         // Broker-side exits (SL, TP) land here, and here the closing deal has
+         // settled — so this path yields the real exit reason, not a guess.
+         double realized = AccumulateBatchStats(i);
+         LogTradeCsv(i, realized, "CLOSED");
          RemoveEntry(i);
         }
      }
@@ -579,7 +719,8 @@ void CheckPartialClose()
 
       if(!PositionSelectByTicket(g_entries[i].ticket))
         {
-         AccumulateBatchStats(i);
+         double realized = AccumulateBatchStats(i);
+         LogTradeCsv(i, realized, "CLOSED");
          RemoveEntry(i);
          continue;
         }
@@ -923,6 +1064,7 @@ void CloseAllAndFlushBatch(string reason)
       else if(net[i] < 0)  g_batchLosses++;
       else                 g_batchBreakEven++;
 
+      LogTradeCsv(i, net[i], reason);
       RemoveEntry(i);
      }
 

@@ -309,7 +309,7 @@ double GetDailyPnL();
 double GetFloatingPnL();
 double GetPeriodPnL(datetime from, datetime to);
 void   CloseAllAndFlushBatch(string reason);
-void   AccumulateBatchStats(int idx);
+double AccumulateBatchStats(int idx);
 void   FlushBatchCSV(string reason);
 
 //---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
