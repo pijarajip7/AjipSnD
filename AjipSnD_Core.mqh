@@ -242,6 +242,7 @@ void UpdateLTF(const MqlRates &rates[], int count)
       if(passed)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
+         MarkLtfValidationContext(g_ltfPendingZone);
          if(PlaceEntryForZone(g_ltfPendingZone))
             MarkZoneEntryPlaced(g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          g_ltfAwaitingValidation = false;

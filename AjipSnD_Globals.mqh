@@ -49,6 +49,15 @@ struct SnDZone
    bool     trackingActive;   // true while outcome stats are being collected
    bool     entryPlaced;      // pending order was placed for this zone (LTF)
    bool     touched;          // wick re-entered zone range after confirmation
+   //--- LTF-only, snapshotted at the exact moment validation passes ---
+   // Deliberately NOT derived from touched's final state: that reflects the
+   // zone's whole tracking lifetime, which needs knowing the future to
+   // compute and cannot be known in real time. See MarkLtfValidationContext().
+   bool     touchedAtValidation;  // was 'touched' already true at that instant?
+   bool     htfContextValidated;  // was this LTF edge inside an ACTIVE,
+                                   // VALIDATED HTF zone at that instant? Same
+                                   // FindContainingZoneIdx check PlaceEntryForZone
+                                   // already gates real entries on.
    int      barsSinceConfirm; // closed bars since confirmation
    int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
    double   touchDepthPts;    // penetration depth of first touch (points)

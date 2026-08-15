@@ -511,7 +511,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
          "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
-         "htf_trend");
+         "htf_trend", "touched_at_validation", "htf_context_validated");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -543,7 +543,9 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.maxAdvPts, 1),
       DoubleToString(zone.favAfterTouchPts, 1),
       zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
-      zone.htfTrendAtConfirm == (int)TREND_UP ? "UP" : "DOWN");
+      zone.htfTrendAtConfirm == (int)TREND_UP ? "UP" : "DOWN",
+      zone.touchedAtValidation ? "1" : "0",
+      zone.htfContextValidated ? "1" : "0");
 
    FileClose(handle);
   }
@@ -563,6 +565,8 @@ void TrackZone(SnDZone &zone, bool htf)
    zone.maxFavPts         = 0.0;
    zone.maxAdvPts         = 0.0;
    zone.favAfterTouchPts  = 0.0;
+   zone.touchedAtValidation = false;
+   zone.htfContextValidated = false;
 
    int sz = ArraySize(g_zoneTracker);
    ArrayResize(g_zoneTracker, sz + 1);
@@ -665,6 +669,59 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
   {
    int i = FindTrackedZone(htf, isDemand, zoneTime);
    if(i >= 0) g_zoneTracker[i].validated = true;
+  }
+
+//---- LTF-only: snapshot touch/HTF-context state at the exact validation instant
+// Must be called right after MarkZoneValidated(false, ...) at the same call
+// site, while 'confirmed' is still the pending zone that just passed. Reuses
+// the identical containment check PlaceEntryForZone gates real orders on
+// (FindContainingZoneIdx against the ACTIVE, already-validated HTF arrays —
+// an HTF zone only enters g_htfDemandZones/g_htfSupplyZones once it has
+// itself validated), so this is what the live entry gate already knows,
+// recorded standalone instead of folded into entryPlaced alongside the gap
+// gate, entry gate and position cap.
+//------------------------------------------------------------------
+// RESULT — period A, XAUUSD M1/M15, 21,372 validated LTF zones
+//------------------------------------------------------------------
+// Tested: does a zone that validates before ever being touched, inside an
+// already-validated HTF zone, predict direction? Four cells (touched-at-
+// validation x htf-context), direction-adjusted hit rate:
+//
+//                              5m     15m      1h      4h      1d
+//   no-touch + HTF (proposal) 75.77  62.96  56.63  53.74  48.00
+//   no-touch + no-HTF         75.92  62.55  54.88  52.15  52.02
+//   touched  + HTF            57.60  60.57  55.65  54.36  50.25
+//   touched  + no-HTF         56.48  61.37  54.97  52.06  51.00
+//
+// HTF context adds nothing: the two no-touch rows track each other within a
+// point at every horizon, and so do the two touched rows. The touch-timing
+// split shows a real gap at 5m/15m (75%+ vs ~57%) that decays through 1h/4h
+// and, at 1d, REVERSES — the proposal cell finishes lowest of the four
+// (48.00%, the only one below 50). That shape is the signature of the same
+// circularity already found in the plain 'validated' flag: a zone that
+// reaches confirmLevel without dipping back did so via a sharp, immediate
+// move, so a snapshot minutes later is still measuring THAT move, not
+// predicting a new one. Demand/supply near-balanced in all four cells
+// (46-54%), so this is not the H1 trend probe's imbalance artifact repeating.
+//
+// CONSEQUENCE: no real information here either. touchedAtValidation and
+// htfContextValidated stay in the tracker as reusable, real-time-honest
+// primitives — the mistake worth avoiding next time is deriving either from
+// touched's whole-lifetime state instead of snapshotting at the decision
+// moment, not the existence of the fields.
+//------------------------------------------------------------------
+void MarkLtfValidationContext(const SnDZone &confirmed)
+  {
+   int i = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
+   if(i < 0) return;
+
+   g_zoneTracker[i].touchedAtValidation = g_zoneTracker[i].touched;
+
+   double limitPrice = confirmed.isDemand ? confirmed.high : confirmed.low;
+   int htfIdx = confirmed.isDemand
+                ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
+                : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
+   g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
   }
 
 //---- Mark entry placed for a tracked LTF zone ----
