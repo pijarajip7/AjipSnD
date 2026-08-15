@@ -15,7 +15,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "1.07-fillprice"
+#define EA_BUILD "1.08-rejectprobe"
 
 #include <Trade\Trade.mqh>
 
@@ -145,6 +145,14 @@ input int  InpExcursionArmBars = 60;  // How long an untouched limit stays armed
 // four extra observation records per zone and places no orders. This is the one
 // entry axis run #5 could not rank, because only the limit was ever observed.
 input bool InpStopEntryProbe = false; // Also observe stop-entry variants (measurement only)
+// Arms a REJECT-entry ladder at the same edge and the same four offsets as the
+// stop ladder. The difference is timing, not price: STOP fires on the first
+// tick that crosses the threshold, mid-bar, with no requirement on how price
+// got there. REJECT only fires when the LTF bar that just closed settled past
+// it — a wick that stabs through and snaps back before the bar closes does not
+// count. Same thresholds, different confirmation rule; that is the whole
+// comparison. Requires InpExcursionLog=true. Places no orders.
+input bool InpRejectEntryProbe = false; // Also observe rejection-entry variants (measurement only)
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -173,13 +181,14 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s | %s %s",
+   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s | %s %s",
                EA_BUILD,
                InpStructuralSlMode ? "ON" : "off",
                InpMaxRiskOvershoot,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",
+               InpRejectEntryProbe ? "ON" : "off",
                _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
 
    // Cache symbol info

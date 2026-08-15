@@ -61,6 +61,7 @@ InpExcursionLog     = false — First-touch grid per entry opportunity (offline 
 InpExcursionBars    = 240   — Horizon tracked after the limit is touched (M1 bars)
 InpExcursionArmBars = 60    — How long an untouched limit stays armed (M1 bars)
 InpStopEntryProbe   = false — Also observe stop-entry variants (5 records/zone, no orders)
+InpRejectEntryProbe = false — Also observe rejection-entry variants (5 more records/zone, no orders)
 ```
 
 **Risk Management — Final** (permanen, lintas hari)
@@ -656,6 +657,46 @@ Two details carry the design:
 
 The probe places no orders. `filled` stays exclusive to the limit record, since
 that is still the only entry the EA trades.
+
+### Rejection-entry probe
+
+`InpRejectEntryProbe=false` by default. When on, every zone arms **five more**
+records at the same edge and the same four offsets as the stop ladder —
+`entry_kind=REJECT` separates them from `STOP`.
+
+Run #7 (M1/M15 vs M5/H1 zone density) closed without resolving the entry-signal
+question, so the axis that was actually still open was never the timeframe —
+it was *when*, within a bar, an entry counts as confirmed. STOP answers that
+with the loosest possible rule: the first tick that crosses the threshold,
+mid-bar, with no requirement on how price got there. A wick that stabs through
+and snaps back before the bar even closes fires it exactly like a clean break
+would — which is not what a trader waiting for a rejection candle means by
+"rejected."
+
+REJECT asks the same threshold a stricter question: did the LTF bar that just
+**closed** settle beyond zoneEdge + offset? Priming is identical to STOP
+(price must enter the zone first) and the four offsets are the literal same
+array, so a STOP-vs-REJECT comparison at matching `offset_atr` isolates the
+confirmation rule and nothing else — same zone, same threshold, same window.
+
+The trigger cannot live in the tick loop that drives STOP, because "did this
+bar's close clear the level" is not answerable until the bar closes. It lives
+in `UpdateExcursionRejects()`, called once per closed LTF bar from `UpdateLTF()`
+— the same hook the EA's own zone-validation already uses, so REJECT reacts to
+price on the identical cadence the rest of the strategy does. A single strong
+bar can prime and confirm together: if that bar's own wick entered the zone
+and its close already clears the threshold, that *is* the pin-bar pattern a
+rejection trader is waiting for, and the probe records it on that bar.
+
+Verified against seven hand-built bar sequences, including the two that
+matter most: a bar whose high spikes past the threshold but closes back below
+it (STOP fires, REJECT correctly does not — the entire reason this exists),
+and a bar that primes without confirming followed by a later bar that does
+(REJECT fires on the later bar, at that bar's own close, not the one that
+merely touched the zone).
+
+Same exclusivity as the stop ladder: places no orders, `filled` stays on the
+limit record only.
 
 ---
 

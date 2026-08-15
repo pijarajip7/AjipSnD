@@ -51,8 +51,31 @@ const double ExcLevelAtr[EXC_LEVELS] =
 // inversion; larger values buy stronger evidence with a worse price. Each is a
 // separate record because the excursion origin moves with the entry, and an
 // origin shift cannot be reconstructed from a different origin's stamps.
+//
+// The REJECT ladder below reuses this exact array, on purpose: STOP and REJECT
+// are two different answers to "how much proof", tested at the SAME thresholds,
+// so a comparison between them isolates the timing rule and nothing else.
 #define EXC_STOP_OFFSETS 4
 const double ExcStopOffsetAtr[EXC_STOP_OFFSETS] = {0.00, 0.25, 0.50, 1.00};
+
+//---- Rejection-entry ladder: confirmation, not just level-crossing ----------
+// STOP fires on the first TICK that crosses zoneEdge + offset, mid-bar, with no
+// requirement on how price got there — a wick that stabs through and instantly
+// reverses fires it exactly like a clean break would. That is a real gap: a
+// trader waiting for a rejection candle would not take a fill that gets undone
+// before the bar even closes.
+//
+// REJECT asks a different question at the same thresholds: did the LTF bar
+// that just CLOSED settle beyond zoneEdge + offset? Priming is identical to
+// STOP (price must have entered the zone first) and the offsets are the same
+// four values, but the trigger only fires from a closed-bar check — see
+// UpdateExcursionRejects(), called from UpdateLTF() — never from the tick loop.
+// A single strong bar can prime and trigger together: if that bar's own wick
+// entered the zone and its close already clears the threshold, that is exactly
+// the pin-bar pattern a rejection trader is waiting for.
+#define EXC_KIND_LIMIT  0
+#define EXC_KIND_STOP   1
+#define EXC_KIND_REJECT 2
 
 struct ExcursionRecord
   {
@@ -60,11 +83,11 @@ struct ExcursionRecord
    int      dir;            // 1=BUY, -1=SELL
    double   limitPrice;     // level the hypothetical order sits at
    double   fillPrice;      // price actually paid at trigger = excursion origin
-   bool     isStop;         // true = STOP entry (fills on the way out of the zone)
-   bool     primed;         // STOP only: price has entered the zone, stop is now live
-   double   offsetAtr;      // STOP only: proof demanded beyond the edge, in LTF ATR
-   double   zoneEdge;       // STOP only: proximal edge that must be entered first
-   datetime primeTime;      // STOP only: when price first entered the zone
+   int      kind;           // EXC_KIND_LIMIT / _STOP / _REJECT
+   bool     primed;         // STOP/REJECT only: price entered the zone, now live
+   double   offsetAtr;      // STOP/REJECT only: proof demanded beyond the edge
+   double   zoneEdge;       // STOP/REJECT only: proximal edge entered first
+   datetime primeTime;      // STOP/REJECT only: when price first entered the zone
    datetime armTime;        // zone validated, record created
    datetime triggerTime;    // entry level reached — t0 for every stamp below
    double   atrLtf;         // LTF ATR at arm — the unit the level grid is in
@@ -96,7 +119,7 @@ ExcursionRecord g_excursion[];
 void ExcursionArmOne(int dir, double entryPrice, datetime ltfZoneTime,
                      datetime htfZoneTime, double slAnchor,
                      bool blockedGap, bool blockedGate, bool blockedCap,
-                     bool isStop, double offsetAtr, double zoneEdge,
+                     int kind, double offsetAtr, double zoneEdge,
                      double atrLtf)
   {
    int sz = ArraySize(g_excursion);
@@ -106,8 +129,8 @@ void ExcursionArmOne(int dir, double entryPrice, datetime ltfZoneTime,
    g_excursion[sz].dir         = dir;
    g_excursion[sz].limitPrice  = entryPrice;
    g_excursion[sz].fillPrice   = entryPrice;   // replaced by the real fill at trigger
-   g_excursion[sz].isStop      = isStop;
-   g_excursion[sz].primed      = !isStop;   // a limit is live immediately
+   g_excursion[sz].kind        = kind;
+   g_excursion[sz].primed      = (kind == EXC_KIND_LIMIT);  // a limit is live immediately
    g_excursion[sz].offsetAtr   = offsetAtr;
    g_excursion[sz].zoneEdge    = zoneEdge;
    g_excursion[sz].primeTime   = 0;
@@ -152,31 +175,43 @@ void ExcursionArm(int dir, double limitPrice, datetime ltfZoneTime,
    // The traded entry: a limit resting at the zone's proximal edge.
    ExcursionArmOne(dir, limitPrice, ltfZoneTime, htfZoneTime, slAnchor,
                    blockedGap, blockedGate, blockedCap,
-                   false, 0.0, limitPrice, atrLtf);
-
-   if(!InpStopEntryProbe) return;
+                   EXC_KIND_LIMIT, 0.0, limitPrice, atrLtf);
 
    // The inversion: a stop at the same edge, plus progressively more proof.
-   for(int k = 0; k < EXC_STOP_OFFSETS; k++)
-     {
-      double off   = ExcStopOffsetAtr[k] * atrLtf;
-      double entry = (dir == 1) ? (limitPrice + off) : (limitPrice - off);
-      ExcursionArmOne(dir, NormalizeDouble(entry, g_digits),
-                      ltfZoneTime, htfZoneTime, slAnchor,
-                      blockedGap, blockedGate, blockedCap,
-                      true, ExcStopOffsetAtr[k], limitPrice, atrLtf);
-     }
+   if(InpStopEntryProbe)
+      for(int k = 0; k < EXC_STOP_OFFSETS; k++)
+        {
+         double off   = ExcStopOffsetAtr[k] * atrLtf;
+         double entry = (dir == 1) ? (limitPrice + off) : (limitPrice - off);
+         ExcursionArmOne(dir, NormalizeDouble(entry, g_digits),
+                         ltfZoneTime, htfZoneTime, slAnchor,
+                         blockedGap, blockedGate, blockedCap,
+                         EXC_KIND_STOP, ExcStopOffsetAtr[k], limitPrice, atrLtf);
+        }
+
+   // The confirmation: same edge, same offsets, but the trigger only fires
+   // from a closed LTF bar (UpdateExcursionRejects), never from this tick loop.
+   if(InpRejectEntryProbe)
+      for(int k = 0; k < EXC_STOP_OFFSETS; k++)
+        {
+         double off   = ExcStopOffsetAtr[k] * atrLtf;
+         double entry = (dir == 1) ? (limitPrice + off) : (limitPrice - off);
+         ExcursionArmOne(dir, NormalizeDouble(entry, g_digits),
+                         ltfZoneTime, htfZoneTime, slAnchor,
+                         blockedGap, blockedGate, blockedCap,
+                         EXC_KIND_REJECT, ExcStopOffsetAtr[k], limitPrice, atrLtf);
+        }
   }
 
 //---- Mark that a real order filled at this level (join back from the fill) ----
 // Only the limit record can be filled — the EA still trades limits, and the
-// stop ladder is observation. Matching on isStop keeps the flag honest.
+// STOP/REJECT ladders are observation. Matching on kind keeps the flag honest.
 void ExcursionMarkFilled(int dir, datetime ltfZoneTime)
   {
    if(!InpExcursionLog) return;
    for(int i = ArraySize(g_excursion) - 1; i >= 0; i--)
      {
-      if(g_excursion[i].isStop) continue;
+      if(g_excursion[i].kind != EXC_KIND_LIMIT) continue;
       if(g_excursion[i].dir != dir) continue;
       if(g_excursion[i].ltfZoneTime != ltfZoneTime) continue;
       g_excursion[i].filled = true;
@@ -242,7 +277,8 @@ void ExcursionCsvWrite(int i)
                                ? (g_excursion[i].fillPrice - g_excursion[i].limitPrice)
                                : (g_excursion[i].limitPrice - g_excursion[i].fillPrice)) / g_point
                             : 0.0, 1),
-             g_excursion[i].isStop ? "STOP" : "LIMIT",
+             g_excursion[i].kind == EXC_KIND_STOP   ? "STOP"   :
+             g_excursion[i].kind == EXC_KIND_REJECT ? "REJECT" : "LIMIT",
              DoubleToString(g_excursion[i].offsetAtr, 2),
              g_excursion[i].primed ? "1" : "0",
              g_excursion[i].primed
@@ -340,39 +376,46 @@ void UpdateExcursions()
             continue;
            }
 
-         // A BUY LIMIT fills when Ask falls to it; a BUY STOP when Ask rises to
-         // it. Same level, opposite direction of fill — the whole experiment.
-         bool hit;
-         if(g_excursion[i].isStop)
-            hit = (g_excursion[i].dir == 1)
-                  ? (ask >= g_excursion[i].limitPrice)
-                  : (bid <= g_excursion[i].limitPrice);
-         else
-            hit = (g_excursion[i].dir == 1)
-                  ? (ask <= g_excursion[i].limitPrice)
-                  : (bid >= g_excursion[i].limitPrice);
-
-         if(hit)
+         // REJECT never fires from ticks — only UpdateExcursionRejects(), on a
+         // closed LTF bar, decides it. This loop still primes it and still
+         // expires it, but the "did price cross the level" test below is a
+         // STOP-only question — for REJECT the level alone was never the bar.
+         if(g_excursion[i].kind != EXC_KIND_REJECT)
            {
-            g_excursion[i].triggered   = true;
-            g_excursion[i].triggerTime = now;
+            // A BUY LIMIT fills when Ask falls to it; a BUY STOP when Ask rises
+            // to it. Same level, opposite direction of fill — the experiment.
+            bool hit;
+            if(g_excursion[i].kind == EXC_KIND_STOP)
+               hit = (g_excursion[i].dir == 1)
+                     ? (ask >= g_excursion[i].limitPrice)
+                     : (bid <= g_excursion[i].limitPrice);
+            else
+               hit = (g_excursion[i].dir == 1)
+                     ? (ask <= g_excursion[i].limitPrice)
+                     : (bid >= g_excursion[i].limitPrice);
 
-            // The origin must be what the trade would actually pay, not the
-            // level it was written at. A limit fills at its level or better, so
-            // the level is right. A stop fills at its level or WORSE — price has
-            // already jumped through it — and booking the jump as free profit
-            // flatters every stop entry. Run #6 measured that flattery at ~43
-            // points: negligible against a 4 ATR stop, but a fifth of a 0.25 ATR
-            // one, which is precisely where the stop ladder looked best.
-            g_excursion[i].fillPrice = g_excursion[i].isStop
-                                       ? ((g_excursion[i].dir == 1) ? ask : bid)
-                                       : g_excursion[i].limitPrice;
-            continue;                      // start the clock on the next tick
+            if(hit)
+              {
+               g_excursion[i].triggered   = true;
+               g_excursion[i].triggerTime = now;
+
+               // The origin must be what the trade would actually pay, not the
+               // level it was written at. A limit fills at its level or better,
+               // so the level is right. A stop fills at its level or WORSE —
+               // price has already jumped through it — and booking the jump as
+               // free profit flatters every stop entry. Run #6 measured that
+               // flattery at ~43 points: negligible against a 4 ATR stop, a
+               // fifth of a 0.25 ATR one — exactly where the ladder looked best.
+               g_excursion[i].fillPrice = (g_excursion[i].kind == EXC_KIND_STOP)
+                                          ? ((g_excursion[i].dir == 1) ? ask : bid)
+                                          : g_excursion[i].limitPrice;
+               continue;                   // start the clock on the next tick
+              }
            }
 
-         // The stop's own window runs from priming, not from arming: the wait
-         // for price to revisit the zone is not evidence about the entry.
-         datetime since = g_excursion[i].isStop
+         // STOP/REJECT's own window runs from priming, not from arming: the
+         // wait for price to revisit the zone is not evidence about the entry.
+         datetime since = (g_excursion[i].kind != EXC_KIND_LIMIT)
                           ? g_excursion[i].primeTime : g_excursion[i].armTime;
          if((int)(now - since) >= armLimit)
            {
@@ -415,6 +458,44 @@ void UpdateExcursions()
          ExcursionCsvWrite(i);
          ArrayRemove(g_excursion, i, 1);
         }
+     }
+  }
+
+//==================================================================
+// REJECT TRIGGER — called once per closed LTF bar, from UpdateLTF()
+//==================================================================
+// The one check that cannot run on ticks: did the bar that just closed settle
+// beyond the confirmation threshold? A wick that stabs through offsetAtr and
+// snaps back before the bar closes must NOT trigger this — that is precisely
+// the failure mode a rejection trader is trying to avoid, and precisely what
+// distinguishes this from the STOP ladder at the same thresholds.
+//
+// Priming (price must have entered the zone) is handled by the ordinary tick
+// loop in UpdateExcursions() and is shared with STOP, so a record can arrive
+// here already primed from earlier in the same bar's formation — including
+// the bar that primed it, which is the ordinary case for a clean pin bar.
+void UpdateExcursionRejects(const MqlRates &bar)
+  {
+   if(!InpExcursionLog || !InpRejectEntryProbe) return;
+   int n = ArraySize(g_excursion);
+   if(n == 0) return;
+
+   datetime now = TimeCurrent();
+
+   for(int i = n - 1; i >= 0; i--)
+     {
+      if(g_excursion[i].kind != EXC_KIND_REJECT) continue;
+      if(g_excursion[i].triggered) continue;
+      if(!g_excursion[i].primed) continue;      // tick loop primes; not yet touched
+
+      bool confirmed = (g_excursion[i].dir == 1)
+                       ? (bar.close >= g_excursion[i].limitPrice)
+                       : (bar.close <= g_excursion[i].limitPrice);
+      if(!confirmed) continue;
+
+      g_excursion[i].triggered   = true;
+      g_excursion[i].triggerTime = now;
+      g_excursion[i].fillPrice   = bar.close;
      }
   }
 

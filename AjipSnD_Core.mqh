@@ -224,6 +224,10 @@ void UpdateLTF(const MqlRates &rates[], int count)
    if(InpZoneQualityLog)
       UpdateZoneTracking(bar, false);
 
+   // Rejection-entry confirmation: the one check that must run on a closed
+   // bar rather than a tick — see UpdateExcursionRejects() for why.
+   UpdateExcursionRejects(bar);
+
    //---- Follow-through validation (LTF always-on) ----
    if(g_ltfAwaitingValidation)
      {
