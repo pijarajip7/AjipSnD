@@ -26,6 +26,27 @@ VARIANTS = [("LIMIT", "0.00"),
             ("REJECT", "0.00"), ("REJECT", "0.25"), ("REJECT", "0.50"), ("REJECT", "1.00")]
 
 
+def detect_point(path):
+    """Derive the symbol's point size from a price column's decimal places.
+
+    Several of these analyses convert an ATR (price) into points to check a
+    level against the broker's minimum stop distance. Hardcoding the factor is a
+    silent 10x error when the symbol's digits differ — XAUUSD is digits=3 here
+    and digits=2 on other brokers — so it is read off the data instead.
+    """
+    dec = 0
+    with open(path, newline='') as fh:
+        for i, r in enumerate(csv.DictReader(fh)):
+            p = (r.get('limit_price') or r.get('fill_price') or '').strip()
+            if '.' in p:
+                dec = max(dec, len(p.split('.')[1]))
+            if i > 500:
+                break
+    if dec == 0:
+        raise ValueError("could not determine price precision")
+    return 10.0 ** (-dec)
+
+
 def load(path):
     """Return (all_rows, arm) where arm maps (kind, offset) -> list of rows.
 
@@ -42,12 +63,27 @@ def load(path):
             continue
         r['t'] = (r['triggered'] == '1')
         r['day'] = r['arm_time'][:10]
+        r['atr'] = float(r['atr_ltf']) if r.get('atr_ltf') else 0.0
         if r['t']:
             r['F'] = [int(r[x]) for x in KF]
             r['A'] = [int(r[x]) for x in KA]
             r['slip'] = float(r['slip_pts'])
         arm[k].append(r)
     return rows, arm
+
+
+def triggered_stops(path):
+    """The STOP+0.00 rows that actually fired — the population several of the
+    period A/B analyses are scored on. Returns (rows, point_size).
+
+    Note the scoring unit: because this list is already filtered to triggered
+    rows, a mean over it is per-TRADE, not per-armed-zone. That is the right
+    unit when comparing (TP, SL) geometries for ONE fixed entry mechanism, and
+    the wrong one when comparing mechanisms against each other — see
+    excursion_surface.py, which scores per armed zone for exactly that reason.
+    """
+    _, arm = load(path)
+    return [r for r in arm[('STOP', '0.00')] if r['t']], detect_point(path)
 
 
 def outcome(r, tp, sl):
@@ -73,6 +109,18 @@ def outcome(r, tp, sl):
     if a < f:
         return -1.0         # stop first
     return 0.0              # same second — unresolvable, scored flat
+
+
+def mean_r(rows, tp, sl):
+    """Mean R over the rows given, counting only triggered ones in the numerator.
+
+    Pass an already-triggered list for per-trade scoring; pass every armed row
+    for per-armed-zone scoring. The denominator is always len(rows), so the
+    caller's choice of population IS the choice of unit.
+    """
+    if not rows:
+        return 0.0
+    return sum(outcome(r, tp, sl) for r in rows if r['t']) / len(rows)
 
 
 def day_bootstrap(rows, tp, sl, n=1200, seed=137):

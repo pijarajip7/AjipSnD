@@ -40,6 +40,34 @@ python3 analysis/excursion_significance.py <AjipSnD_Excursion_*.csv>
 - **`excursion_common.py`** — shared loading and the `outcome()` scorer. Its
   level grid must stay in step with `ExcLevelAtr[]` in `AjipSnD_Excursion.mqh`.
 
+### Runs #6–#7 — stop-entry geometry, and its failed replication
+
+Same excursion CSV format, scored on `STOP+0.00` triggered entries. Take the CSV
+for whichever period you want; nothing is baked in.
+
+```bash
+python3 analysis/excursion_cell_ranking.py <period A excursion CSV>
+python3 analysis/excursion_atr_scaling.py  <period A excursion CSV>
+python3 analysis/excursion_replication.py  <period B excursion CSV>
+```
+
+- **`excursion_cell_ranking.py`** — every (TP, SL) cell with R:R ≥ 1 ranked net
+  of exit-slippage drag; then only cells the broker would accept; then an honest
+  holdout that picks on one half and scores on the other. **Read the holdout
+  first** — the ranked tables are exploratory and will always show a winner.
+- **`excursion_atr_scaling.py`** — does the edge live at a fixed ATR multiple or
+  a fixed point distance, and is it just a spread floor in disguise? ATR
+  terciles plus a floor sweep.
+- **`excursion_replication.py`** — the pre-registered test of period A's
+  stop-entry finding on a second 12-month period: mechanism checks, then the
+  named cell against a stated pass bar, then a diagnosis if it fails. It does
+  fail (+0.0115 R against a +0.10 bar, halves at +0.196 / −0.187), and that sign
+  flip inside one sample is why the stop-entry line was dropped.
+
+Scoring unit differs by question and it matters: these score **per trade** (one
+fixed mechanism, comparing geometries), while `excursion_surface.py` scores
+**per armed zone** (comparing mechanisms, where declining a zone must count).
+
 ### `test_reject_trigger.py` — STOP vs REJECT trigger semantics
 
 ```bash
