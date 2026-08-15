@@ -101,6 +101,27 @@ side flatters and the other decays by complementary amounts; only both sides
 beating their own baseline is zone information. See the RESULT block in
 `AjipSnD_Drift.mqh` for what run #9 found (short version: a coin flip).
 
+### `horizon_viability.py` — how accurate would ANY signal have to be?
+
+```bash
+python3 analysis/horizon_viability.py <drift CSV>
+```
+
+Not a signal search — the question underneath every signal search. Execution
+cost is fixed while the available move grows with horizon, so the accuracy a
+signal needs to break even falls sharply as the holding period lengthens. Run
+this before designing a strategy, not after.
+
+On run #9 data, at a 200 pt round-trip cost: **64.9%** accuracy needed at a 5m
+horizon, **52.1%** at 4h. The same 55% signal loses 133 pt/trade at 5m and makes
+288 pt/trade at 4h. It also buckets by hour — the London/NY overlap (13:00–15:00
+server) moves 4–5x as far as 20:00–22:00, which changes the required accuracy
+from ~52% to ~59% for the identical signal.
+
+This is what explains runs #1–#9: the EA targeted ~756 pt, needing 58–65%, and
+the zones delivered 49.6%. That gap was set by the horizon, not by the entry
+mechanism the five preceding runs spent their time on.
+
 ### `drift_zone_slices.py` — do the untested zone attributes carry direction?
 
 ```bash
