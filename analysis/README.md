@@ -14,6 +14,46 @@ the EA appends.
 
 ## Scripts
 
+### Run #8 — entry mechanism (excursion / first-touch grid)
+
+Need a run with `InpExcursionLog=true`, and `InpStopEntryProbe` /
+`InpRejectEntryProbe` for the ladders. Every variant is observed on the *same*
+zones over the *same* windows, so comparisons between them carry no population
+difference — that is the whole point of the design.
+
+```bash
+python3 analysis/excursion_funnel.py       <AjipSnD_Excursion_*.csv>
+python3 analysis/excursion_surface.py      <AjipSnD_Excursion_*.csv>
+python3 analysis/excursion_significance.py <AjipSnD_Excursion_*.csv>
+```
+
+- **`excursion_funnel.py`** — armed → primed → triggered per variant, plus
+  slippage. Read this first: it says how much of any variant's apparent edge is
+  just declining to trade the hard zones.
+- **`excursion_surface.py`** — expectancy per (TP, SL) cell, scored **per armed
+  zone** rather than per trade taken, so a variant that declines zones cannot
+  flatter itself. Includes a control cell that must replicate run #6's 4.58pp;
+  if it drifts, suspect the data before believing anything else in the output.
+- **`excursion_significance.py`** — day-level bootstrap CIs plus a placebo bar
+  for best-of-169-cells selection. As of run #8 the observed best does **not**
+  clear the placebo, i.e. REJECT's apparent advantage is cell selection.
+- **`excursion_common.py`** — shared loading and the `outcome()` scorer. Its
+  level grid must stay in step with `ExcLevelAtr[]` in `AjipSnD_Excursion.mqh`.
+
+### `test_reject_trigger.py` — STOP vs REJECT trigger semantics
+
+```bash
+python3 analysis/test_reject_trigger.py
+```
+
+Self-contained, no CSV. Checks that REJECT fires only on a bar *close* past the
+threshold while STOP fires intrabar — the distinction the whole REJECT ladder
+rests on. Note the model collapses each bar to OHLC and cannot represent
+intrabar ordering, so fixtures must not depend on it; see the comment at the top
+before adding a case.
+
+### Run #9 — does the zone predict anything at all?
+
 ### `drift_analysis.py` — does zone confirmation predict anything?
 
 ```bash
