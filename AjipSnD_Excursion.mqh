@@ -58,7 +58,8 @@ struct ExcursionRecord
   {
    bool     triggered;      // entry level was reached; the excursion clock runs
    int      dir;            // 1=BUY, -1=SELL
-   double   limitPrice;     // level the hypothetical order sits at = excursion origin
+   double   limitPrice;     // level the hypothetical order sits at
+   double   fillPrice;      // price actually paid at trigger = excursion origin
    bool     isStop;         // true = STOP entry (fills on the way out of the zone)
    bool     primed;         // STOP only: price has entered the zone, stop is now live
    double   offsetAtr;      // STOP only: proof demanded beyond the edge, in LTF ATR
@@ -104,6 +105,7 @@ void ExcursionArmOne(int dir, double entryPrice, datetime ltfZoneTime,
    g_excursion[sz].triggered   = false;
    g_excursion[sz].dir         = dir;
    g_excursion[sz].limitPrice  = entryPrice;
+   g_excursion[sz].fillPrice   = entryPrice;   // replaced by the real fill at trigger
    g_excursion[sz].isStop      = isStop;
    g_excursion[sz].primed      = !isStop;   // a limit is live immediately
    g_excursion[sz].offsetAtr   = offsetAtr;
@@ -203,7 +205,7 @@ void ExcursionCsvWrite(int i)
    if(!exists)
       FileWrite(h,
                 "arm_time", "trigger_time", "triggered", "dir", "limit_price",
-                "entry_kind", "offset_atr", "primed", "prime_time",
+                "fill_price", "slip_pts", "entry_kind", "offset_atr", "primed", "prime_time",
                 "atr_ltf", "atr_htf", "ltf_zone_time", "htf_zone_time",
                 "sl_anchor_price", "sl_anchor_atr",
                 "filled", "blocked_gap", "blocked_gate", "blocked_cap",
@@ -221,8 +223,8 @@ void ExcursionCsvWrite(int i)
    if(g_excursion[i].slAnchor > 0.0 && g_excursion[i].atrLtf > 0)
      {
       double d = (g_excursion[i].dir == 1)
-                 ? (g_excursion[i].limitPrice - g_excursion[i].slAnchor)
-                 : (g_excursion[i].slAnchor - g_excursion[i].limitPrice);
+                 ? (g_excursion[i].fillPrice - g_excursion[i].slAnchor)
+                 : (g_excursion[i].slAnchor - g_excursion[i].fillPrice);
       slAtr = d / g_excursion[i].atrLtf;
      }
 
@@ -234,6 +236,12 @@ void ExcursionCsvWrite(int i)
              g_excursion[i].triggered ? "1" : "0",
              g_excursion[i].dir == 1 ? "BUY" : "SELL",
              DoubleToString(g_excursion[i].limitPrice, g_digits),
+             DoubleToString(g_excursion[i].fillPrice, g_digits),
+             DoubleToString(g_excursion[i].triggered
+                            ? (g_excursion[i].dir == 1
+                               ? (g_excursion[i].fillPrice - g_excursion[i].limitPrice)
+                               : (g_excursion[i].limitPrice - g_excursion[i].fillPrice)) / g_point
+                            : 0.0, 1),
              g_excursion[i].isStop ? "STOP" : "LIMIT",
              DoubleToString(g_excursion[i].offsetAtr, 2),
              g_excursion[i].primed ? "1" : "0",
@@ -348,6 +356,17 @@ void UpdateExcursions()
            {
             g_excursion[i].triggered   = true;
             g_excursion[i].triggerTime = now;
+
+            // The origin must be what the trade would actually pay, not the
+            // level it was written at. A limit fills at its level or better, so
+            // the level is right. A stop fills at its level or WORSE — price has
+            // already jumped through it — and booking the jump as free profit
+            // flatters every stop entry. Run #6 measured that flattery at ~43
+            // points: negligible against a 4 ATR stop, but a fifth of a 0.25 ATR
+            // one, which is precisely where the stop ladder looked best.
+            g_excursion[i].fillPrice = g_excursion[i].isStop
+                                       ? ((g_excursion[i].dir == 1) ? ask : bid)
+                                       : g_excursion[i].limitPrice;
             continue;                      // start the clock on the next tick
            }
 
@@ -370,8 +389,8 @@ void UpdateExcursions()
 
       double px  = (g_excursion[i].dir == 1) ? bid : ask;
       double fav = (g_excursion[i].dir == 1)
-                   ? (px - g_excursion[i].limitPrice)
-                   : (g_excursion[i].limitPrice - px);
+                   ? (px - g_excursion[i].fillPrice)
+                   : (g_excursion[i].fillPrice - px);
       double favAtr = fav / g_excursion[i].atrLtf;
       double advAtr = -favAtr;             // one price, so exactly one side is positive
 
