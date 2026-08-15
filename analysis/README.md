@@ -122,6 +122,36 @@ This is what explains runs #1–#9: the EA targeted ~756 pt, needing 58–65%, a
 the zones delivered 49.6%. That gap was set by the horizon, not by the entry
 mechanism the five preceding runs spent their time on.
 
+### Does a coarser LTF/HTF pairing help? (M5/H1)
+
+Every result above used LTF=M1, HTF=M15. A natural objection: maybe zone
+*significance* scales with the timeframe it's drawn on, and M1 zones are just
+too small to mean anything — a claim distinct from "the zone concept has no
+information" and untested by anything above. It needs no code change; the
+probe reads whatever `InpTimeframe`/`InpHtfTimeframe` the EA is configured
+with. Tested on period A with `InpTimeframe=M5`, `InpHtfTimeframe=H1`
+(everything else unchanged, quality gates still off, baseline draw probability
+raised to 0.10 to compensate for M5 having 1/5 as many bars).
+
+Same null: hit rate 49.07–49.85% across all five horizons, 9,130 zones,
+baseline-ATR-regime ratio 0.98x (valid). The per-side split disagrees in sign
+at 15m/4h/1d — the same market-trend-leaking-through signature as the M1
+result — and the significant-looking +0.0111 ATR excess drift at 5m has a CI
+crossing zero and a hit rate *below* 50% (49.46%), i.e. it's mean-skew from a
+few large moves, not a real edge; don't read it as one.
+
+One correction to a plausible-sounding but wrong intuition: M5/H1 does **not**
+need less accuracy at a given wall-clock horizon than M1/M15 does — `1h`
+needs 53.6% here vs 54.2% at M1/M15, `4h` needs 51.7% vs 52.1%, essentially
+the same, because both measure the same underlying market over the same
+wall-clock window regardless of which timeframe detected the entry. What
+*does* change is that the EA's target is sized in the entry timeframe's own
+ATR, and M5's ATR (1,967 pt) is ~2.6x M1's (756 pt), so covering a 1.0 ATR
+target takes on the order of 30 minutes at M5 vs 7-8 minutes at M1 — a
+longer, friendlier hold, but a side effect of position sizing, not of the
+signal being any less blind at that horizon. It doesn't rescue anything here:
+the friendliest horizon (1d, bar 50.6%) still only gets 49.85%.
+
 ### `drift_zone_slices.py` — do the untested zone attributes carry direction?
 
 ```bash
