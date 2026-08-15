@@ -15,7 +15,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "1.08-rejectprobe"
+#define EA_BUILD "1.09-driftprobe"
 
 #include <Trade\Trade.mqh>
 
@@ -153,6 +153,13 @@ input bool InpStopEntryProbe = false; // Also observe stop-entry variants (measu
 // count. Same thresholds, different confirmation rule; that is the whole
 // comparison. Requires InpExcursionLog=true. Places no orders.
 input bool InpRejectEntryProbe = false; // Also observe rejection-entry variants (measurement only)
+// Forward-drift probe: at zone confirmation, does price move in the
+// predicted direction over fixed horizons (5m/15m/1h/4h/1d) — no entry, no
+// SL/TP, just price at t0 vs t0+h. A random-time baseline is recorded
+// through the identical mechanism so the zone population is checkable
+// against a null, not asserted against it. See AjipSnD_Drift.mqh.
+input bool   InpDriftLog          = false; // Log forward-drift probe (zone confirm vs random baseline)
+input double InpDriftBaselineProb = 0.03;  // Per-bar draw probability for the random baseline (0=baseline off)
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -164,6 +171,7 @@ input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal,
 //==================================================================
 #include "AjipSnD_Globals.mqh"
 #include "AjipSnD_Excursion.mqh"
+#include "AjipSnD_Drift.mqh"
 #include "AjipSnD_Zone.mqh"
 #include "AjipSnD_News.mqh"
 #include "AjipSnD_Trade.mqh"
@@ -181,7 +189,7 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s | %s %s",
+   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
                InpStructuralSlMode ? "ON" : "off",
                InpMaxRiskOvershoot,
@@ -189,6 +197,8 @@ int OnInit()
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",
                InpRejectEntryProbe ? "ON" : "off",
+               InpDriftLog ? "ON" : "off",
+               InpDriftBaselineProb,
                _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
 
    // Cache symbol info
@@ -354,6 +364,10 @@ void OnDeinit(const int reason)
    // Excursion records still inside their horizon — the tail of the run is
    // otherwise lost, and on a backtest that tail is the final trading day.
    FlushExcursions();
+
+   // Drift probe: same reasoning — partial stamps for in-flight records are
+   // still useful rows, not lost data.
+   FlushDriftRecords();
 
    // Release ATR handles
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);

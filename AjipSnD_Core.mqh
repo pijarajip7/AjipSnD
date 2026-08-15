@@ -228,6 +228,11 @@ void UpdateLTF(const MqlRates &rates[], int count)
    // bar rather than a tick — see UpdateExcursionRejects() for why.
    UpdateExcursionRejects(bar);
 
+   // Forward-drift probe: baseline draw + horizon stamping, every bar,
+   // independent of whether a zone confirms on it.
+   DriftArmBaseline(bar);
+   UpdateDriftRecords(bar);
+
    //---- Follow-through validation (LTF always-on) ----
    if(g_ltfAwaitingValidation)
      {
@@ -264,6 +269,10 @@ void UpdateLTF(const MqlRates &rates[], int count)
 
       // Metrics + quality gate — before the zone is stored anywhere
       ComputeZoneMetrics(confirmed, false, bar);
+
+      // Forward-drift probe: arm on every confirmation, gate ignored — the
+      // raw zone concept is what is on trial, not our entry filter.
+      DriftArmZone(confirmed);
 
       // Add to zone array (data-only — keeps count/logging consistent)
       if(confirmed.isDemand)
