@@ -57,7 +57,13 @@ for r in csv.DictReader(open(CSV, newline='')):
     for k, _ in HZ:
         v = r.get(k, '')
         rec[k] = float(v) if v not in ('', None) else None
-    (zones if r['is_zone'] == '1' else base).append(rec)
+    # Only true baseline rows describe "an arbitrary moment"; a TREND row is a
+    # signal and would bias the move distribution this whole analysis rests on.
+    kind = r.get('kind') or ('ZONE' if r['is_zone'] == '1' else 'BASELINE')
+    if kind == 'BASELINE':
+        base.append(rec)
+    elif kind == 'ZONE':
+        zones.append(rec)
 
 print("=" * 78)
 print("HOW BIG IS THE MOVE, AND WHAT ACCURACY WOULD IT TAKE?")

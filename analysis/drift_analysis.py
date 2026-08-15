@@ -64,8 +64,12 @@ with open(CSV, newline='') as f:
     for r in csv.DictReader(f):
         if not r.get('arm_time'):
             continue
+        # A TREND row also has is_zone=0 but is NOT baseline; filtering the
+        # baseline on is_zone would fold signal rows into the null it defines.
+        kind = r.get('kind') or ('ZONE' if r['is_zone'] == '1' else 'BASELINE')
         rec = {
-            'zone': r['is_zone'] == '1',
+            'kind': kind,
+            'zone': kind == 'ZONE',
             'demand': r.get('is_demand') == '1',
             'day': r['arm_time'][:10],
             'atr': float(r['atr_ltf']) if r.get('atr_ltf') else 0.0,
@@ -85,7 +89,7 @@ with open(CSV, newline='') as f:
             rows.append(rec)
 
 zones = [r for r in rows if r['zone']]
-base = [r for r in rows if not r['zone']]
+base = [r for r in rows if r['kind'] == 'BASELINE']
 dem = [r for r in zones if r['demand']]
 sup = [r for r in zones if not r['demand']]
 

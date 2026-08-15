@@ -15,7 +15,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "1.09-driftprobe"
+#define EA_BUILD "1.11-armtimefix"
 
 #include <Trade\Trade.mqh>
 
@@ -160,6 +160,15 @@ input bool InpRejectEntryProbe = false; // Also observe rejection-entry variants
 // against a null, not asserted against it. See AjipSnD_Drift.mqh.
 input bool   InpDriftLog          = false; // Log forward-drift probe (zone confirm vs random baseline)
 input double InpDriftBaselineProb = 0.03;  // Per-bar draw probability for the random baseline (0=baseline off)
+// Trend probe. Run #9 found the only real directional effect in the data was
+// the market's own trend, which is the opposite stance to the zone logic. This
+// arms a record on every closed bar of its own timeframe, pointing the way
+// price sits relative to a moving average. Requires InpDriftLog=true; places no
+// orders. The timeframe is separate from InpHtfTimeframe on purpose — the point
+// is to measure a horizon the EA does not currently trade.
+input bool            InpDriftTrendProbe    = false;      // Also observe an MA-trend probe (measurement only)
+input ENUM_TIMEFRAMES InpDriftTrendTf       = PERIOD_H1;  // Timeframe for the trend probe
+input int             InpDriftTrendMaPeriod = 50;         // MA period on that timeframe
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -200,6 +209,9 @@ int OnInit()
                InpDriftLog ? "ON" : "off",
                InpDriftBaselineProb,
                _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
+   PrintFormat("AjipSnD trendProbe=%s tf=%s ma=%d",
+               InpDriftTrendProbe ? "ON" : "off",
+               EnumToString(InpDriftTrendTf), InpDriftTrendMaPeriod);
 
    // Cache symbol info
    g_digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -228,6 +240,16 @@ int OnInit()
    // ATR handles for zone quality metrics
    g_atrLtfHandle = iATR(_Symbol, InpTimeframe, 14);
    g_atrHtfHandle = iATR(_Symbol, InpHtfTimeframe, 14);
+
+   // Trend probe MA — its own handle on its own timeframe
+   if(InpDriftLog && InpDriftTrendProbe)
+     {
+      g_driftTrendMa = iMA(_Symbol, InpDriftTrendTf, InpDriftTrendMaPeriod,
+                           0, MODE_SMA, PRICE_CLOSE);
+      if(g_driftTrendMa == INVALID_HANDLE)
+         PrintFormat("AjipSnD: trend probe MA handle FAILED on %s — probe will record nothing",
+                     EnumToString(InpDriftTrendTf));
+     }
 
    // Recover tracking for positions from earlier EA run
    RebuildTrackedPositions();
@@ -271,6 +293,10 @@ void OnTick()
 
    // 1a. First-touch grid (diagnostic only — observes, never decides)
    UpdateExcursions();
+
+   // 1a2. Trend probe — arms on its own timeframe's bar close, so it is checked
+   // per tick and self-gates. Observation only; places no orders.
+   DriftArmTrend();
 
    // 1b. Check pending orders — remove if outside HTF zone, detect fills
    CheckPendingOrders();
@@ -372,6 +398,7 @@ void OnDeinit(const int reason)
    // Release ATR handles
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
    if(g_atrHtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrHtfHandle);
+   if(g_driftTrendMa != INVALID_HANDLE) IndicatorRelease(g_driftTrendMa);
 
    ObjectsDeleteAll(0, g_objPrefix);
    Print("AjipSnD: EA removed. Reason=", reason);

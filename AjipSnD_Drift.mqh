@@ -79,20 +79,50 @@
 // loses nothing worth having; see UpdateDriftRecords().
 const int DriftHorizonSec[DRIFT_HORIZONS] = {300, 900, 3600, 14400, 86400};
 
+// Record kinds. Baseline must stay distinguishable from every signal kind: it
+// is the population the others are measured against, so a signal row silently
+// counted as baseline would corrupt the very null it is compared to.
+#define DRIFT_BASELINE 0
+#define DRIFT_ZONE     1
+#define DRIFT_TREND    2
+
 struct DriftRecord
   {
-   bool     isZone;      // true=zone confirmation, false=random baseline
-   bool     isDemand;    // zone only; meaningless (false) for baseline rows
+   int      kind;        // DRIFT_BASELINE / _ZONE / _TREND
+   bool     isDemand;    // direction predicted: true=up. Baseline has none.
    datetime armTime;
    double   armPrice;
    double   atrLtf;
-   datetime ltfZoneTime; // join key to the zone CSV; 0 for baseline
+   datetime ltfZoneTime; // join key to the zone CSV; 0 otherwise
+   double   maDistAtr;   // TREND only: (close - MA) / ATR at arm
    int      nextIdx;     // lowest unstamped horizon index
    double   fwdDelta[DRIFT_HORIZONS]; // (price_at_horizon - armPrice)/point
    bool     stamped[DRIFT_HORIZONS];
   };
 
 DriftRecord g_drift[];
+
+//---- When a bar's information actually becomes available -------------------
+// MqlRates.time is the bar's OPEN time, but everything here is armed on a bar's
+// CLOSE — the close price, a confirmation, an MA reading. Starting the horizon
+// clock at the open therefore runs it early by one whole bar period.
+//
+// On M1 that is a 60s error against a 300s first horizon. On H1 it is fatal:
+// arming a record whose clock already reads 3600s stamps the 5m, 15m AND 1h
+// horizons instantly, all at the same price, and the measured drift is ~0 by
+// construction. That is exactly what the first trend probe run produced —
+// long-only scored 0.00% at 5m, which is impossible for real price data and is
+// what exposed this.
+datetime DriftBarCloseTime(const datetime barOpen, ENUM_TIMEFRAMES tf)
+  {
+   return(barOpen + PeriodSeconds(tf));
+  }
+
+// Trend probe state — its own MA handle and its own new-bar clock, because the
+// probe's timeframe is deliberately independent of InpHtfTimeframe. The whole
+// point is to test a horizon the EA does not currently trade.
+int      g_driftTrendMa      = INVALID_HANDLE;
+datetime g_driftTrendLastBar = 0;
 
 //==================================================================
 // ARM
@@ -105,12 +135,13 @@ void DriftArmZone(const SnDZone &zone)
    int sz = ArraySize(g_drift);
    ArrayResize(g_drift, sz + 1);
 
-   g_drift[sz].isZone      = true;
+   g_drift[sz].kind        = DRIFT_ZONE;
    g_drift[sz].isDemand    = zone.isDemand;
-   g_drift[sz].armTime     = zone.time;
+   g_drift[sz].armTime     = DriftBarCloseTime(zone.time, InpTimeframe);
    g_drift[sz].armPrice    = zone.confirmClose;
    g_drift[sz].atrLtf      = zone.atrAtConfirm;
    g_drift[sz].ltfZoneTime = zone.time;
+   g_drift[sz].maDistAtr   = 0.0;
    g_drift[sz].nextIdx     = 0;
    for(int k = 0; k < DRIFT_HORIZONS; k++)
      {
@@ -136,12 +167,72 @@ void DriftArmBaseline(const MqlRates &bar)
    int sz = ArraySize(g_drift);
    ArrayResize(g_drift, sz + 1);
 
-   g_drift[sz].isZone      = false;
+   g_drift[sz].kind        = DRIFT_BASELINE;
    g_drift[sz].isDemand    = false;
-   g_drift[sz].armTime     = bar.time;
+   g_drift[sz].armTime     = DriftBarCloseTime(bar.time, InpTimeframe);
    g_drift[sz].armPrice    = bar.close;
    g_drift[sz].atrLtf      = atr;
    g_drift[sz].ltfZoneTime = 0;
+   g_drift[sz].maDistAtr   = 0.0;
+   g_drift[sz].nextIdx     = 0;
+   for(int k = 0; k < DRIFT_HORIZONS; k++)
+     {
+      g_drift[sz].fwdDelta[k] = 0.0;
+      g_drift[sz].stamped[k]  = false;
+     }
+  }
+
+//==================================================================
+// TREND PROBE — the candidate run #9 pointed at
+//==================================================================
+// Nine runs went into fading price INTO a level. The only real directional
+// effect anywhere in that data was the market's own trend (demand-side accuracy
+// reached 58.5% at the 1d horizon purely from XAUUSD's uptrend), which is the
+// opposite stance to the one the EA takes. This probe tests it directly.
+//
+// Definition is deliberately the plainest available — close versus a moving
+// average on the probe's own timeframe — because the question being asked is
+// whether the DIRECTION carries information, not whether some particular
+// indicator tuning does. A definition with knobs would invite fitting them.
+//
+// The comparison that matters is against the baseline, not against zero: in a
+// year when gold rose, "price above its MA" points up most of the time, so an
+// uncorrected reading would restate the trend rather than test the timing.
+// Offline the record is corrected by +mu when long and -mu when short, and the
+// two sides are reported separately, exactly as the zone analysis does.
+void DriftArmTrend()
+  {
+   if(!InpDriftLog || !InpDriftTrendProbe) return;
+   if(g_driftTrendMa == INVALID_HANDLE) return;
+
+   MqlRates rates[];
+   if(CopyRates(_Symbol, InpDriftTrendTf, 0, 3, rates) < 2) return;
+   ArraySetAsSeries(rates, true);
+
+   MqlRates bar = rates[1];                 // last CLOSED bar on the probe TF
+   if(bar.time == g_driftTrendLastBar) return;
+   g_driftTrendLastBar = bar.time;
+
+   double ma[1];
+   if(CopyBuffer(g_driftTrendMa, 0, 1, 1, ma) != 1) return;
+   if(ma[0] <= 0) return;
+
+   double atr = GetAtrValue(false);
+   if(atr <= 0) return;
+
+   // Exactly on the MA carries no direction — skip rather than coin-flip it.
+   if(bar.close == ma[0]) return;
+
+   int sz = ArraySize(g_drift);
+   ArrayResize(g_drift, sz + 1);
+
+   g_drift[sz].kind        = DRIFT_TREND;
+   g_drift[sz].isDemand    = (bar.close > ma[0]);   // above MA = predict up
+   g_drift[sz].armTime     = DriftBarCloseTime(bar.time, InpDriftTrendTf);
+   g_drift[sz].armPrice    = bar.close;
+   g_drift[sz].atrLtf      = atr;
+   g_drift[sz].ltfZoneTime = 0;
+   g_drift[sz].maDistAtr   = (bar.close - ma[0]) / atr;
    g_drift[sz].nextIdx     = 0;
    for(int k = 0; k < DRIFT_HORIZONS; k++)
      {
@@ -169,27 +260,36 @@ void DriftCsvWrite(int i)
       return;
      }
 
+   // 'kind' is the authoritative column; 'is_zone' is kept so the run #9
+   // analyses keep parsing unchanged. Note they are NOT interchangeable — a
+   // TREND row has is_zone=0 but is not baseline, so anything computing the
+   // baseline must filter on kind.
    if(!exists)
       FileWrite(h,
-                "is_zone", "is_demand", "arm_time", "arm_price", "atr_ltf",
-                "ltf_zone_time", "d05m", "d15m", "d1h", "d4h", "d1d");
+                "kind", "is_zone", "is_demand", "arm_time", "arm_price", "atr_ltf",
+                "ltf_zone_time", "d05m", "d15m", "d1h", "d4h", "d1d", "ma_dist_atr");
    else
       FileSeek(h, 0, SEEK_END);
 
    FileWrite(h,
-             g_drift[i].isZone ? "1" : "0",
-             g_drift[i].isZone ? (g_drift[i].isDemand ? "1" : "0") : "",
+             g_drift[i].kind == DRIFT_ZONE  ? "ZONE"  :
+             g_drift[i].kind == DRIFT_TREND ? "TREND" : "BASELINE",
+             g_drift[i].kind == DRIFT_ZONE ? "1" : "0",
+             g_drift[i].kind == DRIFT_BASELINE
+                ? "" : (g_drift[i].isDemand ? "1" : "0"),
              TimeToString(g_drift[i].armTime, TIME_DATE | TIME_SECONDS),
              DoubleToString(g_drift[i].armPrice, g_digits),
              DoubleToString(g_drift[i].atrLtf, 3),
-             g_drift[i].isZone
+             g_drift[i].kind == DRIFT_ZONE
                 ? TimeToString(g_drift[i].ltfZoneTime, TIME_DATE | TIME_SECONDS)
                 : "",
              g_drift[i].stamped[0] ? DoubleToString(g_drift[i].fwdDelta[0], 1) : "",
              g_drift[i].stamped[1] ? DoubleToString(g_drift[i].fwdDelta[1], 1) : "",
              g_drift[i].stamped[2] ? DoubleToString(g_drift[i].fwdDelta[2], 1) : "",
              g_drift[i].stamped[3] ? DoubleToString(g_drift[i].fwdDelta[3], 1) : "",
-             g_drift[i].stamped[4] ? DoubleToString(g_drift[i].fwdDelta[4], 1) : "");
+             g_drift[i].stamped[4] ? DoubleToString(g_drift[i].fwdDelta[4], 1) : "",
+             g_drift[i].kind == DRIFT_TREND
+                ? DoubleToString(g_drift[i].maDistAtr, 3) : "");
 
    FileClose(h);
   }
@@ -204,9 +304,13 @@ void UpdateDriftRecords(const MqlRates &bar)
    if(!InpDriftLog) return;
    int n = ArraySize(g_drift);
 
+   // The price being stamped is this bar's CLOSE, so the reading belongs to the
+   // bar's close time — the same convention every arm uses.
+   datetime now = DriftBarCloseTime(bar.time, InpTimeframe);
+
    for(int i = n - 1; i >= 0; i--)
      {
-      int elapsed = (int)(bar.time - g_drift[i].armTime);
+      int elapsed = (int)(now - g_drift[i].armTime);
 
       while(g_drift[i].nextIdx < DRIFT_HORIZONS
             && elapsed >= DriftHorizonSec[g_drift[i].nextIdx])

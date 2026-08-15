@@ -52,7 +52,10 @@ with open(DRIFT, newline='') as f:
         atr = float(r['atr_ltf']) if r.get('atr_ltf') else 0.0
         if atr <= 0:
             continue
-        rec = {'zone': r['is_zone'] == '1', 'demand': r.get('is_demand') == '1',
+        # See drift_analysis.py: TREND rows are is_zone=0 but not baseline.
+        kind = r.get('kind') or ('ZONE' if r['is_zone'] == '1' else 'BASELINE')
+        rec = {'kind': kind, 'zone': kind == 'ZONE',
+               'demand': r.get('is_demand') == '1',
                'atr': atr, 'zt': (r.get('ltf_zone_time') or '').strip()}
         for k, _ in HZ:
             v = r.get(k, '')
@@ -60,7 +63,7 @@ with open(DRIFT, newline='') as f:
         rows.append(rec)
 
 zones = [r for r in rows if r['zone']]
-base = [r for r in rows if not r['zone']]
+base = [r for r in rows if r['kind'] == 'BASELINE']
 
 
 def q(v, p):
