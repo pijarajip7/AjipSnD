@@ -101,6 +101,31 @@ side flatters and the other decays by complementary amounts; only both sides
 beating their own baseline is zone information. See the RESULT block in
 `AjipSnD_Drift.mqh` for what run #9 found (short version: a coin flip).
 
+### `drift_zone_slices.py` — do the untested zone attributes carry direction?
+
+```bash
+python3 analysis/drift_zone_slices.py <drift CSV> <zones CSV>
+```
+
+Slices the drift result by three attributes that shape EA behaviour but were
+never tested on their own: `swept` (liquidity sweep — the rule `ProcessZoneBar`
+encodes), `base_bars` (origin speed), and `validated` (follow-through). Uses
+stratified permutation — labels shuffled *within* each day, so day-level shocks
+are held fixed — plus a family-wise test on the maximum gap across all tests.
+
+Two things it established, both worth knowing before writing another slice:
+
+- **`validated` is circular and is excluded from testing.** A demand zone is
+  marked validated exactly when a later bar closes above the confirm bar's high
+  — when price went up — and the drift asks whether price went up. The apparent
+  66.9% vs 11.0% gap at 5m is one event scored twice; watch it decay to 51.1%
+  at 1d as the horizon outruns the validation. Testing whether that gate has
+  real predictive value needs drift measured from the *validation* moment
+  forward, which this instrument does not do.
+- **`base_bars` can never be 1**, which is what corrected the struct comment.
+
+Result on run #9 data: family-wise p = 0.201. No lead.
+
 ### `drift_robustness.py` — could that null be wrong?
 
 ```bash

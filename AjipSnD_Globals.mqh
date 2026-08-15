@@ -35,7 +35,12 @@ struct SnDZone
    int      htfTrendAtConfirm;// HTF trend when this zone confirmed (LTF: cross-TF alignment)
    bool     validated;        // follow-through validation passed
    int      trendAtConfirm;   // trend of this TF at confirmation (1=UP, -1=DOWN)
-   int      baseBars;         // bars candidate stayed alive before confirmation (1=impulsive)
+   // Bars the candidate stayed alive before confirming. Floor is 2, not 1: the
+   // bar that creates a candidate already increments this to 1 and cannot
+   // confirm itself (confirmation needs a close beyond its own high/low), so
+   // the fastest possible origin takes two bars. Measured over 31,645 LTF
+   // zones: 30.6% confirm at 2 bars, median 3, longest 181.
+   int      baseBars;         // bars candidate stayed alive before confirmation (2=fastest)
    double   confirmClose;     // close of the confirming bar
    double   atrAtConfirm;     // ATR value at confirmation
    double   widthAtr;         // zone width / ATR
