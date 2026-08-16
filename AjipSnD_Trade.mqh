@@ -278,6 +278,41 @@ void CancelPendingForZone(bool isDemand, datetime zoneTime)
      }
   }
 
+//---- Cancel pending orders resting inside a price range (HTF invalidation) ----
+// CancelPendingForZone matches by the LTF zone's own confirm time — no help
+// here, since a pending order only carries the LTF zone's zoneTime, never a
+// reference to the HTF zone that hosted it. An HTF-caused invalidation has to
+// find its orders by price instead.
+//
+// Call this AFTER the stale zone is already removed from g_htfDemandZones/
+// g_htfSupplyZones: overlapping HTF zones can coexist (a newer zone only
+// replaces an older one when it is strictly deeper/higher, so a shallower
+// older zone can still overlap a newer one's range), so an order can still be
+// legitimately backed by a surviving zone even though it also falls inside
+// the one just invalidated. stillCovered re-checks the live arrays — after
+// the removal — so that case is left alone instead of cancelled by mistake.
+void CancelPendingInsideZone(bool isDemand, double zoneLow, double zoneHigh, string reason)
+  {
+   int expectedDir = isDemand ? 1 : -1;
+   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
+     {
+      if(g_pendingOrders[i].dir != expectedDir) continue;
+      if(g_pendingOrders[i].price < zoneLow || g_pendingOrders[i].price > zoneHigh) continue;
+
+      bool stillCovered = isDemand
+                          ? IsPriceInDemandZone(g_pendingOrders[i].price, g_htfDemandZones)
+                          : IsPriceInSupplyZone(g_pendingOrders[i].price, g_htfSupplyZones);
+      if(stillCovered) continue;
+
+      if(OrderSelect(g_pendingOrders[i].ticket))
+        {
+         if(trade.OrderDelete(g_pendingOrders[i].ticket))
+            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u (%s)", g_pendingOrders[i].ticket, reason);
+        }
+      ArrayRemove(g_pendingOrders, i, 1);
+     }
+  }
+
 //---- Cancel ALL pending orders (called on close-all, except batch) ----
 void CancelAllPendingOrders()
   {

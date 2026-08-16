@@ -224,6 +224,20 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
          LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          CancelPendingForZone(true, zones[i].time);
          ArrayRemove(zones, i, 1);
+         continue;
+        }
+      // HTF only: a zone already touched (retested) goes stale the moment a
+      // fresh HTF demand zone confirms, regardless of whether the new zone is
+      // "lower" by the check above — the market has produced new structure,
+      // so an order resting in the old zone is trading yesterday's setup.
+      if(zones[i].isHtf && zones[i].touched)
+        {
+         datetime zTime = zones[i].time;
+         double   zLow  = zones[i].low;
+         double   zHigh = zones[i].high;
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zTime);
+         ArrayRemove(zones, i, 1);
+         CancelPendingInsideZone(true, zLow, zHigh, "HTF demand touched, superseded by new zone");
         }
      }
   
@@ -251,6 +265,17 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
          LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          CancelPendingForZone(false, zones[i].time);
          ArrayRemove(zones, i, 1);
+         continue;
+        }
+      // HTF only — see AddDemandZone's matching comment.
+      if(zones[i].isHtf && zones[i].touched)
+        {
+         datetime zTime = zones[i].time;
+         double   zLow  = zones[i].low;
+         double   zHigh = zones[i].high;
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zTime);
+         ArrayRemove(zones, i, 1);
+         CancelPendingInsideZone(false, zLow, zHigh, "HTF supply touched, superseded by new zone");
         }
      }
   
@@ -394,6 +419,13 @@ bool InvalidateHtfZones(const MqlRates &bar)
          ArrayRemove(g_htfDemandZones, i, 1);
          anyChange = true;
         }
+      // Live touch tracking — wick re-entry after the zone's own confirm bar.
+      // .touched on g_zoneTracker[] is a separate copy updated elsewhere; this
+      // is the only writer for the live HTF arrays, and it feeds the
+      // touched+superseded invalidation in AddDemandZone/AddSupplyZone below.
+      else if(!g_htfDemandZones[i].touched && bar.time > g_htfDemandZones[i].time
+              && bar.low <= g_htfDemandZones[i].high)
+         g_htfDemandZones[i].touched = true;
      }
 
    // Check supply zones — invalid if resistance broken (close > sweepHigh if swept, else close > high)
@@ -412,6 +444,9 @@ bool InvalidateHtfZones(const MqlRates &bar)
          ArrayRemove(g_htfSupplyZones, i, 1);
          anyChange = true;
         }
+      else if(!g_htfSupplyZones[i].touched && bar.time > g_htfSupplyZones[i].time
+              && bar.high >= g_htfSupplyZones[i].low)
+         g_htfSupplyZones[i].touched = true;
      }
 
    return(anyChange);
