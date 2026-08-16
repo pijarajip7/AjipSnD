@@ -425,6 +425,8 @@ Final: active   Daily: TARGET
 Session: OPEN   News: clear
 Open MFE: 12.34   Open MAE: -5.67
 ```
-`Demands`/`Supplies` show `tradeable/total` — see the Zone Quality Gate
-note above on what `tradeable` still means now that it no longer gates
+`Demands`/`Supplies` count `g_ltfDemandZones`/`g_ltfSupplyZones` (LTF, not
+HTF — HTF is a directional bias only, never geometrically meaningful) as
+`tradeable/total`. See the Zone Quality Gate note above on what `tradeable`
+still means now that it no longer gates
 entries.

@@ -641,11 +641,13 @@ void DrawPanel()
    PANEL_LABEL(StringFormat("LTF Trend: %s (%s)", trendStr, ShortTF(InpTimeframe)), clrWhite);
    PANEL_LABEL(StringFormat("HTF Trend: %s (%s)", htfTrendStr, ShortTF(InpHtfTimeframe)), clrWhite);
    // "tradeable/total" — zones failing the quality gate still exist as
-   // structure but are not offered as entry areas
-   int demTradeable = CountTradeableZones(g_htfDemandZones);
-   int supTradeable = CountTradeableZones(g_htfSupplyZones);
-   PANEL_LABEL(StringFormat("Demands:   %d/%d", demTradeable, ArraySize(g_htfDemandZones)), clrWhite);
-   PANEL_LABEL(StringFormat("Supplies:  %d/%d", supTradeable, ArraySize(g_htfSupplyZones)), clrWhite);
+   // structure but are not offered as entry areas. LTF, not HTF: HTF is a
+   // directional bias only now, never geometrically meaningful, while LTF
+   // zones are what actually gets watched and traded.
+   int demTradeable = CountTradeableZones(g_ltfDemandZones);
+   int supTradeable = CountTradeableZones(g_ltfSupplyZones);
+   PANEL_LABEL(StringFormat("Demands:   %d/%d", demTradeable, ArraySize(g_ltfDemandZones)), clrWhite);
+   PANEL_LABEL(StringFormat("Supplies:  %d/%d", supTradeable, ArraySize(g_ltfSupplyZones)), clrWhite);
    PANEL_LABEL(StringFormat("Entries:   %d", nOpen), clrWhite);
    
    // ---- PnL section ----
