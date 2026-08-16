@@ -136,6 +136,18 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
                 : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
    if(htfIdx < 0) return(false);
 
+   // VISUAL OBSERVATION ONLY — see AjipSnD_Zone.mqh's RESULT block on
+   // MarkLtfValidationContext(). Measured negative (48.00% direction-adjusted
+   // hit rate at 1d, the only one of four cells below 50%) before this gate
+   // existed; wired here only so the filtered population can be watched in
+   // the Strategy Tester, not because the data supports trading it live.
+   if(InpRequireNoTouchAtValidation)
+     {
+      int ti = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
+      if(ti < 0 || g_zoneTracker[ti].touchedAtValidation)
+         return(false);
+     }
+
    // ---- Structural SL: beyond the far edge of the HTF zone being retested ----
    // The LTF zone is only the trigger; the HTF zone is the thesis. Anchoring to
    // the LTF zone's far edge puts the stop inside ordinary noise — measured on
@@ -153,15 +165,27 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
          return(false);
         }
       double buffer = InpZoneSlBufferAtr * atrLtf;
-      slPrice = confirmed.isDemand
-                ? NormalizeDouble(g_htfDemandZones[htfIdx].low  - buffer, g_digits)
-                : NormalizeDouble(g_htfSupplyZones[htfIdx].high + buffer, g_digits);
+      if(InpSlAnchorLtf)
+         slPrice = confirmed.isDemand
+                   ? NormalizeDouble(confirmed.low  - buffer, g_digits)
+                   : NormalizeDouble(confirmed.high + buffer, g_digits);
+      else
+         slPrice = confirmed.isDemand
+                   ? NormalizeDouble(g_htfDemandZones[htfIdx].low  - buffer, g_digits)
+                   : NormalizeDouble(g_htfSupplyZones[htfIdx].high + buffer, g_digits);
 
-      // Target measured from the entry in LTF ATR, not from the zone: the stop
-      // is anchored to structure, the target to how far price actually travels.
-      if(InpTakeProfitAtr > 0)
+      // Target derived from the ACTUAL stop distance, not an independent ATR
+      // multiple: the previous version sized SL structurally (HTF far edge,
+      // which run #4 measured as commonly several ATR wide) and TP off a flat
+      // InpTakeProfitAtr with no relation to it, so the realised RR floated
+      // wherever those two independent numbers happened to land — usually
+      // well under 1:1, not the >=2:1 this project requires. Sizing TP as a
+      // multiple of the SL distance that was JUST computed is what actually
+      // enforces a floor, rather than merely aiming for one.
+      if(InpTakeProfitRR > 0)
         {
-         double reach = InpTakeProfitAtr * atrLtf;
+         double riskDist = MathAbs(limitPrice - slPrice);
+         double reach = InpTakeProfitRR * riskDist;
          tpPrice = confirmed.isDemand
                    ? NormalizeDouble(limitPrice + reach, g_digits)
                    : NormalizeDouble(limitPrice - reach, g_digits);
@@ -174,7 +198,14 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
    // One-shot per LTF zone
    if(confirmed.time == g_ltfZonePendingTime) return(false);
 
-   PrintFormat("AjipSnD: LTF %s zone VALIDATED — placing %s LIMIT at %.5f (SL %.5f, TP %.5f)",
+   // Trigger label, not just a zone description: this function is now called
+   // from two different causes, and a log line that always says "LTF zone
+   // VALIDATED" regardless of which one fired is exactly what makes the two
+   // paths visually indistinguishable in the Experts log — the LTF zone did
+   // validate at some point either way, so that phrase alone proves nothing
+   // about WHEN this order was actually decided.
+   PrintFormat("AjipSnD: [%s] %s zone VALIDATED — placing %s LIMIT at %.5f (SL %.5f, TP %.5f)",
+               InpHtfTriggeredEntry ? "HTF-TRIGGERED, backward LTF search" : "LTF's own validation",
                confirmed.isDemand ? "DEMAND" : "SUPPLY",
                dir == 1 ? "BUY" : "SELL", limitPrice, slPrice, tpPrice);
 
@@ -207,6 +238,57 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
    return(false);
   }
 
+//---- HTF-triggered entry (InpHtfTriggeredEntry, visual observation only) ---
+// Different trigger from the default flow above, not just an extra filter on
+// top of it: the default places an order when an LTF zone VALIDATES,
+// checking at that instant whether an active/validated HTF zone happens to
+// contain it — so an LTF zone that validates before its HTF context exists
+// never qualifies. This instead fires when the HTF zone validates, and
+// searches BACKWARD through every LTF zone that has already validated since
+// the HTF zone's own origin bar — so the temporal order is reversed, and an
+// LTF zone that validated first is exactly the normal case, not an edge case.
+//
+// Every match gets an order — the user's call, not a quality filter: several
+// LTF zones can sit inside one HTF zone, and MaxPositionsReached (via
+// InpMaxPositionsPerDir) is what thins them, the same cap that already
+// governs the default flow.
+void PlaceEntriesForHtfValidatedZone(const SnDZone &htfZone)
+  {
+   int n = ArraySize(g_ltfValidatedHistory);
+   if(InpEnableLog)
+      PrintFormat("AjipSnD: >>> HTF %s zone VALIDATED [%.5f, %.5f] at %s — searching %d LTF zone(s) validated since then",
+                  htfZone.isDemand ? "DEMAND" : "SUPPLY", htfZone.low, htfZone.high,
+                  TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES), n);
+   int matches = 0;
+   for(int i = 0; i < n; i++)
+     {
+      if(g_ltfValidatedHistory[i].isDemand != htfZone.isDemand) continue;
+      if(g_ltfValidatedHistory[i].time < htfZone.time) continue;      // must postdate the HTF zone's own origin
+      // touchedEver, not touchedAtValidation: this search runs at HTF
+      // validation time, which is later than the LTF zone's own validation —
+      // checking the frozen at-validation snapshot would miss a touch that
+      // happened in between. touchedEver is a strict superset (anything true
+      // at validation is already true here), so this alone covers both.
+      if(InpRequireNoTouchAtValidation && g_ltfValidatedHistory[i].touchedEver) continue;
+
+      double limitPrice = htfZone.isDemand ? g_ltfValidatedHistory[i].high
+                                            : g_ltfValidatedHistory[i].low;
+      if(limitPrice < htfZone.low || limitPrice > htfZone.high) continue;  // inside the HTF box
+
+      SnDZone ltf;
+      ZeroMemory(ltf);
+      ltf.isDemand = g_ltfValidatedHistory[i].isDemand;
+      ltf.high     = g_ltfValidatedHistory[i].high;
+      ltf.low      = g_ltfValidatedHistory[i].low;
+      ltf.time     = g_ltfValidatedHistory[i].time;
+      matches++;
+      PlaceEntryForZone(ltf);
+     }
+   if(InpEnableLog && matches == 0)
+      PrintFormat("AjipSnD: >>> HTF %s zone VALIDATED at %s — no qualifying LTF zone found",
+                  htfZone.isDemand ? "DEMAND" : "SUPPLY", TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES));
+  }
+
 //---- Update LTF on new closed bar ----
 void UpdateLTF(const MqlRates &rates[], int count)
   {
@@ -223,6 +305,12 @@ void UpdateLTF(const MqlRates &rates[], int count)
    // Quality tracker per-bar stats (excursions, first touch)
    if(InpZoneQualityLog)
       UpdateZoneTracking(bar, false);
+
+   // Keep the HTF-triggered search's touch status current, independent of
+   // InpZoneQualityLog — the history it updates is what
+   // PlaceEntriesForHtfValidatedZone reads, not the CSV.
+   if(InpHtfTriggeredEntry)
+      UpdateLtfValidatedHistoryTouch(bar);
 
    // Rejection-entry confirmation: the one check that must run on a closed
    // bar rather than a tick — see UpdateExcursionRejects() for why.
@@ -243,8 +331,16 @@ void UpdateLTF(const MqlRates &rates[], int count)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone);
-         if(PlaceEntryForZone(g_ltfPendingZone))
-            MarkZoneEntryPlaced(g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
+         // Default flow: this LTF zone's OWN validation is the trigger.
+         // InpHtfTriggeredEntry replaces it with the reverse trigger in
+         // UpdateHTF (PlaceEntriesForHtfValidatedZone) — running both would
+         // let the same LTF zone earn two independent order attempts under
+         // two different philosophies, which is not an A/B, it's a merge.
+         if(!InpHtfTriggeredEntry)
+           {
+            if(PlaceEntryForZone(g_ltfPendingZone))
+               MarkZoneEntryPlaced(g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
+           }
          g_ltfAwaitingValidation = false;
         }
      }
@@ -349,6 +445,9 @@ void UpdateHTF(const MqlRates &rates[], int count)
                            g_htfPendingZone.low, g_htfPendingZone.high);
            }
          g_htfAwaitingValidation = false;
+
+         if(InpHtfTriggeredEntry)
+            PlaceEntriesForHtfValidatedZone(g_htfPendingZone);
         }
      }
 

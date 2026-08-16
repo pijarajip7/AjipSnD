@@ -15,7 +15,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "1.12-ltfvalidationcontext"
+#define EA_BUILD "1.17-ltfslanchor"
 
 #include <Trade\Trade.mqh>
 
@@ -48,7 +48,32 @@ input group "Structural Stop Loss (experimental)"
 // behaviour is identical to the batch architecture. The two live side by side
 // in one binary so the Strategy Tester can A/B them without recompiling.
 input bool   InpStructuralSlMode  = false; // Enable structural SL mode (false=batch architecture, unchanged)
-input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the HTF zone's far edge, in LTF ATR
+input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the anchor zone's far edge, in LTF ATR
+// off (default): SL beyond the HTF zone's far edge — measured touched ~17%
+// of the time vs ~59% for the LTF zone's own edge (median adverse excursion
+// from entry, 3293 pts on two 12-month XAUUSD periods, exceeds the LTF
+// zone's own width of 1995 pts). on: SL at the LTF zone's own swing instead
+// — tighter, and known from that same measurement to get hit far more often.
+input bool   InpSlAnchorLtf       = false; // Anchor SL to the LTF zone's own swing instead of the HTF zone's far edge
+// VISUAL OBSERVATION ONLY -- see AjipSnD_Zone.mqh's RESULT block on
+// MarkLtfValidationContext(). Measured negative (48.00% direction-adjusted
+// hit rate at 1d, worst of four cells tested, on period A) before this input
+// existed. Wired only so the filtered population can be watched running in
+// the Strategy Tester -- not a recommendation to trade it.
+// Meaning depends on which trigger is active. Default flow: checked at the
+// LTF zone's OWN validation instant (measured negative; visual use only).
+// InpHtfTriggeredEntry: checked LIVE at HTF validation time instead, since
+// that can be much later — an LTF zone untouched at its own validation could
+// still get touched before the HTF search ever looks at it.
+input bool   InpRequireNoTouchAtValidation = false; // Entry only if the LTF zone hasn't been touched (visual use only)
+// VISUAL OBSERVATION ONLY. Replaces the trigger, not just an added filter:
+// off (default) places an order when an LTF zone validates, checking then
+// whether an active/validated HTF zone happens to contain it. On, the
+// trigger becomes the HTF zone's OWN validation, which searches BACKWARD
+// through every LTF zone already validated since the HTF zone's origin bar
+// and places an order for every match (InpMaxPositionsPerDir does the
+// thinning) -- see PlaceEntriesForHtfValidatedZone() in AjipSnD_Core.mqh.
+input bool   InpHtfTriggeredEntry = false; // Trigger entries on HTF validation + backward LTF search, not LTF's own validation (visual use only)
 // Risk per trade in account currency; lot is derived from it and the stop
 // distance. 0 = fall back to InpFixedLot (same pattern as InpPartialCloseAtr /
 // InpBatchMaxProfitAtr). Default 15 rather than a smaller figure because the
@@ -57,13 +82,12 @@ input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the HTF zone's fa
 // trades and the realised average lands near $10 anyway. At $15 only 19% are
 // floored and the realised average matches the target.
 input double InpRiskPerTrade      = 15.0;  // Risk per trade ($, structural mode; 0=use InpFixedLot)
-// Target distance in LTF ATR. Deliberately NOT reusing InpBatchMaxProfitAtr:
-// that one is scaled by HTF ATR, which measures ~4.1x the LTF ATR, so a value
-// of 1.0 there is a ~4.1 LTF-ATR target. Against a stop at the HTF zone's far
-// edge, targets of 2.0 LTF ATR and beyond are unreachable — the share of
-// entries that ever travel that far (61%) is already below the win rate such a
-// reward:risk needs to break even (66%).
-input double InpTakeProfitAtr     = 1.0;   // TP distance in LTF ATR (0=no TP)
+// TP as a multiple of the ACTUAL stop distance just computed (HTF far edge +
+// buffer), not an independent ATR figure — the two used to be sized from
+// unrelated bases, so the realised reward:risk floated wherever they happened
+// to land instead of being enforced. Default 2.0 is this project's own stated
+// floor (0=no TP).
+input double InpTakeProfitRR      = 2.0;   // TP = this many multiples of the actual SL distance (0=no TP)
 // Counts open positions AND resting limit orders in the direction. 0 keeps the
 // batch architecture's unlimited accumulation; the structural preset sets 1.
 // Separate from InpMaxTotalLots, which caps volume — and volume stops mapping
@@ -198,10 +222,14 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | structural=%s riskCap=%.2f slAnchor=%s tpRR=%.1f htfTriggeredEntry=%s noTouchFilter=%s excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
                InpStructuralSlMode ? "ON" : "off",
                InpMaxRiskOvershoot,
+               InpSlAnchorLtf ? "LTF(tighter,touched~59%)" : "HTF(wider,touched~17%)",
+               InpTakeProfitRR,
+               InpHtfTriggeredEntry ? "ON(VISUAL-ONLY)" : "off",
+               InpRequireNoTouchAtValidation ? "ON(VISUAL-ONLY)" : "off",
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",

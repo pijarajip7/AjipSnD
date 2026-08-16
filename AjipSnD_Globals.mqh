@@ -182,6 +182,23 @@ PendingOrder   g_pendingOrders[];
 // ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
 SnDZone        g_zoneTracker[];
 
+// ---- HTF-triggered entry (visual observation only, InpHtfTriggeredEntry) ----
+// Every LTF zone that ever validates gets appended here and stays forever —
+// unlike g_ltfDemandZones/g_ltfSupplyZones, which are capped at InpMaxZones
+// and evict old entries, this is a plain history the HTF trigger searches
+// BACKWARD through, so an LTF zone must still be findable long after it
+// would have been evicted from the active array.
+struct LtfValidatedZone
+  {
+   double   high;
+   double   low;
+   datetime time;
+   bool     isDemand;
+   bool     touchedAtValidation;  // frozen snapshot: touched by ITS OWN validation instant
+   bool     touchedEver;          // live, updated every LTF bar: touched by NOW, whenever "now" is
+  };
+LtfValidatedZone g_ltfValidatedHistory[];
+
 //==================================================================
 // HELPER FUNCTIONS
 //==================================================================

@@ -722,6 +722,47 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
                 ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
                 : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
    g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
+
+   // Every validated LTF zone joins the searchable history, regardless of
+   // InpHtfTriggeredEntry's state — cheap to always record, and the HTF
+   // trigger needs zones that validated before it existed to look back on.
+   int hsz = ArraySize(g_ltfValidatedHistory);
+   ArrayResize(g_ltfValidatedHistory, hsz + 1);
+   g_ltfValidatedHistory[hsz].high     = confirmed.high;
+   g_ltfValidatedHistory[hsz].low      = confirmed.low;
+   g_ltfValidatedHistory[hsz].time     = confirmed.time;
+   g_ltfValidatedHistory[hsz].isDemand = confirmed.isDemand;
+   g_ltfValidatedHistory[hsz].touchedAtValidation = g_zoneTracker[i].touchedAtValidation;
+   // touchedEver starts from the SAME instant, not from false: the zone's
+   // confirm-to-validate window already happened, so anything already true in
+   // touchedAtValidation is already true here too — starting this at false
+   // would let a zone that WAS touched before validation quietly count as
+   // untouched the instant it joins the history.
+   g_ltfValidatedHistory[hsz].touchedEver = g_zoneTracker[i].touchedAtValidation;
+  }
+
+//---- Keep touchedEver current for every zone in the persistent history ----
+// Called once per closed LTF bar. g_zoneTracker's own 'touched' stops updating
+// the moment a zone is REPLACED/EXPIRED and evicted, but g_ltfValidatedHistory
+// entries outlive that by design — a zone the HTF trigger searches for next
+// month must still have an accurate answer to "touched since?", long after its
+// tracker slot is gone. Skips entries already true (nothing left to detect)
+// entirely, and match's own confirm bar (the definition 'touched' already
+// uses everywhere else in this file: re-entry AFTER confirmation, not on it).
+void UpdateLtfValidatedHistoryTouch(const MqlRates &bar)
+  {
+   int n = ArraySize(g_ltfValidatedHistory);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_ltfValidatedHistory[i].touchedEver) continue;
+      if(bar.time <= g_ltfValidatedHistory[i].time) continue;
+
+      bool touched = g_ltfValidatedHistory[i].isDemand
+                     ? (bar.low <= g_ltfValidatedHistory[i].high)
+                     : (bar.high >= g_ltfValidatedHistory[i].low);
+      if(touched)
+         g_ltfValidatedHistory[i].touchedEver = true;
+     }
   }
 
 //---- Mark entry placed for a tracked LTF zone ----
