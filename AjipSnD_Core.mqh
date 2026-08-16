@@ -156,44 +156,33 @@ bool PlaceEntryForZone(const SnDZone &confirmed)
    // touched ~59% of the time versus ~17% for the HTF anchor.
    double slPrice = 0.0;
    double tpPrice = 0.0;
-   if(InpStructuralSlMode)
+   double atrLtf = GetAtrValue(false);
+   if(atrLtf <= 0)
      {
-      double atrLtf = GetAtrValue(false);
-      if(atrLtf <= 0)
-        {
-         Print("AjipSnD: LTF ATR unavailable — structural SL cannot be sized, entry skipped");
-         return(false);
-        }
-      double buffer = InpZoneSlBufferAtr * atrLtf;
-      if(InpSlAnchorLtf)
-         slPrice = confirmed.isDemand
-                   ? NormalizeDouble(confirmed.low  - buffer, g_digits)
-                   : NormalizeDouble(confirmed.high + buffer, g_digits);
-      else
-         slPrice = confirmed.isDemand
-                   ? NormalizeDouble(g_htfDemandZones[htfIdx].low  - buffer, g_digits)
-                   : NormalizeDouble(g_htfSupplyZones[htfIdx].high + buffer, g_digits);
-
-      // Target derived from the ACTUAL stop distance, not an independent ATR
-      // multiple: the previous version sized SL structurally (HTF far edge,
-      // which run #4 measured as commonly several ATR wide) and TP off a flat
-      // InpTakeProfitAtr with no relation to it, so the realised RR floated
-      // wherever those two independent numbers happened to land — usually
-      // well under 1:1, not the >=2:1 this project requires. Sizing TP as a
-      // multiple of the SL distance that was JUST computed is what actually
-      // enforces a floor, rather than merely aiming for one.
-      if(InpTakeProfitRR > 0)
-        {
-         double riskDist = MathAbs(limitPrice - slPrice);
-         double reach = InpTakeProfitRR * riskDist;
-         tpPrice = confirmed.isDemand
-                   ? NormalizeDouble(limitPrice + reach, g_digits)
-                   : NormalizeDouble(limitPrice - reach, g_digits);
-        }
+      Print("AjipSnD: LTF ATR unavailable — structural SL cannot be sized, entry skipped");
+      return(false);
      }
+   double buffer = InpZoneSlBufferAtr * atrLtf;
+   if(InpSlAnchorLtf)
+      slPrice = confirmed.isDemand
+                ? NormalizeDouble(confirmed.low  - buffer, g_digits)
+                : NormalizeDouble(confirmed.high + buffer, g_digits);
+   else
+      slPrice = confirmed.isDemand
+                ? NormalizeDouble(g_htfDemandZones[htfIdx].low  - buffer, g_digits)
+                : NormalizeDouble(g_htfSupplyZones[htfIdx].high + buffer, g_digits);
 
-   // (the old ArraySize()==0 guard here is redundant: htfIdx >= 0 can only come
-   //  from a non-empty array)
+   // Target derived from the ACTUAL stop distance, not an independent ATR
+   // multiple, so the realised reward:risk is enforced rather than merely
+   // aimed for.
+   if(InpTakeProfitRR > 0)
+     {
+      double riskDist = MathAbs(limitPrice - slPrice);
+      double reach = InpTakeProfitRR * riskDist;
+      tpPrice = confirmed.isDemand
+                ? NormalizeDouble(limitPrice + reach, g_digits)
+                : NormalizeDouble(limitPrice - reach, g_digits);
+     }
 
    // One-shot per LTF zone
    if(confirmed.time == g_ltfZonePendingTime) return(false);
@@ -289,6 +278,152 @@ void PlaceEntriesForHtfValidatedZone(const SnDZone &htfZone)
                   htfZone.isDemand ? "DEMAND" : "SUPPLY", TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES));
   }
 
+//---- Rejection-entry mode (InpRejectionEntryMode, experimental) ----------
+//---- Save every matching LTF zone since the HTF zone's own origin bar ----
+// Triggered by HTF VALIDATION, not by the LTF zone's own validation instant
+// — an on-tick save (checking bias only at the moment the LTF zone itself
+// validates) misses every LTF zone that validated before the HTF bias
+// caught up to it, which on this project's own prior evidence is the common
+// case, not the edge case (see PlaceEntriesForHtfValidatedZone's identical
+// reasoning for InpHtfTriggeredEntry). Replays g_ltfValidatedHistory[] —
+// already populated unconditionally for every validated LTF zone — back to
+// the HTF zone's own origin bar, same boundary PlaceEntriesForHtfValidatedZone
+// uses. The dedup check guards a case that shouldn't arise given HTF zones
+// strictly alternate direction at confirmation (so two same-direction
+// validations can't share overlapping origins) — cheap insurance, not a
+// known bug.
+void SaveLtfZonesForHtfBias(const SnDZone &htfZone)
+  {
+   int n = ArraySize(g_ltfValidatedHistory);
+   int candidates = 0;   // matched direction + postdates the HTF zone's origin
+   int matches    = 0;   // of those, newly saved (not already saved)
+   for(int i = 0; i < n; i++)
+     {
+      if(g_ltfValidatedHistory[i].isDemand != htfZone.isDemand) continue;
+      if(g_ltfValidatedHistory[i].time < htfZone.time) continue;
+      // Already touched by the time a newer same-direction zone validated —
+      // stale, the market has moved on. See MarkLtfValidationContext.
+      if(g_ltfValidatedHistory[i].superseded) continue;
+      candidates++;
+
+      bool already = false;
+      for(int j = 0; j < ArraySize(g_savedLtfZones); j++)
+        {
+         if(g_savedLtfZones[j].time == g_ltfValidatedHistory[i].time
+            && g_savedLtfZones[j].isDemand == g_ltfValidatedHistory[i].isDemand)
+           {
+            already = true;
+            break;
+           }
+        }
+      if(already) continue;
+
+      // Retiring touched-then-superseded g_savedLtfZones entries now happens
+      // in MarkLtfValidationContext instead — at LTF validation, the moment
+      // this rule's trigger condition is actually met, rather than deferred
+      // to whenever the next HTF validation happens to call this function.
+
+      int sz = ArraySize(g_savedLtfZones);
+      ArrayResize(g_savedLtfZones, sz + 1);
+      g_savedLtfZones[sz].high      = g_ltfValidatedHistory[i].high;
+      g_savedLtfZones[sz].low       = g_ltfValidatedHistory[i].low;
+      g_savedLtfZones[sz].sweepHigh = g_ltfValidatedHistory[i].sweepHigh;
+      g_savedLtfZones[sz].sweepLow  = g_ltfValidatedHistory[i].sweepLow;
+      g_savedLtfZones[sz].time      = g_ltfValidatedHistory[i].time;
+      g_savedLtfZones[sz].isDemand  = g_ltfValidatedHistory[i].isDemand;
+      g_savedLtfZones[sz].touched   = false;
+      g_savedLtfZones[sz].used      = false;
+      matches++;
+     }
+
+   if(InpEnableLog)
+      PrintFormat("AjipSnD: HTF bias -> %s — %d LTF zone(s) matched since %s, saved %d for rejection watch",
+                  htfZone.isDemand ? "DEMAND" : "SUPPLY", candidates,
+                  TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES), matches);
+  }
+
+//---- Check every saved zone against this closed bar: break, or rejection ----
+// A saved zone stays watchable through any number of weak/shallow touches —
+// it is NOT one-shot on first contact. It only resolves two ways:
+//   1. Structural break — a body CLOSE beyond the zone's far edge (or its
+//      sweep level, if it had one at confirmation), exactly the rule
+//      InvalidateHtfZones already uses for HTF zones. Price didn't just
+//      retest and fail, it went straight through — the thesis is gone.
+//   2. Rejection — wick re-enters the zone's range AND this bar's own body
+//      is large relative to LTF ATR in the favourable direction AND the
+//      close ends back outside the zone. All three together, not just the
+//      close-back-out alone (which InpRejectEntryProbe already showed is
+//      close to the weakest possible bar of the "wick vs close" definitions
+//      this project has tried) — the body requirement is what separates a
+//      genuine rejection from a wick that grazed the level and drifted back
+//      on no momentum.
+// A touch that is neither a break nor a qualifying rejection resolves
+// nothing on its own — the zone is still intact and still worth waiting
+// on — but it is recorded (SavedLtfZone.touched) so SaveLtfZonesForHtfBias
+// can retire it later if a fresher same-direction zone shows up first.
+void CheckRejectionRetests(const MqlRates &bar)
+  {
+   int n = ArraySize(g_savedLtfZones);
+   if(n == 0) return;
+
+   double atrLtf = GetAtrValue(false);
+   if(atrLtf <= 0) return;
+
+   double bodyAtr = MathAbs(bar.close - bar.open) / atrLtf;
+
+   for(int i = 0; i < n; i++)
+     {
+      if(g_savedLtfZones[i].used) continue;
+      if(bar.time <= g_savedLtfZones[i].time) continue;   // skip the zone's own confirm bar
+
+      bool   isDemand = g_savedLtfZones[i].isDemand;
+      double zLow     = g_savedLtfZones[i].low;
+      double zHigh    = g_savedLtfZones[i].high;
+
+      double breakLevel = isDemand
+                          ? (g_savedLtfZones[i].sweepLow  > 0 ? g_savedLtfZones[i].sweepLow  : zLow)
+                          : (g_savedLtfZones[i].sweepHigh > 0 ? g_savedLtfZones[i].sweepHigh : zHigh);
+      bool broken = isDemand ? (bar.close < breakLevel) : (bar.close > breakLevel);
+      if(broken)
+        {
+         g_savedLtfZones[i].used = true;
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] BROKEN (close %.5f past %.5f) — invalidated",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bar.close, breakLevel);
+         continue;
+        }
+
+      bool wickedIn = isDemand ? (bar.low <= zHigh) : (bar.high >= zLow);
+      if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
+
+      // Recorded even if this particular touch doesn't resolve anything —
+      // SaveLtfZonesForHtfBias reads this to retire the zone the moment a
+      // fresher same-direction one is saved, instead of it lingering touched
+      // but never explicitly resolved.
+      g_savedLtfZones[i].touched = true;
+
+      bool closedOut  = isDemand ? (bar.close > zHigh) : (bar.close < zLow);
+      bool rightColor = isDemand ? IsBullBar(bar) : IsBearBar(bar);
+      bool rejected   = closedOut && rightColor && (bodyAtr >= InpRejectionBodyAtr);
+      if(!rejected) continue;   // touched but no clean rejection yet — still watching
+
+      g_savedLtfZones[i].used = true;
+
+      int    dir    = isDemand ? 1 : -1;
+      double buffer = InpZoneSlBufferAtr * atrLtf;
+      double slPrice = isDemand
+                       ? NormalizeDouble(zLow  - buffer, g_digits)
+                       : NormalizeDouble(zHigh + buffer, g_digits);
+
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: REJECTION confirmed on %s zone [%.5f, %.5f] bodyAtr=%.2f — entering %s market",
+                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr, dir == 1 ? "BUY" : "SELL");
+
+      if(!EntryGateBlocked(dir))
+         OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time);
+     }
+  }
+
 //---- Update LTF on new closed bar ----
 void UpdateLTF(const MqlRates &rates[], int count)
   {
@@ -306,10 +441,11 @@ void UpdateLTF(const MqlRates &rates[], int count)
    if(InpZoneQualityLog)
       UpdateZoneTracking(bar, false);
 
-   // Keep the HTF-triggered search's touch status current, independent of
-   // InpZoneQualityLog — the history it updates is what
-   // PlaceEntriesForHtfValidatedZone reads, not the CSV.
-   if(InpHtfTriggeredEntry)
+   // Keep touch status current, independent of InpZoneQualityLog — the
+   // history it updates is what PlaceEntriesForHtfValidatedZone reads (for
+   // InpHtfTriggeredEntry) and what MarkLtfValidationContext's own
+   // touched+superseded check reads (for InpRejectionEntryMode), not the CSV.
+   if(InpHtfTriggeredEntry || InpRejectionEntryMode)
       UpdateLtfValidatedHistoryTouch(bar);
 
    // Rejection-entry confirmation: the one check that must run on a closed
@@ -331,12 +467,16 @@ void UpdateLTF(const MqlRates &rates[], int count)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone);
-         // Default flow: this LTF zone's OWN validation is the trigger.
-         // InpHtfTriggeredEntry replaces it with the reverse trigger in
-         // UpdateHTF (PlaceEntriesForHtfValidatedZone) — running both would
-         // let the same LTF zone earn two independent order attempts under
-         // two different philosophies, which is not an A/B, it's a merge.
-         if(!InpHtfTriggeredEntry)
+         // Three trigger philosophies, mutually exclusive — running more than
+         // one would let the same LTF zone earn independent order attempts
+         // under different rules, which is not an A/B, it's a merge.
+         // InpRejectionEntryMode does nothing at this call site at all: it
+         // neither trades nor saves at LTF validation — saving is triggered
+         // by HTF validation instead (SaveLtfZonesForHtfBias in UpdateHTF),
+         // replaying g_ltfValidatedHistory back to the HTF zone's own origin,
+         // so an LTF zone that validates before the matching HTF bias exists
+         // is still caught rather than missed.
+         if(!InpRejectionEntryMode && !InpHtfTriggeredEntry)
            {
             if(PlaceEntryForZone(g_ltfPendingZone))
                MarkZoneEntryPlaced(g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
@@ -399,6 +539,15 @@ void UpdateLTF(const MqlRates &rates[], int count)
       g_ltfPendingZone = confirmed;
       g_ltfAwaitingValidation = true;
      }
+
+   // Rejection-entry mode: check every saved zone against this closed bar,
+   // and redraw — the saved zones are what stands in for HTF zones on the
+   // chart in this mode (see AjipSnD_Zone.mqh's DrawSavedLtfZones).
+   if(InpRejectionEntryMode)
+     {
+      CheckRejectionRetests(bar);
+      DrawSavedLtfZones();
+     }
   }
 
 //---- Update HTF on new closed bar ----
@@ -448,6 +597,17 @@ void UpdateHTF(const MqlRates &rates[], int count)
 
          if(InpHtfTriggeredEntry)
             PlaceEntriesForHtfValidatedZone(g_htfPendingZone);
+
+         // Rejection-entry mode: HTF validation sets a pure directional bias,
+         // not a price range — see InpRejectionEntryMode's input comment —
+         // then immediately replays LTF history for zones already validated
+         // since this HTF zone's own origin bar (SaveLtfZonesForHtfBias logs
+         // the bias change and the replay result together).
+         if(InpRejectionEntryMode)
+           {
+            g_htfBiasDir = g_htfPendingZone.isDemand ? 1 : -1;
+            SaveLtfZonesForHtfBias(g_htfPendingZone);
+           }
         }
      }
 
@@ -507,8 +667,11 @@ void UpdateHTF(const MqlRates &rates[], int count)
      }
 
    // Redraw every HTF bar close — validated zones extend to current time,
-   // pending zone drawn in distinct color.
-   DrawAllHtfZones();
+   // pending zone drawn in distinct color. Skipped in rejection-entry mode:
+   // HTF is a directional bias there, not a chart object — DrawSavedLtfZones
+   // (called from UpdateLTF) is what actually matters on screen in that mode.
+   if(!InpRejectionEntryMode)
+      DrawAllHtfZones();
   }
 
 //---- Short timeframe name (strip PERIOD_ prefix) ----
@@ -538,19 +701,6 @@ color LimitCol(string s)
    if(s == "MAX LOSS") return(clrTomato);
    if(s == "disabled") return(clrSilver);
    return(clrLimeGreen);
-  }
-
-string CooldownTxt()
-  {
-   if(InpBatchCooldownMinutes <= 0) return("disabled");
-   if(!BatchCooldownActive())       return("clear");
-   int remainingSec = (int)(g_lastBatchEndTime + InpBatchCooldownMinutes * 60 - TimeCurrent());
-   return(StringFormat("%dm left", (remainingSec + 59) / 60));
-  }
-color CooldownCol()
-  {
-   if(InpBatchCooldownMinutes <= 0) return(clrSilver);
-   return(BatchCooldownActive() ? clrTomato : clrLimeGreen);
   }
 
 string SessionTxt()
@@ -613,7 +763,7 @@ void DrawPanel()
       ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
      }
-   const int totalLines = 22;
+   const int totalLines = 20;
    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, (int)InpPanelX - 6);
    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, (int)InpPanelY - 6);
    ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 185);
@@ -672,15 +822,9 @@ void DrawPanel()
    PANEL_LABEL("Final:     " + s, LimitCol(s));
    s = LimitTxt(InpDailyMaxProfit, InpDailyMaxLoss, todayPnl + floating);
    PANEL_LABEL("Daily:     " + s, LimitCol(s));
-   // BatchProfitThreshold(), not raw InpBatchMaxProfit — otherwise this
-   // status lags/misreads once InpBatchMaxProfitAtr is active, since the
-   // real trigger is a live ATR x volume figure, not the fixed $ input.
-   s = LimitTxt(BatchProfitThreshold(), InpBatchMaxLoss, g_batchRealizedPnl + floating);
-   PANEL_LABEL("Batch:     " + s, LimitCol(s));
-   
-   // ---- Cooldown / Session / News ----
+
+   // ---- Session / News ----
    PANEL_LABEL("", clrWhite);
-   PANEL_LABEL("Cooldown:  " + CooldownTxt(), CooldownCol());
    PANEL_LABEL("Session:   " + SessionTxt(), SessionCol());
    PANEL_LABEL("News:      " + NewsTxt(), NewsCol());
    

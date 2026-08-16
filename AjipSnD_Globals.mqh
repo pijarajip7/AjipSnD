@@ -75,14 +75,9 @@ struct EntryTracker
    datetime entryTime;
    double   mfe;            // best POSITION_PROFIT seen ($)
    double   mae;            // worst POSITION_PROFIT seen ($)
-   bool     partialClosed;  // true once one-time partial close fired
-   double   atrAtEntry;     // HTF ATR frozen at entry — partial close target scale
-   //--- Structural SL mode ---
-   // initialVolume exists because partial-close detection used to compare the
-   // live volume against InpFixedLot, which stops being a constant the moment
-   // lot size is derived from stop distance.
-   double   initialVolume;   // volume at entry, before any partial close
-   bool     hasStructuralSl; // SL came from the zone, so aggregate SL must not touch it
+   double   atrAtEntry;     // HTF ATR frozen at entry
+   double   initialVolume;   // volume at entry (lot sizing, CSV logging)
+   bool     hasStructuralSl; // SL came from the zone at placement
    double   slPrice;         // structural SL price (0=none)
    double   tpPrice;         // structural TP price (0=none)
    double   riskUsd;         // intended risk at entry — denominator for R-multiples
@@ -97,7 +92,7 @@ struct PendingOrder
    int      dir;       // 1=BUY LIMIT, -1=SELL LIMIT
    double   price;     // limit price
    datetime zoneTime;  // LTF zone time that triggered this order
-   double   slPrice;   // structural SL frozen at placement (0=none / batch mode)
+   double   slPrice;   // structural SL frozen at placement
    double   tpPrice;   // structural TP frozen at placement (0=none)
    double   lot;       // volume actually submitted
    double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
@@ -134,20 +129,6 @@ bool           g_htfAwaitingValidation = false;
 
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
-
-// ---- Batch report accumulator ----
-bool           g_batchActive         = false;
-datetime       g_batchFirstEntryTime = 0;
-datetime       g_batchLastEntryTime  = 0;
-int            g_batchCount          = 0;
-int            g_batchWins           = 0;
-int            g_batchLosses         = 0;
-int            g_batchBreakEven      = 0;
-double         g_batchRealizedPnl    = 0.0;
-double         g_batchMfeSum         = 0.0;
-double         g_batchMaeSum         = 0.0;
-double         g_batchAtrAtStart     = 0.0;  // HTF ATR frozen at first entry — batch target scale
-datetime       g_lastBatchEndTime    = 0;
 
 // ---- Symbol info cache ----
 int            g_digits;
@@ -192,12 +173,36 @@ struct LtfValidatedZone
   {
    double   high;
    double   low;
+   double   sweepHigh;   // carried from the zone's own SnDZone at validation (0=no sweep)
+   double   sweepLow;    // same
    datetime time;
    bool     isDemand;
    bool     touchedAtValidation;  // frozen snapshot: touched by ITS OWN validation instant
    bool     touchedEver;          // live, updated every LTF bar: touched by NOW, whenever "now" is
+   bool     superseded;           // was already touched when a newer same-direction zone validated
   };
 LtfValidatedZone g_ltfValidatedHistory[];
+
+// ---- Rejection-entry mode (experimental, InpRejectionEntryMode) ----
+// HTF here is a pure directional bias, not a price range to sit inside: an
+// HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
+// direction get saved. A saved zone waits for ITS OWN retest + rejection
+// (wick back in, closed back out, with real momentum) before anything is
+// traded — unlike every other trigger in this EA, which orders at validation.
+int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
+
+struct SavedLtfZone
+  {
+   double   high;
+   double   low;
+   double   sweepHigh;   // 0=no sweep — see LtfValidatedZone
+   double   sweepLow;    // same
+   datetime time;
+   bool     isDemand;
+   bool     touched;     // live: any wick has re-entered the range, whether or not it resolved
+   bool     used;        // resolved (rejected+traded, structurally broken, or superseded) — stop checking
+  };
+SavedLtfZone g_savedLtfZones[];
 
 //==================================================================
 // HELPER FUNCTIONS
@@ -213,7 +218,7 @@ double GetAtrValue(bool htf)
    return(buf[0]);
   }
 
-//---- Classify limit status (generic, reused for daily + batch) ----
+//---- Classify limit status (generic, reused for final + daily) ----
 ENUM_LIMIT_STATUS ClassifyLimitStatus(double total, double maxProfit, double maxLoss)
   {
    if(maxProfit <= 0 && maxLoss <= 0)
@@ -327,21 +332,12 @@ bool MaxPositionsReached(int dir)
    return(DirectionalExposureCount(dir) >= InpMaxPositionsPerDir);
   }
 
-//---- Batch cooldown active? ----
-bool BatchCooldownActive()
-  {
-   if(InpBatchCooldownMinutes <= 0 || g_lastBatchEndTime == 0)
-      return(false);
-   return(TimeCurrent() < g_lastBatchEndTime + InpBatchCooldownMinutes * 60);
-  }
-
 //---- Float getters (forward-declared, implemented in Trade.mqh) ----
 double GetDailyPnL();
 double GetFloatingPnL();
 double GetPeriodPnL(datetime from, datetime to);
-void   CloseAllAndFlushBatch(string reason);
-double AccumulateBatchStats(int idx);
-void   FlushBatchCSV(string reason);
+void   CloseAllAndLogTrades(string reason);
+double ComputeRealizedPnl(int idx);
 
 //---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
 double GetHtfMaValue()

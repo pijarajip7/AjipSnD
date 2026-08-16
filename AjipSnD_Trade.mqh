@@ -2,41 +2,84 @@
 #define AJIPSND_TRADE_MQH
 
 //==================================================================
-// OPEN TRADE — fixed lot (InpFixedLot), no SL/TP
+// OPEN MARKET WITH STRUCTURAL STOPS — rejection-entry mode.
+// Unlike PlacePendingOrder, this fills immediately at the current market
+// price rather than resting at a limit: the rejection has already happened
+// by the time this is called (the bar that confirmed it just closed), so
+// there is no edge left to wait at — price is already moving off the zone.
+//
+// slPrice is the caller's zone-anchored stop; TP is derived here from the
+// SAME price this order actually transacts at, matching PlaceEntryForZone's
+// pattern of sizing TP off the real stop distance rather than an independent
+// figure.
 //==================================================================
-ulong OpenTrade(bool isBuy, double entry)
+ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
   {
-   double lot = NormalizeDouble(InpFixedLot, 8);
-   if(lot < g_volMin || lot > g_volMax)
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return(0);
+   double price = (dir == 1) ? tick.ask : tick.bid;
+
+   slPrice = ClampToStopsLevel(dir, price, slPrice, true);
+
+   double tpPrice = 0.0;
+   if(InpTakeProfitRR > 0 && slPrice > 0.0)
      {
-      PrintFormat("AjipSnD: %s skip — InpFixedLot %.2f outside broker range [%.2f, %.2f]",
-                  isBuy ? "BUY" : "SELL", lot, g_volMin, g_volMax);
+      double riskDist = MathAbs(price - slPrice);
+      double reach = InpTakeProfitRR * riskDist;
+      tpPrice = (dir == 1)
+                ? NormalizeDouble(price + reach, g_digits)
+                : NormalizeDouble(price - reach, g_digits);
+      tpPrice = ClampToStopsLevel(dir, price, tpPrice, false);
+     }
+
+   double slDistance = (slPrice > 0.0) ? ((dir == 1) ? (price - slPrice) : (slPrice - price)) : 0.0;
+   if(slDistance <= 0.0)
+     {
+      Print("AjipSnD: Rejection entry skipped — non-positive SL distance");
       return(0);
      }
 
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick)) return(0);
-
-   bool ok;
-   if(isBuy)
-      ok = trade.Buy(lot, _Symbol, tick.ask, 0.0, 0.0, "AjipSnD BUY");
-   else
-      ok = trade.Sell(lot, _Symbol, tick.bid, 0.0, 0.0, "AjipSnD SELL");
-
-   if(ok)
+   double actualRisk = 0.0;
+   double lot = LotForRisk(slDistance, actualRisk);
+   if(lot <= 0.0) return(0);
+   if(lot < g_volMin || lot > g_volMax)
      {
-      ulong ticket = trade.ResultOrder();
-      double fillPrice = entry;
-      if(PositionSelectByTicket(ticket))
-         fillPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      PrintFormat("AjipSnD: %s opened. Ticket=%I64u, Lot=%.2f, Signal=%.5f, Fill=%.5f, SL=NONE, TP=NONE",
-                  isBuy ? "BUY" : "SELL", ticket, lot, entry, fillPrice);
-      return(ticket);
+      PrintFormat("AjipSnD: Rejection entry skip — lot %.2f outside broker range", lot);
+      return(0);
      }
 
-   PrintFormat("AjipSnD: Order failed. retcode=%d (%s)",
-               trade.ResultRetcode(), trade.ResultRetcodeDescription());
-   return(0);
+   string comment = StringFormat("AjipSnD %s REJECT", dir == 1 ? "BUY" : "SELL");
+   bool ok;
+   if(dir == 1)
+      ok = trade.Buy(lot, _Symbol, price, slPrice, tpPrice, comment);
+   else
+      ok = trade.Sell(lot, _Symbol, price, slPrice, tpPrice, comment);
+
+   if(!ok)
+     {
+      PrintFormat("AjipSnD: Rejection entry failed. retcode=%d", trade.ResultRetcode());
+      return(0);
+     }
+
+   ulong ticket = trade.ResultOrder();
+   double fillPrice = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_PRICE_OPEN) : price;
+   PrintFormat("AjipSnD: %s market-filled (rejection). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
+               dir == 1 ? "BUY" : "SELL", ticket, lot, fillPrice, slPrice, tpPrice);
+
+   PendingOrder po;
+   ZeroMemory(po);
+   po.ticket   = ticket;
+   po.dir      = dir;
+   po.price    = fillPrice;
+   po.zoneTime = zoneTime;
+   po.slPrice  = slPrice;
+   po.tpPrice  = tpPrice;
+   po.lot      = lot;
+   po.riskUsd  = actualRisk;
+   po.atrLtf   = GetAtrValue(false);
+   AddEntry(ticket, dir, fillPrice, po);
+
+   return(ticket);
   }
 
 //==================================================================
@@ -57,7 +100,6 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const PendingOrder &po)
    g_entries[sz].entryTime    = TimeCurrent();
    g_entries[sz].mfe          = 0.0;
    g_entries[sz].mae          = 0.0;
-   g_entries[sz].partialClosed = false;
    g_entries[sz].atrAtEntry   = GetAtrValue(true);
 
    g_entries[sz].initialVolume   = PositionSelectByTicket(ticket)
@@ -69,15 +111,6 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const PendingOrder &po)
    g_entries[sz].riskUsd         = po.riskUsd;
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
    g_entries[sz].zoneTime        = po.zoneTime;
-
-   // First entry of batch
-   if(!g_batchActive)
-     {
-      g_batchActive = true;
-      g_batchFirstEntryTime = TimeCurrent();
-      g_batchAtrAtStart = GetAtrValue(true);
-     }
-   g_batchLastEntryTime = TimeCurrent();
   }
 
 //==================================================================
@@ -136,8 +169,8 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 //---- Lot sized so that hitting slDistance costs about InpRiskPerTrade ----
 // Rounds DOWN to the broker's volume step: rounding up would spend more than
 // the risk budget, and the budget is the whole point. Returns InpFixedLot
-// unchanged whenever risk sizing cannot apply, matching the fallback pattern
-// InpPartialCloseAtr and InpBatchMaxProfitAtr already use.
+// unchanged whenever risk sizing cannot apply (InpRiskPerTrade=0 or no stop
+// distance to size against).
 //
 // The broker's minimum lot puts a hard floor under achievable risk. When the
 // computed lot lands under it the position can only be opened by risking more
@@ -190,8 +223,7 @@ double LotForRisk(double slDistance, double &actualRisk)
   }
 
 //---- Place pending order at limit price ----
-// slPrice = 0.0 places a naked order, exactly as the batch architecture always
-// has; a non-zero value attaches the structural stop from the outset so the
+// A non-zero slPrice attaches the structural stop from the outset so the
 // position is never unprotected, not even for the tick that fills it.
 //
 // Order matters here: the SL is clamped to the broker's stop level BEFORE the
@@ -313,7 +345,7 @@ void CancelPendingInsideZone(bool isDemand, double zoneLow, double zoneHigh, str
      }
   }
 
-//---- Cancel ALL pending orders (called on close-all, except batch) ----
+//---- Cancel ALL pending orders (called on close-all) ----
 void CancelAllPendingOrders()
   {
    for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
@@ -525,13 +557,12 @@ void UpdateMfeMae()
   }
 
 //==================================================================
-// ACCUMULATE BATCH STATS — fold closed position into batch.
-// Tries live POSITION_PROFIT first (fast, accurate), falls back to
-// history deals if position no longer selectable (e.g., CheckEntryCleanup).
-// Returns the realised figure so the per-trade log can record the same number
-// the batch accounting used, instead of deriving its own and disagreeing.
+// COMPUTE REALIZED PNL — for a position closed outside the explicit
+// close-all path (broker-side SL/TP hit). Tries live POSITION_PROFIT
+// first (fast, accurate), falls back to history deals if the position
+// is no longer selectable.
 //==================================================================
-double AccumulateBatchStats(int idx)
+double ComputeRealizedPnl(int idx)
   {
    if(idx < 0 || idx >= ArraySize(g_entries)) return(0.0);
 
@@ -555,7 +586,7 @@ double AccumulateBatchStats(int idx)
             if(dticket == 0) continue;
             long dmagic = HistoryDealGetInteger(dticket, DEAL_MAGIC);
             if(dmagic != InpMagicNumber) continue;
-            
+
             ulong dposition = HistoryDealGetInteger(dticket, DEAL_POSITION_ID);
             if(dposition != g_entries[idx].ticket) continue;
 
@@ -566,32 +597,17 @@ double AccumulateBatchStats(int idx)
         }
      }
 
-   g_batchCount++;
-   g_batchRealizedPnl += realized;
-   g_batchMfeSum += g_entries[idx].mfe;
-   g_batchMaeSum += g_entries[idx].mae;
-
-   if(realized > 0)       g_batchWins++;
-   else if(realized < 0)  g_batchLosses++;
-   else                   g_batchBreakEven++;
-
    return(realized);
   }
 
 //==================================================================
-// PER-TRADE CSV — one row per closed position.
+// PER-TRADE CSV — one row per closed position. Records the exit reason
+// the broker actually used and normalises P&L by the risk the trade
+// was sized for, so results are stated in R.
 //
-// The batch CSV cannot answer this experiment's questions. Its CloseReason
-// describes why a BATCH was flushed, so a stop-out and a target hit both
-// arrive as BATCH_FLAT — the EA only notices the position is gone. And its
-// P&L is in dollars, which stop being comparable across trades the moment lot
-// size varies with stop distance. This log records the exit reason the broker
-// actually used and normalises P&L by the risk the trade was sized for, so
-// results are stated in R.
-//
-// ltf_zone_time is the join key back to the zone CSV: it is what finally
-// connects a trade's outcome to the characteristics of the zone that produced
-// it. Until now the two could only ever be measured separately.
+// ltf_zone_time is the join key back to the zone CSV: it is what
+// connects a trade's outcome to the characteristics of the zone that
+// produced it.
 //==================================================================
 string DealReasonText(long reason)
   {
@@ -623,9 +639,8 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
    string reason   = fallbackReason;
 
    // Closing deal carries both the exit price and the reason the broker
-   // applied. On the close-all path the deal may not have settled yet — that
-   // is the timing gap the batch accounting already works around — so this is
-   // best-effort and falls back to what the caller knows.
+   // applied. On the close-all path the deal may not have settled yet, so
+   // this is best-effort and falls back to what the caller knows.
    if(HistorySelect(g_entries[idx].entryTime, TimeCurrent() + 1))
      {
       int ndeals = HistoryDealsTotal();
@@ -649,7 +664,7 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
         }
      }
 
-   // Deal figures include commission; the snapshot the batch path passes in
+   // Deal figures include commission; the snapshot the caller passes in
    // does not. Prefer the deal when it settled — R is meant to be net.
    double pnl = haveDeal ? dealPnl : fallbackPnl;
 
@@ -712,8 +727,7 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
   }
 
 //==================================================================
-// CHECK ENTRY CLEANUP — positions closed outside close-all.
-// If all entries gone AND batch has stats, flush CSV.
+// CHECK ENTRY CLEANUP — positions closed outside close-all (SL/TP hit).
 //==================================================================
 void CheckEntryCleanup()
   {
@@ -723,266 +737,10 @@ void CheckEntryCleanup()
         {
          // Broker-side exits (SL, TP) land here, and here the closing deal has
          // settled — so this path yields the real exit reason, not a guess.
-         double realized = AccumulateBatchStats(i);
+         double realized = ComputeRealizedPnl(i);
          LogTradeCsv(i, realized, "CLOSED");
          RemoveEntry(i);
         }
-     }
-
-   // Batch went flat via natural closes (SL hit, aggregate SL, manual) —
-   // flush CSV so stats aren't orphaned until the next CloseAllAndFlushBatch.
-   if(ArraySize(g_entries) == 0 && g_batchCount > 0)
-     {
-      FlushBatchCSV("BATCH_FLAT");
-      ResetBatchAccumulator();
-      g_lastBatchEndTime = TimeCurrent();
-     }
-  }
-
-//==================================================================
-// PARTIAL CLOSE — one-time per position
-//==================================================================
-//---- Partial close trigger in account currency, for one position ----
-// With InpPartialCloseAtr > 0 the target scales with the HTF ATR frozen at
-// entry, so one setting behaves the same across volatility regimes. On XAUUSD
-// a fixed $10 was reached by 33% of entries in a low-volatility year and 67%
-// in a high-volatility one; at 1.5x ATR the two were 57% and 61%. The ATR is
-// taken at entry rather than live, so a volatility spike cannot move the
-// target away from a position already running.
-double PartialCloseThreshold(double atrAtEntry, double volume)
-  {
-   if(InpPartialCloseAtr <= 0 || atrAtEntry <= 0)
-      return(InpPartialCloseProfit);
-
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0)
-      return(InpPartialCloseProfit);
-
-   return(InpPartialCloseAtr * atrAtEntry * (tickValue / tickSize) * volume);
-  }
-
-void CheckPartialClose()
-  {
-   // Structural mode gives each trade exactly two outcomes, SL or TP, so that a
-   // result can be stated in R. Partial close breaks that twice over: it splits
-   // the realised P&L across two fills while riskUsd was computed for the whole
-   // position, and its breakeven step calls PositionModify(ticket, entry, 0.0),
-   // which zeroes the take profit outright.
-   if(InpStructuralSlMode) return;
-
-   if(InpPartialClosePercent <= 0) return;
-   if(InpPartialCloseProfit <= 0 && InpPartialCloseAtr <= 0) return;
-
-   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
-     {
-      if(g_entries[i].partialClosed) continue;
-
-      if(!PositionSelectByTicket(g_entries[i].ticket))
-        {
-         double realized = AccumulateBatchStats(i);
-         LogTradeCsv(i, realized, "CLOSED");
-         RemoveEntry(i);
-         continue;
-        }
-
-      double posVolume = PositionGetDouble(POSITION_VOLUME);
-      double threshold = PartialCloseThreshold(g_entries[i].atrAtEntry, posVolume);
-      if(threshold <= 0) continue;
-
-      double posProfit = PositionGetDouble(POSITION_PROFIT);
-      if(posProfit < threshold) continue;
-
-      double closeVol = NormalizeDouble(posVolume * InpPartialClosePercent / 100.0, 8);
-      double remainder = posVolume - closeVol;
-
-      // Round to volume step
-      closeVol = MathFloor(closeVol / g_volStep) * g_volStep;
-      if(closeVol < g_volMin || remainder < g_volMin)
-        {
-         if(closeVol >= g_volMin)
-            closeVol = posVolume; // close full instead
-         else
-            continue; // too small to split
-        }
-
-      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      ulong ticket = g_entries[i].ticket;
-
-      if(!trade.PositionClosePartial(ticket, closeVol))
-        {
-         PrintFormat("AjipSnD: Partial close failed ticket=%I64u retcode=%d",
-                     ticket, trade.ResultRetcode());
-         continue;
-        }
-
-      PrintFormat("AjipSnD: Partial close ticket=%I64u, closedVol=%.2f, profit=%.2f (target %.2f)",
-                  ticket, closeVol, posProfit, threshold);
-
-      // Move remaining to breakeven
-      if(PositionSelectByTicket(ticket))
-        {
-         if(!trade.PositionModify(ticket, entryPrice, 0.0))
-           {
-            PrintFormat("AjipSnD: BE SL modify failed ticket=%I64u retcode=%d",
-                        ticket, trade.ResultRetcode());
-           }
-        }
-
-      g_entries[i].partialClosed = true;
-     }
-  }
-
-//==================================================================
-// TRAILING STOP — for positions that have been partial-closed to BE.
-// Only trails SL forward (never backward). Fixed-step: SL stays
-// InpTrailDistancePoints behind current price once profit exceeds
-// InpTrailStartPoints from entry.
-//==================================================================
-void CheckTrailingStop()
-  {
-   // Would walk the structural stop away from the zone that justified it.
-   if(InpStructuralSlMode) return;
-
-   if(InpTrailStartPoints <= 0 || InpTrailDistancePoints <= 0) return;
-
-   MqlTick ticks[1];
-   double bid = 0, ask = 0;
-   if(CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, 1) == 1)
-     {
-      bid = ticks[0].bid;
-      ask = ticks[0].ask;
-     }
-   else if(SymbolInfoTick(_Symbol, ticks[0]))
-     {
-      bid = ticks[0].bid;
-      ask = ticks[0].ask;
-     }
-   double trailDist  = InpTrailDistancePoints * g_point;
-   double trailStart = InpTrailStartPoints * g_point;
-
-   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
-     {
-      if(!g_entries[i].partialClosed) continue;  // only trail BE positions
-      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-
-      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double curSl      = PositionGetDouble(POSITION_SL);
-      double curTp      = PositionGetDouble(POSITION_TP);
-
-      if(g_entries[i].dir == 1)  // BUY
-        {
-         double profitPoints = bid - entryPrice;
-         if(profitPoints < trailStart) continue;  // not enough profit yet
-
-         double newSl = NormalizeDouble(bid - trailDist, g_digits);
-         // Only move SL forward (never below current SL or below entry)
-         if(newSl <= curSl + g_point * 0.5) continue;
-
-         if(trade.PositionModify(g_entries[i].ticket, newSl, curTp))
-            PrintFormat("AjipSnD: Trail SL BUY ticket=%I64u SL=%.5f (bid=%.5f dist=%d pts)",
-                        g_entries[i].ticket, newSl, bid, InpTrailDistancePoints);
-        }
-      else  // SELL
-        {
-         double profitPoints = entryPrice - ask;
-         if(profitPoints < trailStart) continue;
-
-         double newSl = NormalizeDouble(ask + trailDist, g_digits);
-         if(newSl >= curSl - g_point * 0.5) continue;
-
-         if(trade.PositionModify(g_entries[i].ticket, newSl, curTp))
-            PrintFormat("AjipSnD: Trail SL SELL ticket=%I64u SL=%.5f (ask=%.5f dist=%d pts)",
-                        g_entries[i].ticket, newSl, ask, InpTrailDistancePoints);
-        }
-     }
-  }
-
-//==================================================================
-// INVALID POSITION HANDLER — positions that are floating loss AND
-// either outside active HTF zone or loss > InpPosMaxLoss.
-// Sets TP to entry price (breakeven) — gives chance to exit at BE.
-// One-shot: skips if TP already at entry price.
-//==================================================================
-void CheckInvalidPositions()
-  {
-   // Overwrites the take profit with a breakeven one. In structural mode the
-   // stop already IS the invalidation rule — price leaving the HTF zone is
-   // exactly what it is placed beyond — so this would be a second, competing
-   // answer to the same question.
-   if(InpStructuralSlMode) return;
-
-   if(InpPosMaxLoss <= 0) return;  // feature disabled
-
-   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
-     {
-      if(!PositionSelectByTicket(g_entries[i].ticket))
-         continue;
-
-      double posProfit   = PositionGetDouble(POSITION_PROFIT);
-      double entryPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
-      double curTp       = PositionGetDouble(POSITION_TP);
-
-      // Only handle floating LOSS positions
-      if(posProfit >= 0) continue;
-
-      // One-shot: TP already at entry → already handled
-      if(MathAbs(curTp - entryPrice) < g_point * 0.5)
-         continue;
-
-      // Skip positions opened this bar — give them at least 1 full bar to settle
-      // Prevents false triggers from bid/ask spread at zone boundaries on fresh entries
-      if(g_entries[i].entryTime >= g_ltfLastBarTime)
-         continue;
-
-      bool invalid = false;
-      string reason = "";
-
-      // Condition 1: entry premise invalid — the HTF zone we entered on no longer exists.
-      // Check if entryPrice is still inside any active zone of the same type.
-      // If the zone was invalidated (removed by InvalidateHtfZones), entryPrice
-      // will no longer be inside any active zone → position premise is broken.
-      if(g_entries[i].dir == 1)  // BUY → entry was inside a demand zone
-        {
-         if(!IsPriceInDemandZone(entryPrice, g_htfDemandZones))
-           {
-            invalid = true;
-            reason = "entry demand zone invalidated";
-           }
-        }
-      else  // SELL → entry was inside a supply zone
-        {
-         if(!IsPriceInSupplyZone(entryPrice, g_htfSupplyZones))
-           {
-            invalid = true;
-            reason = "entry supply zone invalidated";
-           }
-        }
-
-      // Condition 2: floating loss exceeds threshold
-      if(!invalid && MathAbs(posProfit) > InpPosMaxLoss)
-        {
-         invalid = true;
-         reason = StringFormat("floating loss %.2f > InpPosMaxLoss %.2f",
-                               MathAbs(posProfit), InpPosMaxLoss);
-        }
-
-      if(!invalid) continue;
-
-      // Set TP to entry price (BE), keep existing SL
-      double curSl = PositionGetDouble(POSITION_SL);
-
-      if(!trade.PositionModify(g_entries[i].ticket, curSl, entryPrice))
-        {
-         PrintFormat("AjipSnD: Invalid pos BE-TP modify FAILED ticket=%I64u retcode=%d reason=%s",
-                     g_entries[i].ticket, trade.ResultRetcode(), reason);
-         continue;
-        }
-
-      PrintFormat("AjipSnD: Invalid pos ticket=%I64u dir=%s TP→BE (%.5f) reason=%s loss=%.2f",
-                  g_entries[i].ticket,
-                  g_entries[i].dir == 1 ? "BUY" : "SELL",
-                  entryPrice, reason, MathAbs(posProfit));
      }
   }
 
@@ -1004,76 +762,12 @@ void CloseAllPositions()
   }
 
 //==================================================================
-// FLUSH BATCH CSV
-//==================================================================
-void FlushBatchCSV(string reason)
-  {
-   if(g_batchCount == 0) return;
-
-   string filename = "AjipSnD_Batches_" + _Symbol + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
-   bool exists = FileIsExist(filename, FILE_COMMON);
-
-   // FILE_CSV makes FileWrite insert the delimiter between fields; with plain
-   // FILE_TXT every field is concatenated into one unparseable string. The
-   // header hid this, being a single comma-containing literal. FILE_ANSI is
-   // what makes the CP_UTF8 codepage apply — without it the file is UTF-16.
-   int handle = FileOpen(filename,
-                         FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
-                         ',', CP_UTF8);
-   if(handle == INVALID_HANDLE)
-     {
-      PrintFormat("AjipSnD: Cannot open batch CSV %s", filename);
-      return;
-     }
-
-   // Header if new file — one argument per column, so the delimiter count
-   // always matches the data row below
-   if(!exists)
-     {
-      FileWrite(handle,
-                "CloseTime", "CloseReason", "PositionCount", "Wins", "Losses",
-                "BreakEven", "TotalRealizedPnL", "SumMFE", "SumMAE",
-                "FirstEntryTime", "LastEntryTime");
-     }
-   else
-      FileSeek(handle, 0, SEEK_END);
-
-   FileWrite(handle,
-             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-             reason, g_batchCount, g_batchWins, g_batchLosses, g_batchBreakEven,
-             g_batchRealizedPnl, g_batchMfeSum, g_batchMaeSum,
-             TimeToString(g_batchFirstEntryTime, TIME_DATE | TIME_SECONDS),
-             TimeToString(g_batchLastEntryTime, TIME_DATE | TIME_SECONDS));
-
-   FileClose(handle);
-   PrintFormat("AjipSnD: Batch flushed — reason=%s count=%d PnL=%.2f", reason, g_batchCount, g_batchRealizedPnl);
-  }
-
-//==================================================================
-// RESET BATCH ACCUMULATOR
-//==================================================================
-void ResetBatchAccumulator()
-  {
-   g_batchActive         = false;
-   g_batchFirstEntryTime = 0;
-   g_batchLastEntryTime  = 0;
-   g_batchCount          = 0;
-   g_batchWins           = 0;
-   g_batchLosses         = 0;
-   g_batchBreakEven      = 0;
-   g_batchRealizedPnl    = 0.0;
-   g_batchMfeSum         = 0.0;
-   g_batchMaeSum         = 0.0;
-   g_batchAtrAtStart     = 0.0;
-  }
-
-//==================================================================
-// CLOSE ALL AND FLUSH BATCH.
+// CLOSE ALL AND LOG TRADES.
 // Snapshot POSITION_PROFIT BEFORE closing to avoid the history-timing gap
-// where the deal hasn't settled yet, but only bank a position once the close
-// has actually removed it. Flush once the batch is flat.
+// where the deal hasn't settled yet, but only log a position once the
+// close has actually removed it.
 //==================================================================
-void CloseAllAndFlushBatch(string reason)
+void CloseAllAndLogTrades(string reason)
   {
    int n = ArraySize(g_entries);
 
@@ -1081,7 +775,7 @@ void CloseAllAndFlushBatch(string reason)
    // Once PositionClose succeeds the position is gone and the deal may not
    // have settled into history yet, so the open position is the only reliable
    // source for its profit. Index-aligned with g_entries; nothing between here
-   // and the banking loop below resizes that array (CancelAllPendingOrders
+   // and the logging loop below resizes that array (CancelAllPendingOrders
    // touches g_pendingOrders, CloseAllPositions touches neither).
    double net[];
    ArrayResize(net, n);
@@ -1093,133 +787,30 @@ void CloseAllAndFlushBatch(string reason)
                 + PositionGetDouble(POSITION_SWAP);  // commission is on the deal, not the position
      }
 
-   // ---- Cancel pending orders (except batch close-all — trading continues) ----
-   if(StringFind(reason, "BATCH_") != 0)
-      CancelAllPendingOrders();
-
-   // ---- Close all positions ----
+   CancelAllPendingOrders();
    CloseAllPositions();
 
-   // ---- Bank ONLY what actually closed ----
+   // ---- Log ONLY what actually closed ----
    // A close can be rejected — market closed over a holiday, trade context
-   // busy — and the position then survives the call. Banking it anyway (which
+   // busy — and the position then survives the call. Logging it anyway (which
    // is what this function used to do, before CloseAllPositions was even
-   // called) wrote a batch row for positions still open and reset the
-   // accumulator; the next tick found the same trigger still true and repeated
-   // the whole thing, so one stalled close produced hundreds of duplicate rows
-   // carrying a zeroed FirstEntryTime. A 12-month XAUUSD backtest turned up 759
-   // such rows over three holiday sessions, inflating position counts ~2.5x.
-   // MathMin guards net[] against a future caller that adds entries mid-close:
-   // an out-of-range read halts the EA outright, and only the snapshot's own
-   // indices carry a P&L figure anyway.
+   // called) wrote a row for positions still open; the next tick found the
+   // same trigger still true and repeated the whole thing, producing
+   // duplicate rows. MathMin guards net[] against a future caller that adds
+   // entries mid-close: an out-of-range read halts the EA outright, and only
+   // the snapshot's own indices carry a P&L figure anyway.
    for(int i = MathMin(ArraySize(g_entries), n) - 1; i >= 0; i--)
      {
       if(PositionSelectByTicket(g_entries[i].ticket))
          continue;                      // still open — retry on the next tick
 
-      g_batchCount++;
-      g_batchRealizedPnl += net[i];
-      g_batchMfeSum += g_entries[i].mfe;
-      g_batchMaeSum += g_entries[i].mae;
-      if(net[i] > 0)       g_batchWins++;
-      else if(net[i] < 0)  g_batchLosses++;
-      else                 g_batchBreakEven++;
-
       LogTradeCsv(i, net[i], reason);
       RemoveEntry(i);
      }
 
-   // ---- Flush once the batch is actually flat ----
-   // Waiting for flat keeps one CSV row per batch even when a close needed
-   // several attempts, instead of fragmenting it into one row per attempt.
-   // Every caller re-checks its trigger each tick, so a stalled close simply
-   // retries until it lands; CheckEntryCleanup() flushes as BATCH_FLAT if the
-   // positions go away by some other route first.
    int remaining = ArraySize(g_entries);
    if(remaining > 0)
-     {
-      PrintFormat("AjipSnD: %s close incomplete — %d position(s) still open, "
-                  "batch flush deferred", reason, remaining);
-      return;
-     }
-
-   if(g_batchCount > 0)
-     {
-      FlushBatchCSV(reason);
-      ResetBatchAccumulator();
-      g_lastBatchEndTime = TimeCurrent();
-     }
-  }
-
-//---- Batch profit-close trigger in account currency ----
-// With InpBatchMaxProfitAtr > 0 the target scales with the HTF ATR frozen at
-// batch start AND the batch's current open volume, so a batch running more
-// size needs a proportionally bigger move to close, and the target keeps its
-// meaning whether XAUUSD is calm or volatile. A fixed dollar cap does
-// neither: a live backtest comparison found BATCH_TARGET realizing ~$20 on
-// average in every run regardless of regime or how many positions were in
-// the batch — a hard cap always lands near itself, which is exactly why it
-// discards whatever excursion advantage a larger or better-timed batch
-// accumulated. ATR is taken at batch start rather than live, matching how
-// InpPartialCloseAtr freezes ATR at position entry.
-double BatchProfitThreshold()
-  {
-   if(InpBatchMaxProfitAtr <= 0 || g_batchAtrAtStart <= 0)
-      return(InpBatchMaxProfit);
-
-   double totalVolume = 0.0;
-   for(int i = 0; i < ArraySize(g_entries); i++)
-     {
-      if(PositionSelectByTicket(g_entries[i].ticket))
-         totalVolume += PositionGetDouble(POSITION_VOLUME);
-     }
-   if(totalVolume <= 0)
-      return(InpBatchMaxProfit);
-
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0)
-      return(InpBatchMaxProfit);
-
-   return(InpBatchMaxProfitAtr * g_batchAtrAtStart * (tickValue / tickSize) * totalVolume);
-  }
-
-//==================================================================
-// CHECK BATCH CLOSE-ALL — TARGET only (gated by news)
-//==================================================================
-void CheckBatchTargetCloseAll()
-  {
-   // The batch target is the old architecture's primary exit and would close
-   // positions before their own take profit, at a threshold scaled by HTF ATR
-   // — roughly 4.1x the LTF ATR the target is expressed in. Gated in code
-   // rather than left to the preset, because a preset that forgot it would
-   // still run and quietly measure the wrong thing.
-   if(InpStructuralSlMode) return;
-
-   if(InpBatchMaxProfit <= 0 && InpBatchMaxProfitAtr <= 0) return;
-   double threshold = BatchProfitThreshold();
-   if(threshold <= 0) return;
-
-   double total = g_batchRealizedPnl + GetFloatingPnL();
-   if(total >= threshold)
-     {
-      PrintFormat("AjipSnD: BATCH TARGET HIT (%.2f >= %.2f) — closing batch", total, threshold);
-      CloseAllAndFlushBatch("BATCH_TARGET");
-     }
-  }
-
-//==================================================================
-// CHECK BATCH MAX LOSS — NEVER gated by news
-//==================================================================
-void CheckBatchMaxLossCloseAll()
-  {
-   if(InpBatchMaxLoss <= 0) return;
-   double total = g_batchRealizedPnl + GetFloatingPnL();
-   if(total <= -InpBatchMaxLoss)
-     {
-      PrintFormat("AjipSnD: BATCH MAX LOSS HIT (%.2f <= %.2f) — closing batch", total, -InpBatchMaxLoss);
-      CloseAllAndFlushBatch("BATCH_MAX_LOSS");
-     }
+      PrintFormat("AjipSnD: %s close incomplete — %d position(s) still open, retrying", reason, remaining);
   }
 
 //==================================================================
@@ -1233,7 +824,7 @@ void CheckDailyTargetCloseAll()
      {
       PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all", total, InpDailyMaxProfit);
       WriteHandoffSignal("DAILY_TARGET", total);
-      CloseAllAndFlushBatch("DAILY_TARGET");
+      CloseAllAndLogTrades("DAILY_TARGET");
      }
   }
 
@@ -1248,7 +839,7 @@ void CheckDailyMaxLossCloseAll()
      {
       PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
       WriteHandoffSignal("DAILY_MAX_LOSS", total);
-      CloseAllAndFlushBatch("DAILY_MAX_LOSS");
+      CloseAllAndLogTrades("DAILY_MAX_LOSS");
      }
   }
 
@@ -1264,7 +855,7 @@ void CheckSessionCloseAll()
    if(total > 0)
      {
       PrintFormat("AjipSnD: SESSION END — profit=%.2f, closing all", total);
-      CloseAllAndFlushBatch("SESSION_END");
+      CloseAllAndLogTrades("SESSION_END");
      }
   }
 
@@ -1316,7 +907,7 @@ void CheckFinalTargetCloseAll()
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) >= InpFinalProfitTarget)
      {
       PrintFormat("AjipSnD: FINAL TARGET REACHED — closing all PERMANENTLY");
-      CloseAllAndFlushBatch("FINAL_TARGET");
+      CloseAllAndLogTrades("FINAL_TARGET");
      }
   }
 
@@ -1329,93 +920,7 @@ void CheckFinalMaxLossCloseAll()
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) <= -InpFinalMaxLoss)
      {
       PrintFormat("AjipSnD: FINAL MAX LOSS REACHED — closing all PERMANENTLY");
-      CloseAllAndFlushBatch("FINAL_MAX_LOSS");
-     }
-  }
-
-//==================================================================
-// RECALCULATE AGGREGATE SL — safety net, broker-side.
-// Budget = tightest active max loss, applied to ALL positions in a
-// direction as a single pool (not split per-position). Same slPoints
-// for every position in the direction — mirrors AjipIDM.
-//==================================================================
-void RecalculateAggregateSL()
-  {
-   // Find smallest active max loss
-   double budget = 0.0;
-   if(InpBatchMaxLoss > 0)
-      budget = (budget == 0) ? InpBatchMaxLoss : MathMin(budget, InpBatchMaxLoss);
-   if(InpDailyMaxLoss > 0)
-      budget = (budget == 0) ? InpDailyMaxLoss : MathMin(budget, InpDailyMaxLoss);
-   if(InpFinalMaxLoss > 0)
-      budget = (budget == 0) ? InpFinalMaxLoss : MathMin(budget, InpFinalMaxLoss);
-
-   if(budget <= 0) return;
-
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0) return;
-
-   double valuePerPointPerLot = (tickValue / tickSize) * g_point;
-   if(valuePerPointPerLot <= 0) return;
-
-   int n = ArraySize(g_entries);
-
-   // Apply per direction — each direction gets the FULL budget independently
-   for(int dir = -1; dir <= 1; dir += 2)
-     {
-      if(dir == 0) continue;
-
-      // Sum total volume + weighted entry sum (same filter)
-      double totalVolume = 0.0;
-      double weightedSum = 0.0;
-      for(int i = 0; i < n; i++)
-        {
-         if(g_entries[i].dir != dir) continue;
-         if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-         // A structural stop is the position's own risk statement — the pooled
-         // budget must neither move it nor count its volume, or the shared
-         // slPoints figure would be computed against size it does not govern.
-         if(g_entries[i].hasStructuralSl) continue;
-         // Skip if already has a protective SL (partialClosed + SL != 0 = safe)
-         if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
-         double vol = PositionGetDouble(POSITION_VOLUME);
-         totalVolume += vol;
-         weightedSum += PositionGetDouble(POSITION_PRICE_OPEN) * vol;
-        }
-
-      if(totalVolume <= 0.0) continue;
-      double avgEntry = weightedSum / totalVolume;
-
-      // Same slPoints for ALL positions in this direction
-      double slPoints = budget / (totalVolume * valuePerPointPerLot);
-      if(slPoints <= 0.0) continue;
-
-      // Same SL price for ALL positions in this direction
-      double commonSl = (dir == 1)
-                        ? NormalizeDouble(avgEntry - slPoints * g_point, g_digits)
-                        : NormalizeDouble(avgEntry + slPoints * g_point, g_digits);
-
-      for(int i = 0; i < n; i++)
-        {
-         if(g_entries[i].dir != dir) continue;
-         if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
-         if(g_entries[i].hasStructuralSl) continue;   // same reason as the sum above
-         if(g_entries[i].partialClosed && PositionGetDouble(POSITION_SL) != 0.0) continue;
-
-         double curSl = PositionGetDouble(POSITION_SL);
-         // Skip if already within 0.5 point of common SL
-         if(MathAbs(curSl - commonSl) < g_point * 0.5) continue;
-
-         double curTp = PositionGetDouble(POSITION_TP);
-
-         if(trade.PositionModify(g_entries[i].ticket, commonSl, curTp))
-            PrintFormat("AjipSnD: Aggregate SL set ticket=%I64u SL=%.5f (budget=%.2f totalVol=%.2f)",
-                        g_entries[i].ticket, commonSl, budget, totalVolume);
-         else
-            PrintFormat("AjipSnD: Aggregate SL FAILED ticket=%I64u retcode=%d SL=%.5f",
-                        g_entries[i].ticket, trade.ResultRetcode(), commonSl);
-        }
+      CloseAllAndLogTrades("FINAL_MAX_LOSS");
      }
   }
 

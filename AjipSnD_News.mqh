@@ -3,11 +3,11 @@
 
 //==================================================================
 // NEWS BLACKOUT — blocks new entries AND profit-taking close actions
-// (partial close, target-hitting close-alls) around high-impact economic
-// calendar events matching this symbol's base/profit currency.
+// (target-hitting close-alls) around high-impact economic calendar
+// events matching this symbol's base/profit currency.
 //
-// Kill-switch max-loss branches (FinalMaxLoss, DailyMaxLoss, BatchMaxLoss)
-// are DELIBERATELY never gated — those protect the account and are needed
+// Kill-switch max-loss branches (FinalMaxLoss, DailyMaxLoss) are
+// DELIBERATELY never gated — those protect the account and are needed
 // most exactly when volatility (news spike) is highest.
 //
 // Result cached for NEWS_CACHE_SECONDS to avoid recomputing every tick.

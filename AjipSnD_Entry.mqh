@@ -9,8 +9,6 @@ void RebuildTrackedPositions()
   {
    ArrayResize(g_entries, 0);
 
-   datetime firstTime = 0;
-   datetime lastTime  = 0;
    int      recovered = 0;
 
    int n = PositionsTotal();
@@ -37,37 +35,17 @@ void RebuildTrackedPositions()
       double curVol = PositionGetDouble(POSITION_VOLUME);
       double curSl  = PositionGetDouble(POSITION_SL);
 
-      // Partial-close detection compares against InpFixedLot only in fixed-lot
-      // mode. Under risk-based sizing the original volume varied per trade and
-      // is not recoverable from the open position, so assume none was taken —
-      // the worst case is one extra partial close on a recovered position,
-      // whereas guessing "already partial-closed" would disable it for good.
-      //
-      // Gated on the mode, NOT on InpRiskPerTrade: that input is non-zero by
-      // default, and lots only vary once a structural stop gives LotForRisk a
-      // distance to size against. Testing the input here would change batch-mode
-      // restart behaviour while the mode is switched off.
-      if(InpStructuralSlMode)
-        {
-         g_entries[idx].partialClosed = false;
-         g_entries[idx].initialVolume = curVol;
-        }
-      else
-        {
-         g_entries[idx].partialClosed = (curVol < InpFixedLot - g_volStep * 0.5);
-         g_entries[idx].initialVolume = InpFixedLot;
-        }
+      g_entries[idx].initialVolume = curVol;
 
       // ATR at the original entry is not recoverable on restart — use the
-      // current reading. If the handle is not calculated yet this returns 0
-      // and PartialCloseThreshold falls back to the fixed dollar target.
+      // current reading.
       g_entries[idx].atrAtEntry     = GetAtrValue(true);
       g_entries[idx].atrLtfAtEntry  = GetAtrValue(false);
 
-      // An SL already on the position is treated as structural in this mode, so
-      // the aggregate-SL pass leaves it alone rather than overwriting a stop it
-      // did not place and cannot reconstruct.
-      g_entries[idx].hasStructuralSl = (InpStructuralSlMode && curSl != 0.0);
+      // An SL already on the position came from the zone that justified it —
+      // treated as structural since a recovered position's original placement
+      // context is not reconstructable.
+      g_entries[idx].hasStructuralSl = (curSl != 0.0);
       g_entries[idx].slPrice         = curSl;
       g_entries[idx].tpPrice         = PositionGetDouble(POSITION_TP);
       g_entries[idx].zoneTime        = 0;   // originating zone is not recoverable
@@ -86,19 +64,10 @@ void RebuildTrackedPositions()
       else
          g_entries[idx].riskUsd = 0.0;
 
-      if(firstTime == 0 || entryTime < firstTime) firstTime = entryTime;
-      if(entryTime > lastTime) lastTime = entryTime;
       recovered++;
      }
 
    if(recovered == 0) return;
-
-   g_batchActive         = true;
-   g_batchFirstEntryTime = firstTime;
-   g_batchLastEntryTime  = lastTime;
-   // Batch's original starting ATR is not recoverable on restart — use the
-   // current reading, same fallback used for atrAtEntry above.
-   g_batchAtrAtStart     = GetAtrValue(true);
 
    if(InpEnableLog) PrintFormat("AjipSnD: Rebuilt tracking for %d pre-existing position(s) on restart.", recovered);
   }
@@ -141,11 +110,6 @@ bool EntryGateBlocked(int dir)
      {
       if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — Hedging disabled, opposite side open for %s",
                                    dir == 1 ? "BUY" : "SELL");
-      return(true);
-     }
-   if(BatchCooldownActive())
-     {
-      if(InpEnableLog) Print("AjipSnD: Entry blocked — Batch cooldown active");
       return(true);
      }
    if(!InSession())

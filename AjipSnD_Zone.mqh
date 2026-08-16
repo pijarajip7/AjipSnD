@@ -502,6 +502,34 @@ void DrawAllHtfZones()
      }
   }
 
+//---- Draw saved (awaiting-rejection) LTF zones — InpRejectionEntryMode ----
+// Stands in for DrawAllHtfZones in this mode: HTF is a directional bias
+// here, not a price range, so the LTF zone is the thing actually worth
+// watching move to move. Zones already used (rejection resolved, order
+// attempted) are dropped rather than kept drawn — a used zone has nothing
+// left pending.
+void DrawSavedLtfZones()
+  {
+   if(!InpDrawLines) return;
+
+   string prefix = g_objPrefix + "LTF_";
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+     {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, prefix) == 0)
+         ObjectDelete(0, objName);
+     }
+
+   int n = ArraySize(g_savedLtfZones);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_savedLtfZones[i].used) continue;
+      color clr = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
+      DrawHtfZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time,
+                      g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
+     }
+  }
+
 //==================================================================
 // ZONE QUALITY TRACKER — CSV backtest analysis log.
 // Live-confirmed zones are tracked from confirmation to outcome.
@@ -758,15 +786,52 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
                 : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
    g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
 
+   // A same-direction zone already touched by now is stale the moment this
+   // new one validates — same TOUCHED_SUPERSEDED rule AddDemandZone/
+   // AddSupplyZone already apply to HTF zones, needed here too. This is the
+   // earliest possible trigger point (any LTF zone validating, not just the
+   // next HTF validation), so it is where both places this rule matters get
+   // cleaned up in one pass:
+   //   - g_ltfValidatedHistory: flagged (not removed — it is a permanent
+   //     record by design), so SaveLtfZonesForHtfBias's backward replay
+   //     never offers up a zone the market has already moved past just
+   //     because it is still sitting in the history.
+   //   - g_savedLtfZones: marked used (InpRejectionEntryMode only, empty
+   //     otherwise so this is a harmless no-op loop when that mode is off),
+   //     so a zone already on the chart/watch list is retired here rather
+   //     than waiting for the next HTF validation to notice.
+   for(int j = 0; j < ArraySize(g_ltfValidatedHistory); j++)
+     {
+      if(g_ltfValidatedHistory[j].isDemand != confirmed.isDemand) continue;
+      if(g_ltfValidatedHistory[j].superseded) continue;
+      if(g_ltfValidatedHistory[j].touchedEver)
+         g_ltfValidatedHistory[j].superseded = true;
+     }
+   for(int j = 0; j < ArraySize(g_savedLtfZones); j++)
+     {
+      if(g_savedLtfZones[j].used) continue;
+      if(g_savedLtfZones[j].isDemand != confirmed.isDemand) continue;
+      if(g_savedLtfZones[j].touched)
+        {
+         g_savedLtfZones[j].used = true;
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s watch zone [%.5f, %.5f] touched+superseded by fresher zone — dropped",
+                        g_savedLtfZones[j].isDemand ? "DEMAND" : "SUPPLY",
+                        g_savedLtfZones[j].low, g_savedLtfZones[j].high);
+        }
+     }
+
    // Every validated LTF zone joins the searchable history, regardless of
    // InpHtfTriggeredEntry's state — cheap to always record, and the HTF
    // trigger needs zones that validated before it existed to look back on.
    int hsz = ArraySize(g_ltfValidatedHistory);
    ArrayResize(g_ltfValidatedHistory, hsz + 1);
-   g_ltfValidatedHistory[hsz].high     = confirmed.high;
-   g_ltfValidatedHistory[hsz].low      = confirmed.low;
-   g_ltfValidatedHistory[hsz].time     = confirmed.time;
-   g_ltfValidatedHistory[hsz].isDemand = confirmed.isDemand;
+   g_ltfValidatedHistory[hsz].high      = confirmed.high;
+   g_ltfValidatedHistory[hsz].low       = confirmed.low;
+   g_ltfValidatedHistory[hsz].sweepHigh = confirmed.sweepHigh;
+   g_ltfValidatedHistory[hsz].sweepLow  = confirmed.sweepLow;
+   g_ltfValidatedHistory[hsz].time      = confirmed.time;
+   g_ltfValidatedHistory[hsz].isDemand  = confirmed.isDemand;
    g_ltfValidatedHistory[hsz].touchedAtValidation = g_zoneTracker[i].touchedAtValidation;
    // touchedEver starts from the SAME instant, not from false: the zone's
    // confirm-to-validate window already happened, so anything already true in
@@ -774,6 +839,7 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
    // would let a zone that WAS touched before validation quietly count as
    // untouched the instant it joins the history.
    g_ltfValidatedHistory[hsz].touchedEver = g_zoneTracker[i].touchedAtValidation;
+   g_ltfValidatedHistory[hsz].superseded  = false;
   }
 
 //---- Keep touchedEver current for every zone in the persistent history ----
