@@ -1,10 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                      AjipSnD.mq5 |
 //|  Supply & Demand EA — zone-based trading on MT5.                 |
-//|  HTF zones = retest areas, LTF zones = entry confirmation.        |
-//|  Entry: LTF zone confirmed + price inside HTF active zone.        |
-//|  Structural SL/TP attached at placement. Exit via broker SL/TP   |
-//|  or daily/final/session close-all.                               |
+//|  HTF zone validation sets a directional bias, not a price range.  |
+//|  Matching LTF zones are saved and watched; entry fires only once  |
+//|  that LTF zone's own retest is REJECTED (wick back in, closed     |
+//|  back out, real-bodied bar) — a market order with structural      |
+//|  SL/TP. Exit via broker SL/TP or daily/final/session close-all.   |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -15,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "2.0-structuralonly"
+#define EA_BUILD "2.1-rejectiononly"
 
 #include <Trade\Trade.mqh>
 
@@ -23,86 +24,45 @@
 // INPUTS
 //==================================================================
 input group "Strategy"
-input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M1;   // LTF — entry timeframe
-input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_M15;  // HTF — retest zones timeframe
+input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M5;   // LTF — entry timeframe
+input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_H1;  // HTF — retest zones timeframe
 input int              InpCandlesInit    = 50;          // Lookback candles for initial trend
 input int              InpMaxZones       = 2;           // Max active zones per type (demand/supply)
-input int              InpMinZoneGapPoints = 0;        // Min gap (points) to NEWEST opposite HTF zone for entry (0=disabled)
 input bool             InpRequireZoneValidation = true; // Require HTF zone follow-through before active (LTF always on)
-input double           InpMaxZoneWidthAtr = 1.25;      // Max HTF zone width / ATR to allow entry (0=disabled)
-input double           InpMinDispBodyAtr  = 1.00;      // Min confirming-bar body / ATR to allow entry (0=disabled)
+input double           InpMaxZoneWidthAtr = 0;      // Max HTF zone width / ATR to allow entry (0=disabled)
+input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
 input bool             InpHtfMaFilter    = false;       // Enable HTF MA direction filter (BUY only above MA, SELL only below)
 input int              InpHtfMaPeriod    = 50;          // HTF MA period (only if InpHtfMaFilter=true)
 input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
 
 input group "Entry & Trade Sizing"
-input double InpFixedLot     = 0.02;   // Fixed lot size per entry
-input double InpMaxTotalLots = 0.0;    // Max open volume per direction (0=disabled)
 input bool   InpAllowHedging = true;   // Allow BUY & SELL open simultaneously (false=block opposite)
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
 
 input group "Stop Loss & Take Profit"
-input double InpZoneSlBufferAtr   = 0.5;   // SL buffer beyond the anchor zone's far edge, in LTF ATR
-// off (default): SL beyond the HTF zone's far edge — measured touched ~17%
-// of the time vs ~59% for the LTF zone's own edge (median adverse excursion
-// from entry, 3293 pts on two 12-month XAUUSD periods, exceeds the LTF
-// zone's own width of 1995 pts). on: SL at the LTF zone's own swing instead
-// — tighter, and known from that same measurement to get hit far more often.
-input bool   InpSlAnchorLtf       = false; // Anchor SL to the LTF zone's own swing instead of the HTF zone's far edge
-// VISUAL OBSERVATION ONLY -- see AjipSnD_Zone.mqh's RESULT block on
-// MarkLtfValidationContext(). Measured negative (48.00% direction-adjusted
-// hit rate at 1d, worst of four cells tested, on period A) before this input
-// existed. Wired only so the filtered population can be watched running in
-// the Strategy Tester -- not a recommendation to trade it.
-// Meaning depends on which trigger is active. Default flow: checked at the
-// LTF zone's OWN validation instant (measured negative; visual use only).
-// InpHtfTriggeredEntry: checked LIVE at HTF validation time instead, since
-// that can be much later — an LTF zone untouched at its own validation could
-// still get touched before the HTF search ever looks at it.
-input bool   InpRequireNoTouchAtValidation = false; // Entry only if the LTF zone hasn't been touched (visual use only)
-// VISUAL OBSERVATION ONLY. Replaces the trigger, not just an added filter:
-// off (default) places an order when an LTF zone validates, checking then
-// whether an active/validated HTF zone happens to contain it. On, the
-// trigger becomes the HTF zone's OWN validation, which searches BACKWARD
-// through every LTF zone already validated since the HTF zone's origin bar
-// and places an order for every match (InpMaxPositionsPerDir does the
-// thinning) -- see PlaceEntriesForHtfValidatedZone() in AjipSnD_Core.mqh.
-input bool   InpHtfTriggeredEntry = false; // Trigger entries on HTF validation + backward LTF search, not LTF's own validation (visual use only)
-// EXPERIMENTAL, mutually exclusive with the trigger above (takes priority if
-// both are on) — a different philosophy again, not a filter on either one.
-// HTF stops being a price range to sit inside and becomes a pure directional
-// bias: an HTF zone validating only says which side is worth watching. An
-// LTF zone matching that side gets SAVED, not traded — it waits for its own
-// retest, and only enters once that retest is REJECTED (wick back into the
-// zone, closed back out, with a real-bodied bar behind it), as a market
-// order rather than a resting limit, since by the time the rejection bar has
-// closed price has already moved off the zone edge. Unproven — written
-// directly to spec, not measured first.
-input bool   InpRejectionEntryMode = false; // Save LTF zones on HTF-bias match, enter only on retest rejection (experimental)
+input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the LTF zone's own far edge, in LTF ATR
 // How strong the rejection bar's body must be, relative to LTF ATR, in the
 // favourable direction, to count as a real rejection rather than a wick that
 // grazed the zone and drifted back. No prior measurement for this specific
 // threshold exists — starting value, not a validated one.
 input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the favourable direction
 // Risk per trade in account currency; lot is derived from it and the stop
-// distance. 0 = fall back to InpFixedLot. Default 15 rather than a smaller
+// distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
 // figure because the broker's minimum lot puts a floor under achievable risk:
 // with 0.01 min lot and the measured XAUUSD stop distances, a $5 budget is
 // unreachable on 64% of trades and the realised average lands near $10
 // anyway. At $15 only 19% are floored and the realised average matches the
 // target.
-input double InpRiskPerTrade      = 15.0;  // Risk per trade ($; 0=use InpFixedLot)
+input double InpRiskPerTrade      = 50.0;  // Risk per trade ($; 0=disable sizing, no trades)
 // TP as a multiple of the ACTUAL stop distance just computed (HTF far edge +
 // buffer), not an independent ATR figure — the two used to be sized from
 // unrelated bases, so the realised reward:risk floated wherever they happened
 // to land instead of being enforced. Default 2.0 is this project's own stated
 // floor (0=no TP).
 input double InpTakeProfitRR      = 2.0;   // TP = this many multiples of the actual SL distance (0=no TP)
-// Counts open positions AND resting limit orders in the direction.
-// Separate from InpMaxTotalLots, which caps volume — and volume stops mapping
-// to a position count the moment lot size varies with stop distance.
-input int    InpMaxPositionsPerDir = 0;    // Max positions+pendings per direction (0=disabled)
+// Counts open positions in the direction.
+input int    InpMaxPositionsPerDir = 0;    // Max positions per direction (0=disabled)
 // The broker's minimum lot puts a hard floor under achievable risk: once the
 // stop is wide enough that the budget buys less than volMin, the position can
 // only be opened by risking MORE than the budget. This caps how much more.
@@ -112,7 +72,7 @@ input int    InpMaxPositionsPerDir = 0;    // Max positions+pendings per directi
 // over the line; at 1.00 it would drop 5.8% of entries, at 1.25 only 3.4%,
 // while still capping the observed tail at $18.73. 0 = accept any overshoot,
 // which restores the run #4 behaviour for an unbiased measurement pass.
-input double InpMaxRiskOvershoot   = 1.25;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
+input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
@@ -215,14 +175,10 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | riskCap=%.2f slAnchor=%s tpRR=%.1f htfTriggeredEntry=%s noTouchFilter=%s rejectionEntry=%s (bodyAtr=%.2f) excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f rejectionBodyAtr=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
                InpMaxRiskOvershoot,
-               InpSlAnchorLtf ? "LTF(tighter,touched~59%)" : "HTF(wider,touched~17%)",
                InpTakeProfitRR,
-               InpHtfTriggeredEntry ? "ON(VISUAL-ONLY)" : "off",
-               InpRequireNoTouchAtValidation ? "ON(VISUAL-ONLY)" : "off",
-               InpRejectionEntryMode ? "ON(EXPERIMENTAL)" : "off",
                InpRejectionBodyAtr,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
@@ -276,22 +232,16 @@ int OnInit()
    // Recover tracking for positions from earlier EA run
    RebuildTrackedPositions();
 
-   // Init LTF & HTF
-   InitLTFStructure();
-   InitHTFStructure();
-
-   // Initial chart draw. Skipped in rejection-entry mode: UpdateHTF never
-   // redraws HTF zones in that mode (see its own guard), so an unconditional
-   // draw here would leave a one-time, never-cleared, never-updated set of
-   // HTF rectangles stuck on the chart for the rest of the run.
-   if(InpDrawLines && !InpRejectionEntryMode)
-      DrawAllHtfZones();
+   // Init LTF & HTF, and replay them together chronologically so the EA
+   // starts with a real bias / saved LTF zones instead of waiting for the
+   // first live HTF validation.
+   ReplayInitialStructure();
 
    Print("══════════════════════════════════════");
    Print("AjipSnD initialized successfully");
-   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, FixedLot=%.2f",
+   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, RiskPerTrade=%.2f",
                EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
-               InpMaxZones, InpFixedLot);
+               InpMaxZones, InpRiskPerTrade);
    PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
                InpSessionStart, InpSessionEnd,
                g_sessionFilterEnabled ? "ENABLED" : "ALL DAY",
@@ -323,9 +273,6 @@ void OnTick()
    // per tick and self-gates. Observation only; places no orders.
    DriftArmTrend();
 
-   // 1b. Check pending orders — remove if outside HTF zone, detect fills
-   CheckPendingOrders();
-
    // 2. Final target check (blocked during news blackout)
    if(!InNewsBlackout())
      {
@@ -344,10 +291,6 @@ void OnTick()
       CheckDailyTargetCloseAll();
    CheckDailyMaxLossCloseAll();
 
-   // 4. Session close-all (gated by news — profit-taking only)
-   if(!InNewsBlackout())
-      CheckSessionCloseAll();
-
    //══════════════════════════════════════════════════════════════
    // HTF update (separate bar detection)
    //══════════════════════════════════════════════════════════════
@@ -357,7 +300,7 @@ void OnTick()
       if(htfCopied >= 2)
         {
          ArraySetAsSeries(htfRates, true);
-         UpdateHTF(htfRates, htfCopied);
+         UpdateHTF(htfRates[1]);
         }
    }
 
@@ -374,7 +317,7 @@ void OnTick()
    if(ltfRates[1].time == g_ltfLastBarTime) return;
 
    // Process the closed bar
-   UpdateLTF(ltfRates, ltfCopied);
+   UpdateLTF(ltfRates[1]);
 
    // Entry cleanup (positions closed outside close-all)
    CheckEntryCleanup();

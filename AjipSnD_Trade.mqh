@@ -2,16 +2,15 @@
 #define AJIPSND_TRADE_MQH
 
 //==================================================================
-// OPEN MARKET WITH STRUCTURAL STOPS — rejection-entry mode.
-// Unlike PlacePendingOrder, this fills immediately at the current market
-// price rather than resting at a limit: the rejection has already happened
-// by the time this is called (the bar that confirmed it just closed), so
-// there is no edge left to wait at — price is already moving off the zone.
+// OPEN MARKET WITH STRUCTURAL STOPS — the EA's only entry path.
+// Fills immediately at the current market price rather than resting at a
+// limit: the rejection has already happened by the time this is called (the
+// bar that confirmed it just closed), so there is no edge left to wait at —
+// price is already moving off the zone.
 //
 // slPrice is the caller's zone-anchored stop; TP is derived here from the
-// SAME price this order actually transacts at, matching PlaceEntryForZone's
-// pattern of sizing TP off the real stop distance rather than an independent
-// figure.
+// SAME price this order actually transacts at, so the realised reward:risk
+// is enforced against the real fill rather than an independent figure.
 //==================================================================
 ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
   {
@@ -66,7 +65,7 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    PrintFormat("AjipSnD: %s market-filled (rejection). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
                dir == 1 ? "BUY" : "SELL", ticket, lot, fillPrice, slPrice, tpPrice);
 
-   PendingOrder po;
+   EntryFillInfo po;
    ZeroMemory(po);
    po.ticket   = ticket;
    po.dir      = dir;
@@ -85,12 +84,12 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
 //==================================================================
 // ADD ENTRY to tracking
 //==================================================================
-// The PendingOrder is passed through so the position inherits what the order
-// already knew — its structural stop, the risk it was sized for, and the LTF
-// zone that triggered it. Without that hand-off the link between a trade and
-// its originating zone is lost at the moment of the fill, and the per-trade CSV
-// has nothing to join back to the zone log on.
-void AddEntry(ulong ticket, int dir, double entryPrice, const PendingOrder &po)
+// The EntryFillInfo is passed through so the position inherits what the
+// order already knew — its structural stop, the risk it was sized for, and
+// the LTF zone that triggered it. Without that hand-off the link between a
+// trade and its originating zone is lost at the moment of the fill, and the
+// per-trade CSV has nothing to join back to the zone log on.
+void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
   {
    int sz = ArraySize(g_entries);
    ArrayResize(g_entries, sz + 1);
@@ -168,9 +167,10 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 
 //---- Lot sized so that hitting slDistance costs about InpRiskPerTrade ----
 // Rounds DOWN to the broker's volume step: rounding up would spend more than
-// the risk budget, and the budget is the whole point. Returns InpFixedLot
-// unchanged whenever risk sizing cannot apply (InpRiskPerTrade=0 or no stop
-// distance to size against).
+// the risk budget, and the budget is the whole point. Returns 0.0 — meaning
+// "do not trade this setup" — whenever risk cannot actually be sized
+// (InpRiskPerTrade=0, no stop distance, or broker tick data unavailable).
+// Callers must treat 0.0 as a skip, not as a lot.
 //
 // The broker's minimum lot puts a hard floor under achievable risk. When the
 // computed lot lands under it the position can only be opened by risking more
@@ -178,23 +178,18 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 // overshoot stays within tolerance, otherwise return 0 and let the caller skip
 // the entry. Either way the real figure comes back through actualRisk, so the
 // overshoot is logged rather than hidden.
-//
-// Returns 0.0 to mean "do not trade this setup" — distinct from the fallback
-// path above it, which returns InpFixedLot to mean "risk sizing does not apply
-// here". Callers must treat 0.0 as a skip, not as a lot.
 double LotForRisk(double slDistance, double &actualRisk)
   {
    actualRisk = 0.0;
-   double fallback = NormalizeDouble(InpFixedLot, 8);
 
-   if(InpRiskPerTrade <= 0 || slDistance <= 0) return(fallback);
+   if(InpRiskPerTrade <= 0 || slDistance <= 0) return(0.0);
 
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0) return(fallback);
+   if(tickValue <= 0 || tickSize <= 0) return(0.0);
 
    double lossPerLot = slDistance * (tickValue / tickSize);
-   if(lossPerLot <= 0) return(fallback);
+   if(lossPerLot <= 0) return(0.0);
 
    double lot = InpRiskPerTrade / lossPerLot;
    if(g_volStep > 0)
@@ -220,234 +215,6 @@ double LotForRisk(double slDistance, double &actualRisk)
    lot = NormalizeDouble(lot, 8);
    actualRisk = lot * lossPerLot;
    return(lot);
-  }
-
-//---- Place pending order at limit price ----
-// A non-zero slPrice attaches the structural stop from the outset so the
-// position is never unprotected, not even for the tick that fills it.
-//
-// Order matters here: the SL is clamped to the broker's stop level BEFORE the
-// lot is sized, because the clamp can widen the stop and the lot has to be
-// sized against the distance actually submitted, not the one first requested.
-ulong PlacePendingOrder(int dir, double price, datetime zoneTime,
-                        double slPrice, double tpPrice)
-  {
-   slPrice = ClampToStopsLevel(dir, price, slPrice, true);
-   tpPrice = ClampToStopsLevel(dir, price, tpPrice, false);
-
-   double slDistance = (slPrice > 0.0)
-                       ? ((dir == 1) ? (price - slPrice) : (slPrice - price))
-                       : 0.0;
-
-   double actualRisk = 0.0;
-   double lot = LotForRisk(slDistance, actualRisk);
-
-   // 0.0 is LotForRisk's skip signal — the risk cap already logged the reason,
-   // so returning quietly here avoids a second, misleading "outside broker
-   // range" line for a decision that was deliberate.
-   if(lot <= 0.0) return(0);
-
-   if(lot < g_volMin || lot > g_volMax)
-     {
-      PrintFormat("AjipSnD: Pending %s skip — lot %.2f outside broker range",
-                  dir == 1 ? "BUY LIMIT" : "SELL LIMIT", lot);
-      return(0);
-     }
-
-   if(actualRisk > 0 && InpRiskPerTrade > 0
-      && actualRisk > InpRiskPerTrade * 1.10)
-      PrintFormat("AjipSnD: risk overshoot — min lot %.2f on a %.1f pt stop risks %.2f, budget %.2f",
-                  lot, slDistance / g_point, actualRisk, InpRiskPerTrade);
-
-   string comment = StringFormat("AjipSnD %s", dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
-   bool ok;
-   if(dir == 1)
-      ok = trade.BuyLimit(lot, price, _Symbol, slPrice, tpPrice, ORDER_TIME_GTC, 0, comment);
-   else
-      ok = trade.SellLimit(lot, price, _Symbol, slPrice, tpPrice, ORDER_TIME_GTC, 0, comment);
-
-   if(!ok)
-     {
-      PrintFormat("AjipSnD: Pending order failed. retcode=%d", trade.ResultRetcode());
-      return(0);
-     }
-
-   ulong ticket = trade.ResultOrder();
-   PrintFormat("AjipSnD: %s placed. Ticket=%I64u, Lot=%.2f, Price=%.5f, SL=%.5f, TP=%.5f",
-               dir == 1 ? "BUY LIMIT" : "SELL LIMIT", ticket, lot, price, slPrice, tpPrice);
-
-   // Track pending order
-   int sz = ArraySize(g_pendingOrders);
-   ArrayResize(g_pendingOrders, sz + 1);
-   g_pendingOrders[sz].ticket   = ticket;
-   g_pendingOrders[sz].dir      = dir;
-   g_pendingOrders[sz].price    = price;
-   g_pendingOrders[sz].zoneTime = zoneTime;
-   g_pendingOrders[sz].slPrice  = slPrice;
-   g_pendingOrders[sz].tpPrice  = tpPrice;
-   g_pendingOrders[sz].lot      = lot;
-   g_pendingOrders[sz].riskUsd  = actualRisk;
-   g_pendingOrders[sz].atrLtf   = GetAtrValue(false);
-
-   return(ticket);
-  }
-
-//---- Cancel pending order for a specific zone (called when zone replaced) ----
-void CancelPendingForZone(bool isDemand, datetime zoneTime)
-  {
-   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
-     {
-      int expectedDir = isDemand ? 1 : -1;
-      if(g_pendingOrders[i].dir != expectedDir) continue;
-      if(g_pendingOrders[i].zoneTime != zoneTime) continue;
-
-      if(OrderSelect(g_pendingOrders[i].ticket))
-        {
-         if(trade.OrderDelete(g_pendingOrders[i].ticket))
-            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u (zone replaced)", g_pendingOrders[i].ticket);
-        }
-      ArrayRemove(g_pendingOrders, i, 1);
-     }
-  }
-
-//---- Cancel pending orders resting inside a price range (HTF invalidation) ----
-// CancelPendingForZone matches by the LTF zone's own confirm time — no help
-// here, since a pending order only carries the LTF zone's zoneTime, never a
-// reference to the HTF zone that hosted it. An HTF-caused invalidation has to
-// find its orders by price instead.
-//
-// Call this AFTER the stale zone is already removed from g_htfDemandZones/
-// g_htfSupplyZones: overlapping HTF zones can coexist (a newer zone only
-// replaces an older one when it is strictly deeper/higher, so a shallower
-// older zone can still overlap a newer one's range), so an order can still be
-// legitimately backed by a surviving zone even though it also falls inside
-// the one just invalidated. stillCovered re-checks the live arrays — after
-// the removal — so that case is left alone instead of cancelled by mistake.
-void CancelPendingInsideZone(bool isDemand, double zoneLow, double zoneHigh, string reason)
-  {
-   int expectedDir = isDemand ? 1 : -1;
-   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
-     {
-      if(g_pendingOrders[i].dir != expectedDir) continue;
-      if(g_pendingOrders[i].price < zoneLow || g_pendingOrders[i].price > zoneHigh) continue;
-
-      bool stillCovered = isDemand
-                          ? IsPriceInDemandZone(g_pendingOrders[i].price, g_htfDemandZones)
-                          : IsPriceInSupplyZone(g_pendingOrders[i].price, g_htfSupplyZones);
-      if(stillCovered) continue;
-
-      if(OrderSelect(g_pendingOrders[i].ticket))
-        {
-         if(trade.OrderDelete(g_pendingOrders[i].ticket))
-            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u (%s)", g_pendingOrders[i].ticket, reason);
-        }
-      ArrayRemove(g_pendingOrders, i, 1);
-     }
-  }
-
-//---- Cancel ALL pending orders (called on close-all) ----
-void CancelAllPendingOrders()
-  {
-   for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
-     {
-      if(OrderSelect(g_pendingOrders[i].ticket))
-        {
-         if(trade.OrderDelete(g_pendingOrders[i].ticket))
-            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u dir=%s (close-all)",
-                        g_pendingOrders[i].ticket,
-                        g_pendingOrders[i].dir == 1 ? "BUY LIMIT" : "SELL LIMIT");
-        }
-      ArrayRemove(g_pendingOrders, i, 1);
-     }
-  }
-
-//---- Per-tick check: remove pendings outside HTF zone, detect fills ----
-void CheckPendingOrders()
-  {
-   int n = ArraySize(g_pendingOrders);
-   if(n == 0) return;
-
-   MqlTick ticks[1];
-   double bid = 0, ask = 0;
-   if(CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, 1) == 1)
-     {
-      bid = ticks[0].bid;
-      ask = ticks[0].ask;
-     }
-   else if(SymbolInfoTick(_Symbol, ticks[0]))
-     {
-      bid = ticks[0].bid;
-      ask = ticks[0].ask;
-     }
-
-   for(int i = n - 1; i >= 0; i--)
-     {
-      // Check if order still exists
-      if(!OrderSelect(g_pendingOrders[i].ticket))
-        {
-         // Order gone — likely filled. Check for new position.
-         bool found = false;
-         int npos = PositionsTotal();
-         for(int j = 0; j < npos; j++)
-           {
-            ulong t = PositionGetTicket(j);
-            if(t == 0) continue;
-            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-
-            // Check if this position is already tracked
-            bool tracked = false;
-            for(int k = 0; k < ArraySize(g_entries); k++)
-              {
-               if(g_entries[k].ticket == t) { tracked = true; break; }
-              }
-            if(tracked) continue;
-
-            // New position — add to tracking
-            int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-            // Match direction with pending
-            if(dir != g_pendingOrders[i].dir) continue;
-
-            AddEntry(t, dir, PositionGetDouble(POSITION_PRICE_OPEN), g_pendingOrders[i]);
-            ExcursionMarkFilled(dir, g_pendingOrders[i].zoneTime);
-            PrintFormat("AjipSnD: Pending filled! Ticket=%I64u dir=%s fill=%.5f",
-                        t, dir == 1 ? "BUY" : "SELL",
-                        PositionGetDouble(POSITION_PRICE_OPEN));
-            found = true;
-            break;
-           }
-
-         if(!found && InpEnableLog)
-            PrintFormat("AjipSnD: Pending ticket=%I64u gone (cancelled/expired)", g_pendingOrders[i].ticket);
-
-         ArrayRemove(g_pendingOrders, i, 1);
-         continue;
-        }
-
-      // Order still pending — check if price is inside HTF zone
-      double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-      bool insideHtf = false;
-
-      if(g_pendingOrders[i].dir == 1)  // BUY LIMIT → need demand zone
-        {
-         insideHtf = IsPriceInDemandZone(orderPrice, g_htfDemandZones);
-        }
-      else  // SELL LIMIT → need supply zone
-        {
-         insideHtf = IsPriceInSupplyZone(orderPrice, g_htfSupplyZones);
-        }
-
-      if(!insideHtf)
-        {
-         if(trade.OrderDelete(g_pendingOrders[i].ticket))
-           {
-            PrintFormat("AjipSnD: Cancelled pending ticket=%I64u dir=%s — outside HTF zone (orderPrice=%.5f)",
-                        g_pendingOrders[i].ticket,
-                        g_pendingOrders[i].dir == 1 ? "BUY LIMIT" : "SELL LIMIT", orderPrice);
-           }
-         ArrayRemove(g_pendingOrders, i, 1);
-        }
-     }
   }
 
 //==================================================================
@@ -774,9 +541,9 @@ void CloseAllAndLogTrades(string reason)
    // ---- Snapshot live P&L BEFORE closing ----
    // Once PositionClose succeeds the position is gone and the deal may not
    // have settled into history yet, so the open position is the only reliable
-   // source for its profit. Index-aligned with g_entries; nothing between here
-   // and the logging loop below resizes that array (CancelAllPendingOrders
-   // touches g_pendingOrders, CloseAllPositions touches neither).
+   // source for its profit. Index-aligned with g_entries; CloseAllPositions
+   // below does not resize that array, so the indices stay valid through the
+   // logging loop.
    double net[];
    ArrayResize(net, n);
    for(int i = 0; i < n; i++)
@@ -787,7 +554,6 @@ void CloseAllAndLogTrades(string reason)
                 + PositionGetDouble(POSITION_SWAP);  // commission is on the deal, not the position
      }
 
-   CancelAllPendingOrders();
    CloseAllPositions();
 
    // ---- Log ONLY what actually closed ----
@@ -840,22 +606,6 @@ void CheckDailyMaxLossCloseAll()
       PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
       WriteHandoffSignal("DAILY_MAX_LOSS", total);
       CloseAllAndLogTrades("DAILY_MAX_LOSS");
-     }
-  }
-
-//==================================================================
-// CHECK SESSION CLOSE-ALL (gated by news blackout — profit-taking only)
-//==================================================================
-void CheckSessionCloseAll()
-  {
-   if(!g_sessionFilterEnabled) return;
-   if(InSession()) return;
-
-   double total = GetDailyPnL() + GetFloatingPnL();
-   if(total > 0)
-     {
-      PrintFormat("AjipSnD: SESSION END — profit=%.2f, closing all", total);
-      CloseAllAndLogTrades("SESSION_END");
      }
   }
 

@@ -47,17 +47,19 @@ struct SnDZone
    double   dispBodyAtr;      // confirming bar body / ATR (displacement)
    double   dispRangeAtr;     // confirming bar range / ATR
    bool     trackingActive;   // true while outcome stats are being collected
-   bool     entryPlaced;      // pending order was placed for this zone (LTF)
+   bool     entryPlaced;      // reserved — no writer since the rejection-only
+                               // rewrite; always false. Kept for CSV schema
+                               // stability.
    bool     touched;          // wick re-entered zone range after confirmation
    //--- LTF-only, snapshotted at the exact moment validation passes ---
    // Deliberately NOT derived from touched's final state: that reflects the
    // zone's whole tracking lifetime, which needs knowing the future to
    // compute and cannot be known in real time. See MarkLtfValidationContext().
    bool     touchedAtValidation;  // was 'touched' already true at that instant?
-   bool     htfContextValidated;  // was this LTF edge inside an ACTIVE,
-                                   // VALIDATED HTF zone at that instant? Same
-                                   // FindContainingZoneIdx check PlaceEntryForZone
-                                   // already gates real entries on.
+   bool     htfContextValidated;  // diagnostic only — was this LTF edge inside
+                                   // an ACTIVE, VALIDATED HTF zone at that
+                                   // instant? See MarkLtfValidationContext's
+                                   // RESULT block in AjipSnD_Zone.mqh.
    int      barsSinceConfirm; // closed bars since confirmation
    int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
    double   touchDepthPts;    // penetration depth of first touch (points)
@@ -85,12 +87,13 @@ struct EntryTracker
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
   };
 
-// Pending order tracking (BUY LIMIT / SELL LIMIT)
-struct PendingOrder
+// Fill info handed from an order-placing function to AddEntry() — what the
+// order already knew that the resulting position should inherit.
+struct EntryFillInfo
   {
    ulong    ticket;
-   int      dir;       // 1=BUY LIMIT, -1=SELL LIMIT
-   double   price;     // limit price
+   int      dir;       // 1=BUY, -1=SELL
+   double   price;     // fill price
    datetime zoneTime;  // LTF zone time that triggered this order
    double   slPrice;   // structural SL frozen at placement
    double   tpPrice;   // structural TP frozen at placement (0=none)
@@ -124,6 +127,11 @@ datetime       g_ltfLastBarTime    = 0;
 // LTF: always-on. HTF: gated by InpRequireZoneValidation.
 SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
 bool           g_ltfAwaitingValidation = false;
+// Wick re-entry into g_ltfPendingZone's own range since it started waiting,
+// tracked independently of g_zoneTracker (InpZoneQualityLog) so
+// MarkLtfValidationContext gets an accurate touchedAtValidation even when
+// quality tracking is off, or during the OnInit historical replay.
+bool           g_ltfPendingTouched = false;
 SnDZone        g_htfPendingZone;              // HTF zone awaiting follow-through validation
 bool           g_htfAwaitingValidation = false;
 
@@ -154,21 +162,15 @@ int            g_timezoneOffsetSeconds = 0;
 const int      HEARTBEAT_INTERVAL_SECONDS = 30;
 datetime       g_lastHeartbeatTime = 0;
 
-//---- Symbol info cache ----
-datetime       g_ltfZonePendingTime  = 0;  // last LTF zone time that placed a pending order
-
-// ---- Pending orders ----
-PendingOrder   g_pendingOrders[];
-
 // ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
 SnDZone        g_zoneTracker[];
 
-// ---- HTF-triggered entry (visual observation only, InpHtfTriggeredEntry) ----
+// ---- LTF validation history, searched backward on every HTF bias change ----
 // Every LTF zone that ever validates gets appended here and stays forever —
 // unlike g_ltfDemandZones/g_ltfSupplyZones, which are capped at InpMaxZones
-// and evict old entries, this is a plain history the HTF trigger searches
-// BACKWARD through, so an LTF zone must still be findable long after it
-// would have been evicted from the active array.
+// and evict old entries, this is a plain history SaveLtfZonesForHtfBias
+// searches BACKWARD through, so an LTF zone must still be findable long
+// after it would have been evicted from the active array.
 struct LtfValidatedZone
   {
    double   high;
@@ -183,12 +185,13 @@ struct LtfValidatedZone
   };
 LtfValidatedZone g_ltfValidatedHistory[];
 
-// ---- Rejection-entry mode (experimental, InpRejectionEntryMode) ----
+// ---- Rejection-entry mode — the EA's only entry mechanism ----
 // HTF here is a pure directional bias, not a price range to sit inside: an
 // HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
 // direction get saved. A saved zone waits for ITS OWN retest + rejection
 // (wick back in, closed back out, with real momentum) before anything is
-// traded — unlike every other trigger in this EA, which orders at validation.
+// traded — no zone is ever traded straight off its own validation. Unproven
+// — written directly to spec, not measured first.
 int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
 
 struct SavedLtfZone
@@ -286,41 +289,12 @@ bool HedgeBlocked(int dir)
    return(false);
   }
 
-//---- Max total lots reached per direction ----
-bool MaxTotalLotsReached(int dir)
-  {
-   if(InpMaxTotalLots <= 0)
-      return(false);
-   double total = 0;
-   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
-     {
-      if(g_entries[i].dir == dir)
-        {
-         if(!PositionSelectByTicket(g_entries[i].ticket))
-           {
-            // Stale entry — position closed outside tracking
-            ArrayRemove(g_entries, i, 1);
-            continue;
-           }
-         total += PositionGetDouble(POSITION_VOLUME);
-        }
-     }
-   return(total + InpFixedLot > InpMaxTotalLots);
-  }
-
-//---- Open positions + resting limit orders in a direction ----
-// Pendings are counted because the cap is about how many positions can come to
-// exist, and a resting limit is a position that has not happened yet. Counting
-// only what is already open would let several limits sit in the book at once
-// and fill together, quietly breaking a "one position per direction" rule.
+//---- Open positions in a direction ----
 int DirectionalExposureCount(int dir)
   {
    int n = 0;
    for(int i = 0; i < ArraySize(g_entries); i++)
       if(g_entries[i].dir == dir && PositionSelectByTicket(g_entries[i].ticket))
-         n++;
-   for(int i = 0; i < ArraySize(g_pendingOrders); i++)
-      if(g_pendingOrders[i].dir == dir && OrderSelect(g_pendingOrders[i].ticket))
          n++;
    return(n);
   }

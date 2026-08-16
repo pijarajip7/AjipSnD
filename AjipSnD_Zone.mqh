@@ -220,24 +220,19 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
      {
       if(newZone.low < zones[i].low)
         {
-         // New zone is LOWER → old zone deactivated, cancel its pending
+         // New zone is LOWER → old zone deactivated
          LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
-         CancelPendingForZone(true, zones[i].time);
          ArrayRemove(zones, i, 1);
          continue;
         }
       // HTF only: a zone already touched (retested) goes stale the moment a
       // fresh HTF demand zone confirms, regardless of whether the new zone is
       // "lower" by the check above — the market has produced new structure,
-      // so an order resting in the old zone is trading yesterday's setup.
+      // so the old zone is trading yesterday's setup.
       if(zones[i].isHtf && zones[i].touched)
         {
-         datetime zTime = zones[i].time;
-         double   zLow  = zones[i].low;
-         double   zHigh = zones[i].high;
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zTime);
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zones[i].time);
          ArrayRemove(zones, i, 1);
-         CancelPendingInsideZone(true, zLow, zHigh, "HTF demand touched, superseded by new zone");
         }
      }
   
@@ -261,21 +256,16 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
      {
       if(newZone.high > zones[i].high)
         {
-         // New zone is HIGHER → old zone deactivated, cancel its pending
+         // New zone is HIGHER → old zone deactivated
          LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
-         CancelPendingForZone(false, zones[i].time);
          ArrayRemove(zones, i, 1);
          continue;
         }
       // HTF only — see AddDemandZone's matching comment.
       if(zones[i].isHtf && zones[i].touched)
         {
-         datetime zTime = zones[i].time;
-         double   zLow  = zones[i].low;
-         double   zHigh = zones[i].high;
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zTime);
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zones[i].time);
          ArrayRemove(zones, i, 1);
-         CancelPendingInsideZone(false, zLow, zHigh, "HTF supply touched, superseded by new zone");
         }
      }
   
@@ -290,14 +280,11 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
      }
   }
 
-//---- Check if price is inside any TRADEABLE active demand zone ----
+//---- Index of the TRADEABLE zone containing price, or -1 ----
 // Zones failing the quality gate stay in the array — they keep taking part in
 // replacement, expiry and invalidation exactly as before, so zone lifecycle and
-// the CSV log are unchanged — but they are not offered as entry areas.
-//---- Index of the zone containing price, or -1 ----
-// Single source of truth for "is this price inside a tradeable zone". The
-// bool wrappers below delegate here so the containment rule cannot drift
-// between the entry check and the stop-loss anchor.
+// the CSV log are unchanged — but they are not offered here.
+// Used by MarkLtfValidationContext() for the htfContextValidated diagnostic.
 //
 // When several zones contain the price, the one whose FAR edge sits furthest
 // away wins. That only matters to callers wanting the zone itself: a
@@ -326,17 +313,6 @@ int FindContainingZoneIdx(double price, const SnDZone &zones[], bool isDemand)
         }
      }
    return(best);
-  }
-
-bool IsPriceInDemandZone(double price, const SnDZone &zones[])
-  {
-   return(FindContainingZoneIdx(price, zones, true) >= 0);
-  }
-
-//---- Check if price is inside any TRADEABLE active supply zone ----
-bool IsPriceInSupplyZone(double price, const SnDZone &zones[])
-  {
-   return(FindContainingZoneIdx(price, zones, false) >= 0);
   }
 
 //---- Count zones that passed the quality gate (panel display) ----
@@ -464,50 +440,11 @@ void DrawHtfZoneRect(string name, datetime time, double price1, double price2, c
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
   }
 
-//---- Draw all active HTF zones as rectangles ----
-void DrawAllHtfZones()
-  {
-   if(!InpDrawLines) return;
-
-   string prefix = g_objPrefix + "HTF_";
-   // Clean old objects  
-   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
-     {
-      string objName = ObjectName(0, i);
-      if(StringFind(objName, prefix) == 0)
-         ObjectDelete(0, objName);
-     }
-
-   // Validated demand zones (blue)
-   for(int i = 0; i < ArraySize(g_htfDemandZones); i++)
-      DrawHtfZoneRect(prefix + "Demand_" + IntegerToString(i),
-                      g_htfDemandZones[i].time, g_htfDemandZones[i].high,
-                      g_htfDemandZones[i].low, clrDodgerBlue);
-
-   // Validated supply zones (red)
-   for(int i = 0; i < ArraySize(g_htfSupplyZones); i++)
-      DrawHtfZoneRect(prefix + "Supply_" + IntegerToString(i),
-                      g_htfSupplyZones[i].time, g_htfSupplyZones[i].low,
-                      g_htfSupplyZones[i].high, clrOrangeRed);
-
-   // Pending (unvalidated) zone — distinct colour
-   if(InpRequireZoneValidation && g_htfAwaitingValidation)
-     {
-      if(g_htfPendingZone.isDemand)
-         DrawHtfZoneRect(prefix + "Demand_PENDING", g_htfPendingZone.time,
-                         g_htfPendingZone.high, g_htfPendingZone.low, clrSteelBlue);
-      else
-         DrawHtfZoneRect(prefix + "Supply_PENDING", g_htfPendingZone.time,
-                         g_htfPendingZone.low, g_htfPendingZone.high, clrIndianRed);
-     }
-  }
-
-//---- Draw saved (awaiting-rejection) LTF zones — InpRejectionEntryMode ----
-// Stands in for DrawAllHtfZones in this mode: HTF is a directional bias
-// here, not a price range, so the LTF zone is the thing actually worth
-// watching move to move. Zones already used (rejection resolved, order
-// attempted) are dropped rather than kept drawn — a used zone has nothing
-// left pending.
+//---- Draw saved (awaiting-rejection) LTF zones — the only chart objects ----
+// HTF is a directional bias, not a price range to draw — the LTF zone is the
+// thing actually worth watching move to move. Zones already used (rejection
+// resolved, order attempted) are dropped rather than kept drawn — a used
+// zone has nothing left pending.
 void DrawSavedLtfZones()
   {
    if(!InpDrawLines) return;
@@ -736,13 +673,12 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
 
 //---- LTF-only: snapshot touch/HTF-context state at the exact validation instant
 // Must be called right after MarkZoneValidated(false, ...) at the same call
-// site, while 'confirmed' is still the pending zone that just passed. Reuses
-// the identical containment check PlaceEntryForZone gates real orders on
-// (FindContainingZoneIdx against the ACTIVE, already-validated HTF arrays —
-// an HTF zone only enters g_htfDemandZones/g_htfSupplyZones once it has
-// itself validated), so this is what the live entry gate already knows,
-// recorded standalone instead of folded into entryPlaced alongside the gap
-// gate, entry gate and position cap.
+// site, while 'confirmed' is still the pending zone that just passed.
+// htfContextValidated is diagnostic-only now (see the RESULT block below) —
+// FindContainingZoneIdx against the ACTIVE, already-validated HTF arrays (an
+// HTF zone only enters g_htfDemandZones/g_htfSupplyZones once it has itself
+// validated), recorded standalone in the zone CSV rather than feeding any
+// live decision.
 //------------------------------------------------------------------
 // RESULT — period A, XAUUSD M1/M15, 21,372 validated LTF zones
 //------------------------------------------------------------------
@@ -773,18 +709,31 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
 // touched's whole-lifetime state instead of snapshotting at the decision
 // moment, not the existence of the fields.
 //------------------------------------------------------------------
-void MarkLtfValidationContext(const SnDZone &confirmed)
+// touchedAtValidation is passed in rather than read from g_zoneTracker: that
+// tracker only exists when InpZoneQualityLog is on (TrackZone is what
+// creates the slot FindTrackedZone below looks up), so deriving it from
+// there made the ENTIRE rejection-entry mechanism below — superseded-marking
+// and the g_ltfValidatedHistory append, not just the CSV diagnostic fields —
+// silently stop working the moment quality logging was switched off. The
+// caller (UpdateLTF) now tracks g_ltfPendingTouched independently for
+// exactly this reason, and the same value feeds the OnInit historical
+// replay, which never runs TrackZone at all.
+void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation)
   {
+   // CSV-diagnostic fields — safe no-op when this zone isn't being tracked
+   // (InpZoneQualityLog=false, or the OnInit replay). Everything below this
+   // block is core state and must run regardless.
    int i = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
-   if(i < 0) return;
+   if(i >= 0)
+     {
+      g_zoneTracker[i].touchedAtValidation = touchedAtValidation;
 
-   g_zoneTracker[i].touchedAtValidation = g_zoneTracker[i].touched;
-
-   double limitPrice = confirmed.isDemand ? confirmed.high : confirmed.low;
-   int htfIdx = confirmed.isDemand
-                ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
-                : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
-   g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
+      double limitPrice = confirmed.isDemand ? confirmed.high : confirmed.low;
+      int htfIdx = confirmed.isDemand
+                   ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
+                   : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
+      g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
+     }
 
    // A same-direction zone already touched by now is stale the moment this
    // new one validates — same TOUCHED_SUPERSEDED rule AddDemandZone/
@@ -796,10 +745,9 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
    //     record by design), so SaveLtfZonesForHtfBias's backward replay
    //     never offers up a zone the market has already moved past just
    //     because it is still sitting in the history.
-   //   - g_savedLtfZones: marked used (InpRejectionEntryMode only, empty
-   //     otherwise so this is a harmless no-op loop when that mode is off),
-   //     so a zone already on the chart/watch list is retired here rather
-   //     than waiting for the next HTF validation to notice.
+   //   - g_savedLtfZones: marked used, so a zone already on the chart/watch
+   //     list is retired here rather than waiting for the next HTF
+   //     validation to notice.
    for(int j = 0; j < ArraySize(g_ltfValidatedHistory); j++)
      {
       if(g_ltfValidatedHistory[j].isDemand != confirmed.isDemand) continue;
@@ -821,9 +769,9 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
         }
      }
 
-   // Every validated LTF zone joins the searchable history, regardless of
-   // InpHtfTriggeredEntry's state — cheap to always record, and the HTF
-   // trigger needs zones that validated before it existed to look back on.
+   // Every validated LTF zone joins the searchable history unconditionally —
+   // the HTF bias needs zones that validated before it existed to look back
+   // on (SaveLtfZonesForHtfBias's backward replay).
    int hsz = ArraySize(g_ltfValidatedHistory);
    ArrayResize(g_ltfValidatedHistory, hsz + 1);
    g_ltfValidatedHistory[hsz].high      = confirmed.high;
@@ -832,13 +780,13 @@ void MarkLtfValidationContext(const SnDZone &confirmed)
    g_ltfValidatedHistory[hsz].sweepLow  = confirmed.sweepLow;
    g_ltfValidatedHistory[hsz].time      = confirmed.time;
    g_ltfValidatedHistory[hsz].isDemand  = confirmed.isDemand;
-   g_ltfValidatedHistory[hsz].touchedAtValidation = g_zoneTracker[i].touchedAtValidation;
+   g_ltfValidatedHistory[hsz].touchedAtValidation = touchedAtValidation;
    // touchedEver starts from the SAME instant, not from false: the zone's
    // confirm-to-validate window already happened, so anything already true in
    // touchedAtValidation is already true here too — starting this at false
    // would let a zone that WAS touched before validation quietly count as
    // untouched the instant it joins the history.
-   g_ltfValidatedHistory[hsz].touchedEver = g_zoneTracker[i].touchedAtValidation;
+   g_ltfValidatedHistory[hsz].touchedEver = touchedAtValidation;
    g_ltfValidatedHistory[hsz].superseded  = false;
   }
 
@@ -864,13 +812,6 @@ void UpdateLtfValidatedHistoryTouch(const MqlRates &bar)
       if(touched)
          g_ltfValidatedHistory[i].touchedEver = true;
      }
-  }
-
-//---- Mark entry placed for a tracked LTF zone ----
-void MarkZoneEntryPlaced(bool isDemand, datetime zoneTime)
-  {
-   int i = FindTrackedZone(false, isDemand, zoneTime);
-   if(i >= 0) g_zoneTracker[i].entryPlaced = true;
   }
 
 //---- Flush unresolved trackers on EA deinit ----
