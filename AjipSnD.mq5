@@ -41,7 +41,7 @@ input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
 
 input group "Stop Loss & Take Profit"
-input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the LTF zone's own far edge, in LTF ATR
+input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection bar's own extreme, in LTF ATR
 // How strong the rejection bar's body must be, relative to LTF ATR, in the
 // favourable direction, to count as a real rejection rather than a wick that
 // grazed the zone and drifted back. No prior measurement for this specific
@@ -60,9 +60,9 @@ input double InpRiskPerTrade      = 50.0;  // Risk per trade ($; 0=disable sizin
 // unrelated bases, so the realised reward:risk floated wherever they happened
 // to land instead of being enforced. Default 2.0 is this project's own stated
 // floor (0=no TP).
-input double InpTakeProfitRR      = 2.0;   // TP = this many multiples of the actual SL distance (0=no TP)
+input double InpTakeProfitRR      = 4.0;   // TP = this many multiples of the actual SL distance (0=no TP)
 // Counts open positions in the direction.
-input int    InpMaxPositionsPerDir = 0;    // Max positions per direction (0=disabled)
+input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
 // The broker's minimum lot puts a hard floor under achievable risk: once the
 // stop is wide enough that the budget buys less than volMin, the position can
 // only be opened by risking MORE than the budget. This caps how much more.

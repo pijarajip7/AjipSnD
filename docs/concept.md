@@ -221,8 +221,12 @@ satu close-all di atas.
 
 ## Structural SL/TP, Risk-Based Lot
 
-- SL = LTF zone's own far edge (`zLow`/`zHigh` dari zona tersimpan) ±
-  `InpZoneSlBufferAtr` x LTF ATR
+- SL = titik ekstrem bar rejection itu sendiri (`bar.low` untuk demand,
+  `bar.high` untuk supply — bukan batas statis zona) ± `InpZoneSlBufferAtr`
+  x LTF ATR. Wick yang barusan di-reject itu bukti nyata di mana level
+  bertahan, dan bisa lebih dangkal atau lebih dalam dari `zLow`/`zHigh`
+  zona (`wickedIn` cuma butuh wick masuk ke range, tidak harus berhenti
+  tepat di edge)
 - TP = `InpTakeProfitRR` x jarak SL aktual dari harga fill (0 = tanpa TP)
 - Lot dihitung `LotForRisk()`: `InpRiskPerTrade` / (jarak SL x nilai per
   poin), dibulatkan KE BAWAH ke volume step broker

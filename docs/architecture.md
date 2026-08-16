@@ -48,11 +48,11 @@ no longer describes what a risk-sized trade actually opens.
 
 **Stop Loss & Take Profit**
 ```
-InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the LTF zone's own far edge, in LTF ATR
+InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the rejection bar's own extreme, in LTF ATR
 InpRejectionBodyAtr = 0.5   — Min rejection-bar body/ATR in the favourable direction
 InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
-InpTakeProfitRR     = 2.0   — TP = this many multiples of the actual SL distance (0=no TP)
-InpMaxPositionsPerDir = 0   — Max positions per direction (0=disabled)
+InpTakeProfitRR     = 4.0   — TP = this many multiples of the actual SL distance (0=no TP)
+InpMaxPositionsPerDir = 1   — Max positions per direction (0=disabled)
 InpMaxRiskOvershoot = 0     — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
 
@@ -271,12 +271,15 @@ Every entry is a market order (`OpenMarketWithStructuralStops`) with SL and
 TP attached at the same moment — there is no separate mode or toggle;
 this is simply how the EA sizes and stops every trade.
 
-**SL** = the saved LTF zone's own far edge (`zLow` for demand, `zHigh` for
-supply — the zone's swing, not any HTF reference) ± `InpZoneSlBufferAtr` x
-LTF ATR. By the time an order is placed only the LTF zone's own boundaries
-are available (the HTF side of the mechanism is a bias flag by then, not a
-zone reference), so there is no HTF-anchor alternative to choose between —
-an earlier build had that choice as a toggle; this build does not.
+**SL** = the rejection bar's own extreme (`bar.low` for demand, `bar.high`
+for supply — not the zone's static boundary, and not any HTF reference) ±
+`InpZoneSlBufferAtr` x LTF ATR. The wick that just got rejected is the
+actual proof the level held, and can sit shallower or deeper than the
+zone's own `zLow`/`zHigh` (`wickedIn` only requires the wick to enter the
+zone's range, not stop exactly at its edge). By the time an order is
+placed the HTF side of the mechanism is a bias flag, not a zone reference,
+so there is no HTF-anchor alternative to choose between either — an
+earlier build had that choice as a toggle; this build does not.
 
 **TP** = `InpTakeProfitRR` x the ACTUAL SL distance from the real fill
 price, not an independent target — so the realised reward:risk is enforced

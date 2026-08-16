@@ -8,9 +8,10 @@
 // bar that confirmed it just closed), so there is no edge left to wait at —
 // price is already moving off the zone.
 //
-// slPrice is the caller's zone-anchored stop; TP is derived here from the
-// SAME price this order actually transacts at, so the realised reward:risk
-// is enforced against the real fill rather than an independent figure.
+// slPrice is the caller's stop, anchored to the rejection bar's own extreme;
+// TP is derived here from the SAME price this order actually transacts at,
+// so the realised reward:risk is enforced against the real fill rather than
+// an independent figure.
 //==================================================================
 ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
   {

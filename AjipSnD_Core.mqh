@@ -142,9 +142,13 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
 
       int    dir    = isDemand ? 1 : -1;
       double buffer = InpZoneSlBufferAtr * atrLtf;
+      // Anchored to the rejection bar's own extreme, not the zone's static
+      // boundary — the wick that just got rejected is the actual proof the
+      // level held, and can sit shallower or deeper than the zone's edge
+      // (wickedIn only requires touching the range, not stopping at zLow/zHigh).
       double slPrice = isDemand
-                       ? NormalizeDouble(zLow  - buffer, g_digits)
-                       : NormalizeDouble(zHigh + buffer, g_digits);
+                       ? NormalizeDouble(bar.low  - buffer, g_digits)
+                       : NormalizeDouble(bar.high + buffer, g_digits);
 
       if(isReplay)
         {

@@ -4,7 +4,7 @@
 > a directional bias only — not a price range to sit inside. Matching LTF
 > zones are saved and watched; entry fires once that LTF zone's own retest
 > is REJECTED (wick back in, closed back out, real-bodied bar), as a market
-> order with structural SL/TP (zone-anchored stop, RR-derived target).
+> order with structural SL/TP (rejection-bar-anchored stop, RR-derived target).
 > Risk-based lot sizing. Exit via broker SL/TP or daily/final close-all.
 
 ---
@@ -27,7 +27,7 @@
 | Rejection watch | Matching LTF zones since the HTF bias's own origin bar are saved and watched, not traded immediately |
 | Rejection entry | Wick back into a saved zone, closed back out, body/ATR above threshold → market order |
 | Zone invalidation | Saved zones (and HTF structure) drop on a body CLOSE past the far edge (sweep-aware) — the same rule on both timeframes |
-| Structural SL/TP | SL anchored to the LTF zone's own swing + ATR buffer; TP a multiple of the actual SL distance |
+| Structural SL/TP | SL anchored to the rejection bar's own extreme + ATR buffer; TP a multiple of the actual SL distance |
 | Risk-based sizing | Lot derived from `InpRiskPerTrade` and the real stop distance, capped by `InpMaxRiskOvershoot` |
 | Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
 | Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
