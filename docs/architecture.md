@@ -1,67 +1,59 @@
 # AjipSnD — EA Architecture
 
-Files: `AjipSnD.mq5` (main) + 6 `.mqh` includes.
+Files: `AjipSnD.mq5` (main) + 8 `.mqh` includes (`Globals`, `Excursion`,
+`Drift`, `Zone`, `News`, `Trade`, `Entry`, `Core`).
 
 ## Input Parameters
 
 **Strategy**
 ```
-InpTimeframe       = PERIOD_M1    — LTF, entry timeframe
-InpHtfTimeframe    = PERIOD_M15   — HTF, retest zones timeframe
-InpCandlesInit     = 50           — Lookback bars for initial trend
+InpTimeframe       = PERIOD_M5    — LTF, entry timeframe
+InpHtfTimeframe    = PERIOD_H1    — HTF, bias timeframe
+InpCandlesInit     = 50           — Lookback bars for initial trend + OnInit replay window
 InpMaxZones        = 2            — Max active zones per type
-InpMinZoneGapPoints = 0           — Min gap to NEWEST opposite HTF zone for entry (0=disabled)
 InpRequireZoneValidation = true   — Require HTF zone follow-through before active (LTF always on)
-InpMaxZoneWidthAtr = 1.25         — Max zone width / ATR to allow entry (0=disabled)
-InpMinDispBodyAtr  = 1.00         — Min confirming-bar body / ATR to allow entry (0=disabled)
+InpMaxZoneWidthAtr = 0            — Max zone width / ATR to allow entry (0=disabled)
+InpMinDispBodyAtr  = 0            — Min confirming-bar body / ATR to allow entry (0=disabled)
 InpHtfMaFilter     = false        — HTF MA direction filter
 ```
 
-### Zone Quality Gate
+### Zone Quality Gate — diagnostic only, does not gate rejection-entry
 
-`ComputeZoneMetrics()` runs at every zone confirmation (live + init replay),
-independent of `InpZoneQualityLog`, and sets `zone.qualityPass`. Zones that
-fail stay in the active arrays — replacement, expiry, invalidation and CSV
-logging are untouched — but `IsPriceInDemandZone()` / `IsPriceInSupplyZone()`
-skip them, so they are never offered as entry areas. Panel shows
-`tradeable/total`.
-
-Both thresholds must pass together. Backtested on two separate 12-month
-XAUUSD periods (threshold fitted on the first, validated once on the second):
-neither does anything alone — width alone and displacement alone both leave
-the MFE/MAE ratio at baseline. Combined they lift median MFE from 1.45 to
-1.98 ATR with MAE unchanged, keeping ~13% of HTF zones.
+`ComputeZoneMetrics()` runs at every zone confirmation (live + OnInit
+replay), independent of `InpZoneQualityLog`, and sets `zone.qualityPass`.
+Historically this gated which zones were offered for entry (via
+`FindContainingZoneIdx`), but the rejection-entry mechanism does not consult
+it anywhere: `SaveLtfZonesForHtfBias` and `CheckRejectionRetests` both work
+directly off `g_ltfValidatedHistory[]` / `g_savedLtfZones[]`, neither of
+which carries a `qualityPass` field. Today `qualityPass` only feeds the
+panel's `tradeable/total` count, `FindContainingZoneIdx`'s
+`htfContextValidated` diagnostic column, and the zone CSV's
+`quality_pass` column — it no longer decides what gets traded.
 
 If ATR is unavailable the gate fails open and prints a warning, so a broken
 indicator handle cannot silently stop all trading.
 
 **Entry & Trade Sizing**
 ```
-InpFixedLot     = 0.02   — Fixed lot per entry / pending
-InpMaxTotalLots = 0.0    — Max volume per direction (0=disabled)
 InpAllowHedging = true   — Allow BUY & SELL simultaneously
-InpPosMaxLoss   = 0.0    — Max floating loss before TP→BE (0=disabled)
 InpDeviation    = 10     — Slippage (points)
 InpMagicNumber  = 99002  — Magic number
 ```
 
-**Structural Stop Loss** (experimental — see the section below)
-```
-InpStructuralSlMode   = false — Master switch (false=batch architecture, unchanged)
-InpZoneSlBufferAtr    = 0.5   — SL buffer beyond the HTF zone's far edge, in LTF ATR
-InpRiskPerTrade       = 15.0  — Risk per trade ($); lot derived from it (0=use InpFixedLot)
-InpTakeProfitAtr      = 1.0   — TP distance from entry, in LTF ATR (0=no TP)
-InpMaxPositionsPerDir = 0     — Max positions+pendings per direction (0=disabled)
-InpMaxRiskOvershoot   = 1.25  — Cap on actual/budgeted risk when min lot floors it (0=no cap)
-```
+There is no fixed-lot input — lot size is always risk-derived (see
+*Structural SL/TP & Risk Sizing* below), and there is no volume cap either;
+both existed in an earlier build and were removed because the volume cap's
+own check estimated the next trade's size from the fixed-lot input, which
+no longer describes what a risk-sized trade actually opens.
 
-**Diagnostics — excursion grid** (see the Excursion CSV section below)
+**Stop Loss & Take Profit**
 ```
-InpExcursionLog     = false — First-touch grid per entry opportunity (offline SL/TP surface)
-InpExcursionBars    = 240   — Horizon tracked after the limit is touched (M1 bars)
-InpExcursionArmBars = 60    — How long an untouched limit stays armed (M1 bars)
-InpStopEntryProbe   = false — Also observe stop-entry variants (5 records/zone, no orders)
-InpRejectEntryProbe = false — Also observe rejection-entry variants (5 more records/zone, no orders)
+InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the LTF zone's own far edge, in LTF ATR
+InpRejectionBodyAtr = 0.5   — Min rejection-bar body/ATR in the favourable direction
+InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
+InpTakeProfitRR     = 2.0   — TP = this many multiples of the actual SL distance (0=no TP)
+InpMaxPositionsPerDir = 0   — Max positions per direction (0=disabled)
+InpMaxRiskOvershoot = 0     — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
 
 **Risk Management — Final** (permanen, lintas hari)
@@ -73,37 +65,22 @@ InpStartingBalance   = 0.0  — Baseline (0=auto-capture)
 
 **Risk Management — Daily**
 ```
-InpDailyMaxProfit = 60.0   — Close all + block entries rest of day
-InpDailyMaxLoss   = 280.0  — Close all + block entries rest of day
-```
-
-**Risk Management — Batch**
-```
-InpBatchMaxProfitAtr    = 1.0   — Target as x HTF ATR (frozen at batch start) x current open volume (0=use fixed $)
-InpBatchMaxProfit       = 20.0  — Fixed $ batch target, used when InpBatchMaxProfitAtr=0
-InpBatchMaxLoss         = 0.0   — Close batch only (always $ — not ATR-scaled)
-InpBatchCooldownMinutes = 11    — Cooldown after batch flat
-```
-
-**Partial Close**
-```
-InpPartialCloseAtr     = 1.5   — Target as x HTF ATR frozen at entry (0=use fixed $)
-InpPartialCloseProfit  = 10.0  — Fixed $ threshold, used when InpPartialCloseAtr=0
-InpPartialClosePercent = 50.0  — % of volume to close
-```
-
-**Trailing Stop**
-```
-InpTrailStartPoints    = 0     — Min profit (points) from entry before trail
-InpTrailDistancePoints = 0     — SL distance (points) behind current price
+InpDailyMaxProfit = 0.0   — Close all + block entries rest of day
+InpDailyMaxLoss   = 0.0   — Close all + block entries rest of day
 ```
 
 **Session Filter**
 ```
-InpTimezoneOffset = 0.0   — UTC offset for daily/weekly/session boundaries
-InpSessionStart   = "02:00"  — Session start HH:MM local time
-InpSessionEnd     = "20:00"  — Session end
+InpTimezoneOffset = 7.0      — UTC offset for daily/weekly/session boundaries
+InpSessionStart   = "06:00"  — Session start HH:MM local time
+InpSessionEnd     = "00:00"  — Session end
 ```
+
+Session filter only gates NEW entries (`EntryGateBlocked` → `InSession()`).
+There is no session-end profit close-all — an earlier build force-closed
+open profitable positions when the session ended; that was removed, so
+positions now run purely to their own broker SL/TP or a daily/final
+close-all regardless of session.
 
 **News Filter**
 ```
@@ -121,8 +98,27 @@ InpPanelCorner = CORNER_LEFT_UPPER / InpPanelX = 20 / InpPanelY = 50
 
 **Diagnostics**
 ```
-InpEnableLog = true  — Toggle Print/PrintFormat output
+InpEnableLog      = true — Toggle Print/PrintFormat output
 InpZoneQualityLog = true — Log zone quality metrics to CSV for backtest analysis
+InpTradeLog       = true — Log per-trade CSV for backtest analysis
+```
+
+**Diagnostics — excursion grid (currently dormant, see the section below)**
+```
+InpExcursionLog     = false — First-touch grid per entry opportunity (offline SL/TP surface)
+InpExcursionBars    = 240   — Horizon tracked after the limit is touched (M1 bars)
+InpExcursionArmBars = 60    — How long an untouched limit stays armed (M1 bars)
+InpStopEntryProbe   = false — Also observe stop-entry variants (5 records/zone, no orders)
+InpRejectEntryProbe = false — Also observe rejection-entry variants (5 more records/zone, no orders)
+```
+
+**Diagnostics — forward drift**
+```
+InpDriftLog          = false — Log forward-drift probe (zone confirm vs random baseline)
+InpDriftBaselineProb = 0.03  — Per-bar draw probability for the random baseline
+InpDriftTrendProbe   = false — Also observe an MA-trend probe
+InpDriftTrendTf      = PERIOD_H1
+InpDriftTrendMaPeriod = 50
 ```
 
 **Multi-Account Orchestrator**
@@ -134,19 +130,50 @@ InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"
 
 ---
 
-## Init
+## Init — `ReplayInitialStructure()`
+
+Replaces the EA's earlier "seed the zone arrays from the last N bars"
+init with a real chronological replay, so the EA leaves OnInit with the
+same `g_htfBiasDir` / `g_savedLtfZones[]` continuous live operation would
+have accumulated, instead of an empty bias waiting for the first live HTF
+validation.
 
 ```
-1. Cache symbol info (digits, point, volume min/max/step)
-2. Configure CTrade (SetDeviationInPoints, SetTypeFillingBySymbol, SetExpertMagicNumber)
-3. Parse session start/end → g_sessionFilterEnabled
-4. Set g_timezoneOffsetSeconds = InpTimezoneOffset * 3600
-5. CaptureStartingBalance
-6. RebuildTrackedPositions — detect partialClosed via volume < InpFixedLot
-7. InitLTFStructure — replay bars, build initial LTF zones
-8. InitHTFStructure — replay bars, build initial HTF zones, InvalidateHtfZones per bar
-9. Initial DrawAllHtfZones
+1. CopyRates InpHtfTimeframe, start_pos=1 (skip the still-forming current
+   bar), InpCandlesInit bars → HTF trend via DetermineInitialTrend
+2. windowStart = oldest fetched HTF bar's time
+3. CopyRates InpTimeframe from windowStart to TimeCurrent() — a calendar
+   span, not a fixed bar count: a fixed InpCandlesInit LTF-bar count would
+   badly under-cover the HTF window whenever InpTimeframe is much finer
+   than InpHtfTimeframe (e.g. InpCandlesInit=50 gives ~50 HTF bars but only
+   50 LTF bars — a fraction of the same calendar span). Drop the newest LTF
+   bar if it hasn't closed yet.
+4. LTF trend via DetermineInitialTrend over the last InpCandlesInit bars
+   of that fetched LTF window (same short-recent-window convention as
+   before, just sourced from the larger fetch)
+5. Merge-walk both bar streams by CLOSE time (bar.time + PeriodSeconds(tf)),
+   calling UpdateHTF(bar, true) / UpdateLTF(bar, true) in true
+   chronological order
+6. Draw the saved-zone rectangles once, after the replay completes
 ```
+
+Interleaving by close time (not replaying LTF fully, then HTF, in two
+passes) is required for correctness: `SaveLtfZonesForHtfBias`'s backward
+search and `MarkLtfValidationContext`'s superseded-marking both depend on
+`g_ltfValidatedHistory` reflecting only what had already validated as of
+that same real-time moment. A two-pass replay would let an HTF bias see LTF
+zones that, chronologically, validated after it did — over-saving relative
+to what live processing would ever have produced.
+
+`isReplay=true` (see `UpdateLTF`/`UpdateHTF` below) never places a real
+order — `CheckRejectionRetests` still resolves every saved zone's fate
+(broken, rejected, or still open) against the historical bars that follow
+it, but skips `OpenMarketWithStructuralStops`: by the time OnInit runs,
+price has already moved on from wherever a historical rejection bar closed,
+so there is no legitimate fill left to send. It also skips every CSV/
+diagnostic write (`UpdateZoneTracking`, `TrackZone`+`ZoneCsvWrite`, the
+excursion/drift probes), so replaying the same historical window on every
+restart does not keep re-appending rows to the same CSVs.
 
 ---
 
@@ -156,547 +183,194 @@ InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"
 Per-tick (order matters):
 0. WriteHeartbeat (~30s throttle)
 1. UpdateMfeMae
-1b. CheckPendingOrders — delete if outside HTF zone, detect fills → AddEntry
-1c. CheckTrailingStop — per-tick, partialClosed positions only
-2. CheckPartialClose (gated by news)
-3. CheckFinalTargetCloseAll (gated) → return if hit
-3b. CheckFinalMaxLossCloseAll (never gated) → return if hit
-4. CheckBatchTargetCloseAll (gated) / CheckBatchMaxLossCloseAll (never)
-5. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
-6. CheckSessionCloseAll (gated)
-7. RecalculateAggregateSL
+1a. UpdateExcursions — diagnostic only, currently arms nothing (see Excursion CSV section)
+1a2. DriftArmTrend — trend probe, self-gated on its own timeframe's bar close
+2. CheckFinalTargetCloseAll (gated by news) → return if hit
+2b. CheckFinalMaxLossCloseAll (never gated) → return if hit
+3. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
 
 HTF update (separate new-bar gate):
   CopyRates 3 bars InpHtfTimeframe
-  if new closed bar:
-    InvalidateHtfZones(bar) — remove broken zones first
-    ProcessZoneBar(bar) — detect new zone
-    DrawAllHtfZones() — always, on every HTF bar close
+  if >= 2 bars: UpdateHTF(htfRates[1])
 
 LTF update (new closed bar gate):
   CopyRates 3 bars InpTimeframe
   if SAME bar as g_ltfLastBarTime → return
-  UpdateLTF() — process closed bar + place pending if zone confirmed
-  CheckInvalidPositions() — per LTF bar close, not per-tick
-  CheckEntryCleanup() — fold closed positions into batch accumulator
+  UpdateLTF(ltfRates[1])
+  CheckEntryCleanup() — positions closed outside close-all (broker SL/TP)
   DrawPanel (if enabled)
 ```
 
 ---
 
-## UpdateLTF (bar-close processing)
+## UpdateLTF(bar, isReplay=false)
 
 ```
-1. bar = rates[1] (latest closed bar)
-2. Follow-through validation (ALWAYS-ON):
-   - awaiting: demand → bar.close > pending.confirmLevel? supply → bar.close < pending.confirmLevel?
-   - passed → PlaceEntryForZone (inside HTF + ZoneGapBlocked + EntryGateBlocked → PlacePendingOrder)
-3. ProcessZoneBar(bar) → check if zone confirmed
-4. If zone CONFIRMED:
+1. Quality tracker per-bar stats (if InpZoneQualityLog && !isReplay)
+2. UpdateLtfValidatedHistoryTouch(bar) — keeps touchedEver current, always runs
+3. Diagnostic probes (excursion reject check, drift baseline/records) — skipped if isReplay
+4. If a zone is awaiting validation: track wick re-entry into its own range
+   (g_ltfPendingTouched) — independent of the CSV tracker, so it stays
+   accurate whether or not InpZoneQualityLog is on
+5. Follow-through validation (ALWAYS-ON):
+   - passed → MarkZoneValidated, MarkLtfValidationContext(zone, g_ltfPendingTouched)
+     (appends to g_ltfValidatedHistory[], runs superseded-marking — see
+     concept.md's Rejection-Entry Mechanism). Nothing trades here — an LTF
+     zone validating never earns an order on its own.
+6. ProcessZoneBar(bar) → check if zone confirmed
+7. If zone CONFIRMED:
    a. Opposite formed first → pending zone fails (discarded, no entry)
    b. confirmLevel = bar.high (demand) / bar.low (supply)
    c. AddDemandZone / AddSupplyZone (data-only)
-   d. Hold for follow-through validation (g_ltfPendingZone + g_ltfAwaitingValidation)
+   d. Hold for follow-through validation, reset g_ltfPendingTouched
+8. CheckRejectionRetests(bar, isReplay) — resolve every saved zone's fate
+   against this bar
+9. DrawSavedLtfZones() — skipped if isReplay (ReplayInitialStructure draws
+   once at the end instead)
 ```
 
 ---
 
-## UpdateHTF (bar-close processing)
+## UpdateHTF(bar, isReplay=false)
 
 ```
-1. bar = rates[1]
+1. Quality tracker per-bar stats BEFORE invalidation (if InpZoneQualityLog && !isReplay)
 2. InvalidateHtfZones(bar) — remove validated zones broken by this bar
 3. Follow-through validation (gated by InpRequireZoneValidation):
-   - awaiting + bar.close beyond confirmLevel → promote pending to active (AddDemandZone/AddSupplyZone)
+   - passed → AddDemandZone/AddSupplyZone, then UNCONDITIONALLY:
+     g_htfBiasDir = zone.isDemand ? 1 : -1
+     SaveLtfZonesForHtfBias(zone) — backward replay, see concept.md
 4. ProcessZoneBar(bar) → if zone confirmed:
    - InpRequireZoneValidation=true: opposite formed first → pending fails; hold new zone for validation
    - InpRequireZoneValidation=false: AddDemandZone/AddSupplyZone immediately
-5. DrawAllHtfZones() — always; pending zone drawn in distinct colour
+     (note: this path never sets g_htfAwaitingValidation, so step 3's bias/
+     save trigger never fires — a pre-existing quirk of running with
+     validation off, unrelated to isReplay)
+5. Nothing drawn — HTF is a directional bias, not a chart object
 ```
-
----
-
-## Pending Orders
-
-| Action | Trigger |
-|--------|---------|
-| Place | LTF zone VALIDATED (follow-through) + limit price inside HTF zone + gates pass |
-| Cancel | Zone replaced (new better zone of same type → CancelPendingForZone) |
-| Cancel | Pending price drifts outside HTF zone (CheckPendingOrders per-tick) |
-| Cancel | Close-all (daily/final/session → CancelAllPendingOrders; batch TIDAK cancel) |
-| Fill | OrderSelect fails → scan for new position → AddEntry to g_entries[] |
-
-Struct: `PendingOrder { ticket, dir, price, zoneTime }` in `g_pendingOrders[]` array.
-One-shot: `g_ltfZonePendingTime` prevents duplicate pendings per LTF zone.
 
 ---
 
 ## Zone Drawing
 
 ```
-HTF zones: OBJ_RECTANGLE, dotted, filled, background
-  Validated demand → clrDodgerBlue, Supply → clrOrangeRed (width 2)
-  Pending (unvalidated) → clrSteelBlue (demand) / clrIndianRed (supply)
-  Redrawn via DrawAllHtfZones() on EVERY HTF bar close
-  Zones extend from zone.time to TimeCurrent()
+LTF (saved, watched) zones: OBJ_RECTANGLE via DrawHtfZoneRect, dotted, filled, background
+  Demand → clrDodgerBlue, Supply → clrOrangeRed
+  Zones already used (broken/rejected) are dropped, not kept drawn
+  Redrawn on every LTF bar close (live) or once after replay (OnInit)
 
-LTF zones: data-only — no chart objects (arrows removed)
+HTF zones: never drawn. HTF is a directional bias, not a chart object —
+  see the Rejection-Entry Mechanism in concept.md.
 ```
 
 ---
 
-## Position Management
+## Structural SL/TP & Risk Sizing
 
-- No SL/TP at entry — pending orders SL=0, TP=0
-- Lot size: fixed (InpFixedLot)
-- Multi-position: no position count limit
-- Volume cap: InpMaxTotalLots per direction
-- Hedging: InpAllowHedging=false blocks entry while opposite side open
+Every entry is a market order (`OpenMarketWithStructuralStops`) with SL and
+TP attached at the same moment — there is no separate mode or toggle;
+this is simply how the EA sizes and stops every trade.
 
-### Partial Close + Breakeven
+**SL** = the saved LTF zone's own far edge (`zLow` for demand, `zHigh` for
+supply — the zone's swing, not any HTF reference) ± `InpZoneSlBufferAtr` x
+LTF ATR. By the time an order is placed only the LTF zone's own boundaries
+are available (the HTF side of the mechanism is a bias flag by then, not a
+zone reference), so there is no HTF-anchor alternative to choose between —
+an earlier build had that choice as a toggle; this build does not.
 
-Target scale: `PartialCloseThreshold()` returns
-`InpPartialCloseAtr x atrAtEntry x (tickValue/tickSize) x volume`, falling back
-to the fixed `InpPartialCloseProfit` when the ATR mode is off or no ATR reading
-is available. `atrAtEntry` is the HTF ATR frozen in `EntryTracker` at entry, so
-a volatility spike cannot move the target away from a running position.
-
-A fixed dollar target does not survive a regime change: on XAUUSD $10 was
-reached by 33% of filtered entries in a low-volatility year and 67% in a
-high-volatility one, while 1.5x ATR gave 57% and 61%. Since partial close is
-what arms SL→BE and the trailing stop, a target that rarely fires leaves most
-positions unmanaged.
-
-`CheckPartialClose` per-tick, gated by news:
-```
-if POSITION_PROFIT >= PartialCloseThreshold(...) AND not yet partial-closed:
-  1. Calculate closeVol = posVolume * InpPartialClosePercent / 100
-  2. PositionClosePartial(ticket, closeVol)
-  3. PositionModify(ticket, SL=entryPrice, TP=0) → BE
-  4. Mark partialClosed = true
-```
-
-### Trailing Stop
-
-`CheckTrailingStop` per-tick, only for `partialClosed = true` positions:
-```
-BUY: if bid - entry >= trailStart → newSl = bid - trailDist, only move up
-SELL: if entry - ask >= trailStart → newSl = ask + trailDist, only move down
-```
-Uses CopyTicks for real-time bid/ask (fallback to SymbolInfoTick).
-
-### Invalid Position Handler
-
-`CheckInvalidPositions` per LTF bar close (after UpdateLTF):
-```
-for each position:
-  skip if PnL >= 0 (never touch profitable)
-  skip if TP already at entry (one-shot)
-  skip if entryTime >= g_ltfLastBarTime (grace 1 bar)
-
-  Condition 1: entryPrice not in any active zone → entry premise broken
-  Condition 2: |PnL| > InpPosMaxLoss → loss too high
-
-  If invalid: PositionModify(ticket, curSl, entryPrice)
-```
-
-### Aggregate SL
-
-Pooled budget per direction, same SL price for all positions:
-```
-1. Single loop: totalVolume + weightedSum (entryPrice × volume)
-2. avgEntry = weightedSum / totalVolume
-3. slPoints = budget / (totalVolume × valuePerPointPerLot)
-4. commonSl = avgEntry ± slPoints × g_point
-5. Apply same commonSl to all positions in direction
-6. Skip if already within 0.5 point
-```
-
-### Batch Close-All vs Daily Close-All
-
-| | Batch | Daily |
-|---|---|---|
-| Total | g_batchRealizedPnl + floating | GetDailyPnL() + floating |
-| Target | BatchProfitThreshold() — ATR x volume, or fixed $ | InpDailyMaxProfit (always $) |
-| Effect | Close batch only | Close all + block entries rest of day |
-| After hit | New batch can start immediately | No entries until next day |
-
-`BatchProfitThreshold()` returns `InpBatchMaxProfitAtr x g_batchAtrAtStart x
-(tickValue/tickSize) x totalOpenVolume`, falling back to the fixed
-`InpBatchMaxProfit` when the ATR mode is off or no ATR/volume reading is
-available. `g_batchAtrAtStart` is the HTF ATR frozen at the batch's first
-entry (`AddEntry()`); `totalOpenVolume` is summed live from `g_entries[]` each
-check, so a batch running more size needs a proportionally bigger move to
-close. Scaling by volume matters because floating PnL scales with volume —
-without it, a 10-position batch and a 1-position batch would cap at the same
-dollar figure despite very different size.
-
-A backtest comparing the zone quality gate ON vs OFF across two 12-month
-XAUUSD periods found `BATCH_TARGET` realizing ~$20 on average in every run —
-regardless of volatility regime or entries filtered — because a fixed dollar
-cap always lands near itself the moment it's crossed. That flatness is what
-motivated the ATR scaling: it made it structurally impossible for a
-better-quality batch to bank a bigger win than a mediocre one.
-
-`InpBatchMaxLoss` is unaffected — still a plain dollar figure, not ATR-scaled.
-
-### Final Close-All
-
-Measured from g_startingBalance. Once hit, entry blocked permanently.
-
----
-
-## Batch CSV Report
-
-One row per batch flush. Columns: CloseTime, CloseReason, PositionCount,
-Wins, Losses, BreakEven, TotalRealizedPnL, SumMFE, SumMAE, FirstEntryTime,
-LastEntryTime. File: `AjipSnD_Batches_<symbol>_<login>.csv` in `Common\\Files`.
-
-Close reasons: `DAILY_TARGET`, `DAILY_MAX_LOSS`, `BATCH_TARGET`,
-`BATCH_MAX_LOSS`, `BATCH_FLAT`, `SESSION_END`, `FINAL_TARGET`, `FINAL_MAX_LOSS`.
-
-### A row means positions actually closed
-
-`CloseAllAndFlushBatch()` banks a position only after the close has removed
-it, and flushes only once the batch is flat. This matters because
-`PositionClose` can be rejected — market closed over a holiday, trade context
-busy — and every caller re-checks its trigger on the next tick.
-
-The function used to bank all open positions *before* calling
-`CloseAllPositions()` and flush regardless of the outcome. When a close was
-rejected the positions survived, but the row was written and the accumulator
-reset anyway; the next tick found the same trigger still true and repeated the
-whole sequence. One stalled close therefore produced hundreds of duplicate
-rows, recognisable by a `FirstEntryTime` of `1970.01.01 00:00:00` (the zeroed
-`g_batchFirstEntryTime`), a `PositionCount` that never decreases, and a
-`TotalRealizedPnL` that drifts slightly per row because it is re-read from
-still-open positions. Two 12-month XAUUSD runs contained 759 such rows across
-three holiday sessions, inflating counted positions to 2.5x the number of
-entries the zone log recorded — enough to reverse the sign of an A/B comparison
-if read at face value.
-
-Deferring the flush until the batch is flat keeps one row per batch when a
-close needs several attempts, rather than fragmenting it into one row per
-attempt (which would corrupt batch-level statistics just as badly). A deferred
-flush logs `close incomplete — N position(s) still open`. If the remaining
-positions disappear by another route first, `CheckEntryCleanup()` flushes the
-batch as `BATCH_FLAT`.
-
----
-
-## Zone Quality CSV (backtest analysis)
-
-`InpZoneQualityLog=true` (default). Live-confirmed zones (LTF + HTF) are tracked
-from confirmation to outcome. Two row types join via `tf,type,zone_time`:
-
-```
-CONFIRM   — written at zone confirmation; quality attributes measured at that moment
-OUTCOME   — written when fate is known; behavior stats accumulated since confirm
-```
-
-Outcomes: `VALIDATED`, `FAILED_OPPOSITE`, `INVALIDATED`, `REPLACED`, `EXPIRED`,
-`UNRESOLVED` (flushed on OnDeinit).
-
-Quality attributes (CONFIRM):
-```
-atr, width_atr, disp_body_atr, disp_range_atr  — displacement / width vs ATR
-base_bars        — bars candidate stayed alive before confirmation (1=impulsive)
-swept_low/high   — liquidity grab recorded on candidate
-trend_at_confirm — trend of this TF when zone confirmed. Carries NO information:
-                   a demand zone can only confirm out of a DOWN trend on its own
-                   timeframe and a supply zone only out of an UP trend, so this
-                   field is a restatement of `type`. Kept for log continuity.
-htf_trend        — HTF trend at confirmation. On an LTF zone this is the real
-                   cross-timeframe alignment attribute; on an HTF zone it is
-                   collinear with type, like trend_at_confirm.
-```
-
-Behavior stats (OUTCOME):
-```
-bars_since, bars_to_touch, touched, touch_depth_pts
-max_fav_pts, max_adv_pts, fav_after_touch_pts
-validated, entry_placed, quality_pass
-```
-
-File is written as `FILE_CSV|FILE_ANSI` with `,` and CP_UTF8 — `FILE_TXT`
-writes every field with no separator at all, which makes the log
-unparseable. Header is one argument per column so the field counts cannot
-drift apart.
-
-Tracker: `g_zoneTracker[]` (SnDZone copies with `isHtf` key). Stats updated per
-bar via `UpdateZoneTracking()` — HTF before invalidation so the breaking bar is
-captured. ATR via `iATR(14)` handles (LTF + HTF) created in OnInit.
-
-File: `AjipSnD_Zones_<symbol>_<login>.csv` in `Common\Files`.
-
-Purpose: collect data now; later analyze which attributes predict good outcomes,
-then turn winners into entry filters.
-
----
-
-## Structural SL Mode (experimental)
-
-A second risk architecture living beside the batch one in the same binary, so
-the Strategy Tester can A/B them without recompiling. `InpStructuralSlMode=false`
-skips every path it adds; the batch architecture is untouched.
-
-**Why it exists.** Measured over two 12-month XAUUSD periods, the batch
-architecture runs about 1 percentage point above the win rate it needs to break
-even (88–90% actual against an 88–94% requirement), and that win rate is
-manufactured by having no stop at all. Positions are opened naked —
-`BuyLimit(..., 0.0, 0.0, ...)` — and the only protection is a pooled dollar
-budget applied afterwards, which lets a loser run until it either recovers or
-consumes the whole daily allowance. Wins average $13–26; a bad day costs $227–280,
-so one bad day erases 9–20 wins while only 10–13 are available to pay for it.
-
-**The trade shape it replaces.** One position per zone, with a hard stop beyond
-the structure that justified the trade and a target measured from the entry.
-Win rate is expected to fall sharply — 83–84% of entries eventually reach 1.0
-LTF ATR if you wait indefinitely, and a stop stops the waiting. It has to be
-judged on expectancy, never on win rate.
-
-### The stop is anchored to the HTF zone, not the LTF zone
-
-The LTF zone is the trigger; the HTF zone is the thesis. Entry sits at the LTF
-zone's near edge, but the entry is only allowed when that price falls inside a
-live HTF zone, so either could anchor the stop. Measured on the entries that
-actually happened:
-
-| | median distance from entry | stop touched |
-|---|---|---|
-| LTF far edge | 1995 pts (1.21 LTF ATR) | 59% |
-| HTF far edge | 5765 pts (3.34 LTF ATR) | 17% |
-| median adverse excursion | 3293 pts | — |
-
-The third row settles it: the typical move against the trade is deeper than the
-LTF zone is wide, so an LTF-anchored stop sits inside ordinary noise. Price
-leaving the LTF zone means the timing was wrong; price leaving the HTF zone
-means the reason was.
-
-The cost is reward:risk. A stop 3x wider needs a 3x smaller multiple for the
-same target, which is why `InpTakeProfitAtr` is capped in practice around 1.0:
-at 2.0 LTF ATR only 61% of entries ever travel far enough, already short of the
-66% such a reward:risk needs to break even.
-
-`FindContainingZoneIdx()` is the single containment rule; `IsPriceInDemandZone`
-and `IsPriceInSupplyZone` are wrappers over it. Where several zones contain the
-price the furthest far edge wins — never a tighter stop than another equally
-valid zone would have justified.
+**TP** = `InpTakeProfitRR` x the ACTUAL SL distance from the real fill
+price, not an independent target — so the realised reward:risk is enforced
+against what the order actually transacted at (0 = no TP).
 
 ### Lot follows the stop
 
 `LotForRisk()` sizes so that hitting the stop costs about `InpRiskPerTrade`,
-rounding **down** to the volume step so the budget is a ceiling. Sizing happens
-after the stops-level clamp, since the clamp can widen the stop.
+rounding **down** to the volume step so the budget is a ceiling. Returns
+`0.0` — a skip, not a lot — whenever risk cannot actually be sized
+(`InpRiskPerTrade<=0`, no stop distance, or broker tick data unavailable).
+Sizing happens after the stops-level clamp, since the clamp can widen the
+stop.
 
-The broker's minimum lot puts a floor under achievable risk, and on XAUUSD that
-floor is high: 0.01 lots cost roughly a dollar per price unit of stop distance,
-and stop distances run 3.9–12.6 price units across the quartiles. A $5 budget is
-therefore unreachable on 64% of entries, with realised risk averaging $10.37 —
-risk sizing collapsing into fixed lots with extra steps. `InpRiskPerTrade`
-defaults to 15.0, where only 19% are floored and the realised average matches
-the target.
+The broker's minimum lot puts a floor under achievable risk, and on XAUUSD
+that floor is high: 0.01 lots cost roughly a dollar per price unit of stop
+distance, and stop distances run 3.9–12.6 price units across the quartiles.
+A $5 budget is therefore unreachable on 64% of entries, with realised risk
+averaging $10.37 — risk sizing collapsing into fixed lots with extra steps.
 
-Where the floor bites, the position can only be opened by risking **more** than
-the budget, and `InpMaxRiskOvershoot` decides how much more is tolerable. Run #4
-accepted the floor unconditionally, and the result was a risk cap that leaked:
-5.2% of trades exceeded the budget and the worst risked $38.26 against $15 —
-2.5x, on a 18.4-ATR stop. The worst single loss of the run, -$31.49, was not
-slippage; it was sized that way on purpose.
+Where the floor bites, the position can only be opened by risking **more**
+than the budget, and `InpMaxRiskOvershoot` decides how much more is
+tolerable:
 
-The cap is a multiple rather than a hard 1.00 because volume-step rounding puts
-many entries barely over the line. Measured against run #4:
-
-| `InpMaxRiskOvershoot` | entries dropped | worst risk left |
+| `InpMaxRiskOvershoot` | entries dropped | worst risk left (against a $15 budget) |
 |---|---|---|
 | 1.00 | 5.8% | $15.00 |
-| **1.25** (default) | **3.4%** | **$18.73** |
+| 1.25 | 3.4% | $18.73 |
 | 1.50 | 1.3% | $22.38 |
 | 0 (no cap) | 0% | $38.26 |
 
-Expectancy is unchanged at -0.065 R at every threshold, so the cap bounds the
-tail without touching the edge — and 0 restores the run #4 behaviour for an
-unbiased measurement pass, where discarding the widest-stop setups would skew
-the sample.
-
-Because risk is per-trade and `InpMaxPositionsPerDir` caps concurrency, total
-simultaneous risk is bounded by construction — 2 directions x
-`InpRiskPerTrade` x `InpMaxRiskOvershoot` — which is what makes the daily
-allowance redundant here rather than merely unused.
-
-### entry_placed means an order exists
-
-`PlaceEntryForZone()` returns whether an order was actually accepted, not
-whether a zone was worth trading. It used to return `true` before knowing:
-entries rejected by the broker's volume range or by a failed send were latched
-and still recorded as `entry_placed=1` in the zone CSV. Adding a risk cap would
-have widened that gap by roughly 60 phantom rows per run.
-
-The zone is still latched on a rejected entry — the same setup would be
-re-evaluated identically on the next tick, so retrying only floods the log — but
-the CSV column now tracks orders, not intentions. This corrects the column in
-batch mode too; trading behaviour there is unchanged, but `entry_placed` counts
-from run #4 and earlier are not directly comparable.
+Because risk is per-trade and `InpMaxPositionsPerDir` caps concurrency,
+total simultaneous risk is bounded by construction — 2 directions x
+`InpRiskPerTrade` x `InpMaxRiskOvershoot`.
 
 ### One position per direction
 
-`InpMaxPositionsPerDir` counts open positions **and resting limit orders**.
-Counting only what is open would let several limits sit in the book and fill
-together, so the rule would hold on average and fail exactly when several zones
-confirm in a row. It is separate from `InpMaxTotalLots`, which caps volume —
-and volume stops mapping to a position count once lot size varies.
+`InpMaxPositionsPerDir` counts open positions only (`DirectionalExposureCount`
+sums `g_entries[]`) — there is no resting-order count to add, since every
+entry fills immediately as a market order. An earlier build also counted
+resting limit orders and capped total volume separately
+(`InpMaxTotalLots`); both were removed once the entry mechanism stopped
+using limit orders.
 
-### What stands down
+### `entry_placed` in the zone CSV
 
-Structural mode gives each trade exactly two outcomes so the result can be
-stated in R. Everything else that writes SL or TP is disabled:
-
-| | why it would interfere |
-|---|---|
-| `CheckPartialClose` | splits P&L across two fills while `riskUsd` covers the whole position — and its breakeven step calls `PositionModify(ticket, entry, 0.0)`, zeroing the TP |
-| `CheckTrailingStop` | walks the stop away from the zone justifying it |
-| `CheckInvalidPositions` | overwrites the TP with a breakeven one; the structural stop already *is* the invalidation rule |
-| `CheckBatchTargetCloseAll` | the old architecture's primary exit, firing at an HTF-ATR-scaled threshold (~4.1x the LTF ATR the target uses) |
-| `RecalculateAggregateSL` | skips structural positions in **both** its loops — leaving their volume in the pooled total would compute the shared stop distance against size the budget does not govern |
-
-The batch target is gated in code rather than left to the preset: a preset that
-forgot it would still run, and would quietly measure something else.
-
-Portfolio-level closes (daily, session, final) are deliberately left alone —
-they are risk limits, not trade exits. When they do fire they truncate a trade,
-which is why `exit_reason` in the trade CSV matters: truncated trades can be
-segmented out of an R analysis instead of silently polluting it.
+The function that set this column (`MarkZoneEntryPlaced`, called from the
+old LIMIT-order entry path) was removed along with that path — nothing
+sets it anymore, so it reads `0` for every row now. The field stays in the
+CSV schema for column-count stability rather than being dropped.
 
 ---
 
-## Excursion CSV (first-touch grid)
+## Excursion CSV (first-touch grid) — currently dormant
 
 `InpExcursionLog=false` by default. One row per entry **opportunity**:
 `AjipSnD_Excursion_<symbol>_<login>.csv` in `Common\\Files`.
 
+**This diagnostic currently arms nothing.** It was built to observe the
+EA's old LIMIT-at-zone-edge entry (`ExcursionArm`, called from the
+now-removed `PlaceEntryForZone`/`CheckPendingOrders`) against STOP/REJECT
+inversions of the same fill. With the entry mechanism itself now built
+directly around a rejection concept (market order after a confirmed
+rejection, not a resting limit), there is no remaining call site that arms
+a record — `InpExcursionLog`, `InpStopEntryProbe` and `InpRejectEntryProbe`
+still exist as inputs and the tracker (`UpdateExcursions`,
+`ExcursionCsvWrite`, etc.) still compiles and runs every tick, but with
+nothing ever calling `ExcursionArm`, it iterates an always-empty array. Left
+in place rather than removed, since it is separately-built research tooling
+(see `analysis/README.md`) rather than part of the entry mechanism, and
+deleting it would need a deliberate decision about whether to rewire it
+into the new mechanism first.
+
 ### Why stamps, not maxima
 
-MFE/MAE prove a level was reached but not *when*, so they cannot say which of
-two levels came first — exactly what a stop-and-target pair asks. Run #4 hit
-that wall: at a symmetric 2.0 ATR bracket the true win rate was bounded only to
-[32%, 61%], with breakeven at 50%. The data could not decide.
+MFE/MAE prove a level was reached but not *when*, so they cannot say which
+of two levels came first — exactly what a stop-and-target pair asks.
+Recording the first-touch **time** of each level removes the ambiguity: for
+any (SL, TP) pair on the grid the outcome is whichever stamp is smaller, so
+a single run yields the entire expectancy surface — including targets the
+EA never traded.
 
-Recording the first-touch **time** of each level removes the ambiguity. For any
-(SL, TP) pair on the grid the outcome is whichever stamp is smaller, so a single
-run yields the entire expectancy surface — including targets the EA never
-traded, which no amount of re-reading the trade log can recover. Verified
-against brute force on 4000 synthetic paths: 676,000 resolutions, zero
-mismatches.
-
-Grid, in LTF ATR at arm time — dense where the current target sits, sparse
-further out where a target is only plausible:
-
+Grid, in LTF ATR at arm time:
 ```
 0.25  0.50  0.75  1.00  1.25  1.50  2.00  2.50  3.00  4.00  5.00  6.00  8.00
 ```
 
 `f025`..`f800` are seconds from trigger to first favorable touch, `a025`..`a800`
-the adverse side, `-1` = never reached inside the horizon. Equal stamps on both
-sides mean the same second and are the one unresolvable case: bound them, do not
-guess.
+the adverse side, `-1` = never reached inside the horizon.
 
-### Decoupled on purpose
-
-The tracker arms on a validated zone **before** the entry gates and keeps
-recording after any real position closed. The position cap and the exit policy
-both change *which entries exist*, so a surface computed only over filled trades
-would quietly re-introduce the coupling the instrument exists to remove.
-`filled`, `blocked_gap`, `blocked_gate` and `blocked_cap` are recorded per row,
-so the actually-traded subset stays isolable offline.
-
-Trigger and excursion are read off the side of the book the matching order acts
-on — a BUY LIMIT fills on Ask, and its stop and target both trigger on Bid — so
-an offline resolution matches a real fill rather than approximating it.
-
-| input | default | meaning |
-|---|---|---|
-| `InpExcursionLog` | false | master switch; every entry point returns immediately when off |
-| `InpExcursionBars` | 240 | horizon tracked after the limit is touched (M1 bars = 4h) |
-| `InpExcursionArmBars` | 60 | how long an untouched limit stays armed |
-
-An untouched arm still writes its row with `triggered=0`. That is not waste: the
-arm-to-fill ratio is the direct measure of the passive-limit adverse selection
-run #4 identified, where 91.6% of resting orders filled and 97.4% filled at the
-proximal edge.
-
-`session_end_sec` records when `InSession()` first failed, so a session-close
-policy can be applied offline instead of being baked into the run.
-
-### Stop-entry probe
-
-`InpStopEntryProbe=false` by default. When on, every zone arms **five** records
-instead of one: the traded limit, plus stops at 0.00 / 0.25 / 0.50 / 1.00 ATR
-beyond the same edge. `entry_kind` and `offset_atr` separate them.
-
-The traded entry is a limit at the zone's proximal edge, so it fills while price
-is moving *into* the zone — selected for exactly the moves that keep going. Run
-#4/#5 measured that cost: 91.6% of resting orders filled, 97.4% at the proximal
-edge, and the entry ran ~4pp below a driftless walk at every one of 169
-geometries, a leak of 100–200 points that spread cannot explain.
-
-A stop at the **same level** inverts the selection: it fills only once price has
-come back out through the edge. Same zone, same price, opposite direction of
-fill — nothing else about the setup changes, which is what makes the comparison
-an isolation of the fill mechanism rather than of the setup.
-
-Two details carry the design:
-
-- **Priming.** A stop record is inert until price actually enters the zone. At
-  validation price sits *beyond* the zone, so an unprimed BUY STOP would fire on
-  the arming tick and measure a market order wearing a stop order's name. The
-  stop's own timeout runs from priming, not from arming: waiting for price to
-  revisit the zone is not evidence about the entry.
-- **One record per offset.** The excursion origin moves with the entry price,
-  and an origin shift cannot be reconstructed from another origin's stamps — so
-  each rung is observed separately rather than derived.
-
-The probe places no orders. `filled` stays exclusive to the limit record, since
-that is still the only entry the EA trades.
-
-### Rejection-entry probe
-
-`InpRejectEntryProbe=false` by default. When on, every zone arms **five more**
-records at the same edge and the same four offsets as the stop ladder —
-`entry_kind=REJECT` separates them from `STOP`.
-
-Run #7 (M1/M15 vs M5/H1 zone density) closed without resolving the entry-signal
-question, so the axis that was actually still open was never the timeframe —
-it was *when*, within a bar, an entry counts as confirmed. STOP answers that
-with the loosest possible rule: the first tick that crosses the threshold,
-mid-bar, with no requirement on how price got there. A wick that stabs through
-and snaps back before the bar even closes fires it exactly like a clean break
-would — which is not what a trader waiting for a rejection candle means by
-"rejected."
-
-REJECT asks the same threshold a stricter question: did the LTF bar that just
-**closed** settle beyond zoneEdge + offset? Priming is identical to STOP
-(price must enter the zone first) and the four offsets are the literal same
-array, so a STOP-vs-REJECT comparison at matching `offset_atr` isolates the
-confirmation rule and nothing else — same zone, same threshold, same window.
-
-The trigger cannot live in the tick loop that drives STOP, because "did this
-bar's close clear the level" is not answerable until the bar closes. It lives
-in `UpdateExcursionRejects()`, called once per closed LTF bar from `UpdateLTF()`
-— the same hook the EA's own zone-validation already uses, so REJECT reacts to
-price on the identical cadence the rest of the strategy does. A single strong
-bar can prime and confirm together: if that bar's own wick entered the zone
-and its close already clears the threshold, that *is* the pin-bar pattern a
-rejection trader is waiting for, and the probe records it on that bar.
-
-Verified against seven hand-built bar sequences, including the two that
-matter most: a bar whose high spikes past the threshold but closes back below
-it (STOP fires, REJECT correctly does not — the entire reason this exists),
-and a bar that primes without confirming followed by a later bar that does
-(REJECT fires on the later bar, at that bar's own close, not the one that
-merely touched the zone).
-
-Same exclusivity as the stop ladder: places no orders, `filled` stays on the
-limit record only.
+See `analysis/README.md` for the scripts that read this CSV and the
+historical run findings (runs #4–#8) that motivated its design — those
+findings describe the LIMIT-order entry this instrument was built to
+observe, which is no longer how the EA trades.
 
 ---
 
@@ -712,34 +386,28 @@ sl_dist_pts, sl_dist_atr, lot, risk_usd, exit_reason, pnl_usd, pnl_r,
 mfe_usd, mae_usd, mfe_r, mae_r, atr_ltf, atr_htf, structural, ltf_zone_time
 ```
 
-The batch CSV cannot serve this purpose. Its `CloseReason` explains why a
-*batch* was flushed, so a stop-out and a target hit both arrive as `BATCH_FLAT`
-— the EA only notices the position is gone. And its dollar P&L stops being
-comparable across trades once lot size varies with stop distance.
+- **`pnl_r`** — P&L over the risk the trade was sized for. The only thing
+  that makes trades with different lot sizes comparable.
+- **`structural`** — whether the position carried a stop at fill (`slPrice
+  > 0.0`). Kept from an earlier build that had a non-structural path too;
+  every current entry sets it, so the column is always `1` now.
+- **`ltf_zone_time`** — the join key back to the zone CSV, connecting a
+  trade's outcome to the characteristics of the zone that produced it.
+  Threaded from `EntryFillInfo` (the fill-info struct `OpenMarketWithStructuralStops`
+  passes to `AddEntry`) into `EntryTracker` at the fill.
 
-Two columns carry most of the value:
-
-- **`pnl_r`** — P&L over the risk the trade was sized for. The only thing that
-  makes trades with different lot sizes comparable. It is 0 in batch mode,
-  where no per-trade risk was ever defined.
-- **`ltf_zone_time`** — the join key back to the zone CSV, connecting a trade's
-  outcome to the characteristics of the zone that produced it. The two could
-  previously only be measured separately. This is why `zoneTime` is threaded
-  from `PendingOrder` into `EntryTracker` at the fill.
-
-`exit_reason` comes from `DEAL_REASON` on the closing deal, so `SL` and `TP`
-reflect what the broker did rather than an inference. That lookup also sums
-profit + swap + **commission** across the position's deals and prefers that
-figure, since R should be net of costs. On the close-all path the deal may not
-have settled — the same history-timing gap the batch accounting works around —
-so the caller's value and close reason are used as fallbacks. In structural mode
-the dominant exits are broker-side and settle before they are read.
+`exit_reason` comes from `DEAL_REASON` on the closing deal, so `SL` and
+`TP` reflect what the broker did rather than an inference. That lookup also
+sums profit + swap + **commission** across the position's deals and prefers
+that figure, since `pnl_r` should be net of costs. On the close-all path
+the deal may not have settled yet, so the caller's snapshot value and close
+reason are used as fallbacks.
 
 ---
 
 ## Timezone Offset
 
-`InpTimezoneOffset` (default 0 = UTC) shifts all time-based calculations:
+`InpTimezoneOffset` (default 7.0) shifts all time-based calculations:
 - GetLocalDayStart(), GetDailyPnL, GetWeekPnL, GetMonthPnL, InSession
 - Example: offset `-4` (EST) → daily reset at 04:00 UTC
 
@@ -747,13 +415,16 @@ the dominant exits are broker-side and settle before they are read.
 
 ## Info Panel
 
-22-line dashboard via OBJ_LABEL on OBJ_RECTANGLE_LABEL background:
+20-line dashboard via OBJ_LABEL on OBJ_RECTANGLE_LABEL background:
 ```
 AjipSnD v1.0
-LTF Trend: UP (M1)       HTF Trend: DOWN (M15)
-Demands: 2   Supplies: 1   Entries: 3
+LTF Trend: UP (M5)       HTF Trend: DOWN (H1)
+Demands: 2/2   Supplies: 1/1   Entries: 3
 Today P/L: 123.45   Week P/L: 456.78   Month P/L: -12.34
-Final: active   Daily: TARGET   Batch: active
-Cooldown: clear   Session: OPEN   News: clear
+Final: active   Daily: TARGET
+Session: OPEN   News: clear
 Open MFE: 12.34   Open MAE: -5.67
 ```
+`Demands`/`Supplies` show `tradeable/total` — see the Zone Quality Gate
+note above on what `tradeable` still means now that it no longer gates
+entries.

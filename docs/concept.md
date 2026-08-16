@@ -8,14 +8,13 @@ berbeda dari AjipSMC dan AjipIDM.
 | Structure | SL/SH swings | Tidak ada — murni candle-based |
 | Detection | 2-stage pullback + simple structure | Raw candle (bear/bull) + body-break confirm |
 | Zones | idm zone (single level) | Supply/Demand zone (high-low range) |
-| HTF role | Equilibrium filter (discount/premium) | Retest zones |
-| Entry trigger | idm touch + no body break | BUY LIMIT at LTF demand.high / SELL LIMIT at LTF supply.low |
-| Lot | Fixed lot | Fixed lot |
-| SL/TP | Tidak ada di entry | Tidak ada di entry |
-| Zone invalidation | Tidak ada | HTF zones dihapus saat price break |
-| Pending orders | Tidak ada | BUY/SELL LIMIT |
-| Invalid positions | Tidak ada | TP→BE jika zone entry invalidated atau loss > InpPosMaxLoss |
-| Trailing stop | Tidak ada | Untuk posisi partial-closed |
+| HTF role | Equilibrium filter (discount/premium) | Directional bias saja — bukan price range untuk entry |
+| Entry trigger | idm touch + no body break | LTF zone (searah bias HTF) di-retest, wick masuk lalu REJECTED |
+| Order type | — | Market order (bukan pending limit) |
+| Lot | Fixed lot | Risk-based — diturunkan dari `InpRiskPerTrade` / jarak SL |
+| SL/TP | Tidak ada di entry | Structural — SL di swing LTF zone, TP = RR x jarak SL |
+| Zone invalidation | Tidak ada | HTF & saved LTF zone dihapus saat body close break boundary |
+| Init | Bar terakhir saja | Replay HTF+LTF kronologis — EA start dengan bias & watch-list nyata |
 
 ---
 
@@ -76,8 +75,10 @@ Scan bar-by-bar:
 ```
 InpMaxZones (default 2) — max zona aktif per tipe
 
-Demand zone baru:  if zone.low < any_existing_demand.low → old deactivated + cancel pending
-Supply zone baru:  if zone.high > any_existing_supply.high → old deactivated + cancel pending
+Demand zone baru:  if zone.low < any_existing_demand.low → old deactivated
+Supply zone baru:  if zone.high > any_existing_supply.high → old deactivated
+HTF only: zone yang sudah touched juga deactivated begitu zona baru searah confirm
+  (TOUCHED_SUPERSEDED — pasar sudah bikin struktur baru, zona lama basi)
 
 Max exceeded → oldest (index 0) deactivated
 ```
@@ -96,8 +97,11 @@ Sweep hanya memperlebar batas zone, **tidak** mengubah trigger invalidasi:
 Sweep tracking: ProcessZoneBar track **kedua arah** sweep untuk **kedua jenis** zone.
 Demand invalidation pakai sweepLow (support side), supply pakai sweepHigh (resistance side).
 
-InvalidateHtfZones juga dipanggil di InitHTFStructure replay loop — zone yang
-break di tengah replay langsung dihapus.
+Aturan yang sama persis (body-close-break, sweep-aware) dipakai untuk saved LTF
+zone di watch-list rejection — lihat [Rejection-Entry Mechanism](#rejection-entry-mechanism).
+
+`InvalidateHtfZones` juga jalan selama `ReplayInitialStructure` di OnInit — zona
+yang break di tengah replay langsung dihapus, sama seperti live.
 
 ---
 
@@ -115,49 +119,87 @@ Aturan:
 - Validasi harus selesai SEBELUM zona opposite terbentuk; kalau opposite duluan → zona gagal (discard, no entry).
 - HTF zona belum tervalidasi digambar beda warna (pending), belum jadi retest area aktif.
 
+Saat LTF zona VALIDATED, EA juga cek apakah wick sudah masuk ke range zona itu
+sejak dia jadi pending (`g_ltfPendingTouched`) — dipakai nanti sebagai
+`touchedAtValidation` di riwayat LTF, independen dari CSV tracker supaya tetap
+akurat walau `InpZoneQualityLog=false` atau saat replay OnInit.
+
 ---
 
-## Entry Rules
+## Rejection-Entry Mechanism
 
-Entry pakai **pending order** (BUY LIMIT / SELL LIMIT), bukan market order.
+Ini satu-satunya cara EA membuka posisi. HTF di sini **murni sinyal arah**,
+bukan area harga untuk ditunggu — LTF zone sendiri yang jadi pemicu entry.
 
-```
-BUY LIMIT:
-  - LTF demand zone confirmed + VALIDATED (follow-through close > barX.high)
-  - BUY LIMIT at confirmed.high inside ANY active HTF demand zone
-  - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(BUY, demand.high)
-  - One-shot per LTF zone (g_ltfZonePendingTime)
+### 1. HTF validasi → set bias, bukan zona
 
-SELL LIMIT:
-  - LTF supply zone confirmed + VALIDATED (follow-through close < barX.low)
-  - SELL LIMIT at confirmed.low inside ANY active HTF supply zone
-  - EntryGateBlocked + ZoneGapBlocked pass → PlacePendingOrder(SELL, supply.low)
-```
+Begitu zona HTF VALIDATED, `g_htfBiasDir` di-set (1=demand/bullish,
+-1=supply/bearish). HTF tidak pernah dicek secara geometris (harga di dalam
+zona HTF atau tidak) — dia cuma bilang arah mana yang layak diperhatikan.
 
-**Pending order lifecycle:**
-- Placed → per-tick CheckPendingOrders: hapus jika price keluar HTF zone
-- Filled → detect via OrderSelect fail + new position → AddEntry to g_entries[]
-- Cancelled → zone replaced (AddDemandZone/AddSupplyZone call CancelPendingForZone)
-- Cancelled → close-all daily/final/session: CancelAllPendingOrders; batch close-all TIDAK cancel pending
+### 2. Replay mundur cari kandidat LTF
+
+Begitu bias berubah, `SaveLtfZonesForHtfBias` replay MUNDUR lewat
+`g_ltfValidatedHistory[]` — arsip permanen semua zona LTF yang pernah
+VALIDATED — mencari yang:
+- Searah dengan bias baru
+- Waktunya `>= HTF zone.time` (origin bar HTF, bukan waktu HTF validasi —
+  supaya zona LTF yang validasi SEBELUM bias HTF terbentuk tetap ketemu,
+  bukan cuma yang validasi setelahnya)
+- Belum `superseded` (lihat poin 4)
+
+Yang cocok dan belum pernah disimpan → masuk `g_savedLtfZones[]`, status
+`touched=false, used=false`.
+
+### 3. Tunggu retest → REJECTED, baru entry
+
+Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
+(`CheckRejectionRetests`):
+
+1. **Structural break** — body CLOSE tembus far edge (atau sweep level kalau
+   ada) → zona invalid, `used=true`, tidak ada entry. Aturan sama persis
+   dengan invalidasi HTF.
+2. **Rejection** — SEMUA tiga syarat: wick masuk ke range zona, body bar/ATR
+   >= `InpRejectionBodyAtr` searah favorable, DAN close berakhir di luar
+   zona lagi → `used=true`, **market order** (`OpenMarketWithStructuralStops`).
+3. Sentuhan yang bukan break maupun rejection bersih → zona tetap aktif,
+   cuma dicatat `touched=true`, terus ditunggu. **Bukan one-shot** — zona
+   bisa disentuh berkali-kali sebelum akhirnya break atau reject.
+
+Order pakai market (bukan limit) karena begitu bar rejection sudah closed,
+harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
+ditunggu dengan limit order.
+
+### 4. Zona yang sudah touched, disupersede otomatis
+
+Kalau zona LTF searah yang lebih baru VALIDATED sementara zona lama sudah
+pernah tersentuh (`touchedEver`), zona lama ditandai `superseded` — pasar
+sudah bergerak, setup lama basi. Ini dicek di titik paling awal yang
+mungkin (tiap kali LTF zona validasi, bukan cuma pas HTF validasi
+berikutnya), dan berlaku dua arah:
+- `g_ltfValidatedHistory[]` — ditandai `superseded` (arsip permanen, tidak
+  dihapus), supaya replay mundur berikutnya tidak menawarkan zona ini lagi
+- `g_savedLtfZones[]` — kalau sudah `touched` (bukan cuma di history, tapi
+  di watch-list yang sedang aktif) → langsung `used=true`, dicoret dari
+  chart
 
 ---
 
 ## Multi-Timeframe Architecture
 
 ```
-HTF (InpHtfTimeframe, e.g., M15):
-  └─ Detect Supply & Demand zones from bar data
-  └─ Active zones = retest areas for pending placement + validation
-  └─ Zone confirmed → (optional) follow-through validation → active (gated by InpRequireZoneValidation)
-  └─ After zone confirmed → trend flips → detect next zone
+HTF (InpHtfTimeframe, e.g., H1):
+  └─ Detect Supply & Demand zones dari bar data
+  └─ Zone confirmed → (optional) follow-through validation → VALIDATED (gated InpRequireZoneValidation)
+  └─ VALIDATED → set g_htfBiasDir + SaveLtfZonesForHtfBias (replay mundur cari kandidat LTF)
   └─ Zone management: max InpMaxZones, lower demand / higher supply invalidates older
-  └─ Zone invalidation: close breaks zone boundary → remove from array + chart
-  └─ DrawAllHtfZones on every HTF bar close
+  └─ Zone invalidation: close breaks zone boundary → remove dari array (bookkeeping/CSV — tidak digambar)
 
-LTF (InpTimeframe, e.g., M1):
+LTF (InpTimeframe, e.g., M5):
   └─ Detect Supply & Demand zones independently
-  └─ When LTF zone confirmed + VALIDATED + limit price inside HTF zone → PLACE PENDING
-  └─ Per LTF bar close: CheckInvalidPositions, CheckEntryCleanup
+  └─ Zone confirmed + VALIDATED → masuk g_ltfValidatedHistory[] permanen (bukan trigger entry)
+  └─ Tiap bar closed: CheckRejectionRetests terhadap semua saved zone (break/reject/masih-nunggu)
+  └─ DrawSavedLtfZones — HANYA zona LTF yang digambar; HTF tidak pernah jadi objek chart
 ```
 
 ---
@@ -166,45 +208,27 @@ LTF (InpTimeframe, e.g., M1):
 
 | Mekanisme | Trigger | Gate |
 |-----------|---------|------|
-| Trailing stop | profit ≥ InpTrailStartPoints (points from entry) | Hanya partialClosed positions, per-tick |
-| Pending cancel | Price outside HTF zone | Per-tick |
-| Invalid pos → TP BE | Entry zone invalidated OR loss > InpPosMaxLoss | Per LTF bar, one-shot, grace 1 bar |
-| Partial close | POSITION_PROFIT ≥ InpPartialCloseProfit | Gated by news |
-| Batch target/loss | g_batchRealizedPnl + floating | Close batch, target gated |
+| Broker SL | Zone-anchored stop, attached saat entry | Selalu |
+| Broker TP | RR x jarak SL, attached saat entry (0=tanpa TP) | Selalu |
 | Daily target/loss | GetDailyPnL() + floating | Close all + block rest of day |
 | Final target/loss | Balance - baseline + floating | Close all + stop permanent |
-| Session close | Di luar jam + PnL > 0 | Gated by news |
-| Aggregate SL | Budget / totalVol / valuePerPoint → same SL price | Every tick |
+
+Tidak ada partial close, trailing stop, invalid-position handler, atau
+aggregate SL — posisi murni jalan sampai kena SL/TP broker atau kena salah
+satu close-all di atas.
 
 ---
 
-## Trailing Stop
+## Structural SL/TP, Risk-Based Lot
 
-Fixed-step, hanya untuk posisi yang sudah partial-closed ke BE:
-- `InpTrailStartPoints` — minimum profit dari entry sebelum trail aktif
-- `InpTrailDistancePoints` — jarak SL di belakang current price
-- SL hanya maju (BUY naik, SELL turun), tidak pernah mundur
-- Per-tick via `CheckTrailingStop()`
-
----
-
-## Invalid Position Handler
-
-Posisi yang entry premise-nya sudah tidak valid:
-1. Entry zone invalidated → `entryPrice` tidak ada di zona aktif manapun
-2. Floating loss > `InpPosMaxLoss`
-
-Action: TP diset ke entry price (BE). Tidak close — kasih kesempatan exit BE.
-One-shot: skip jika TP sudah di entry. Grace period: skip posisi di bar yang sama.
-Per LTF bar close (bukan per-tick), setelah UpdateLTF.
-
----
-
-## Fixed Lot, No SL/TP
-
-- Entry via pending LIMIT dengan lot = `InpFixedLot`, SL=0, TP=0
-- Tidak ada TP order sama sekali
-- SL bisa muncul dari: breakeven after partial close, trailing stop, atau aggregate SL
+- SL = LTF zone's own far edge (`zLow`/`zHigh` dari zona tersimpan) ±
+  `InpZoneSlBufferAtr` x LTF ATR
+- TP = `InpTakeProfitRR` x jarak SL aktual dari harga fill (0 = tanpa TP)
+- Lot dihitung `LotForRisk()`: `InpRiskPerTrade` / (jarak SL x nilai per
+  poin), dibulatkan KE BAWAH ke volume step broker
+- `InpMaxRiskOvershoot` membatasi seberapa jauh risiko boleh melebihi
+  budget kalau lot minimum broker sudah lebih besar dari yang seharusnya
+  (0 = terima overshoot berapapun)
 
 ---
 
@@ -229,12 +253,23 @@ File: `AjipSnD_Zones_<symbol>_<login>.csv` di `Common\Files`.
 
 ## Init
 
+`ReplayInitialStructure()` — replay HTF+LTF bersamaan, urut kronologis per
+waktu-close, bukan cuma isi array zona:
+
 ```
-1. Fetch InpCandlesInit bars (CopyRates)
-2. Find highest high dan lowest low
-3. Initial trend: highIdx < lowIdx → DOWNTREND, else → UPTREND
-4. Replay bars forward → build initial zones
-5. InvalidateHtfZones called on every bar during replay
-6. No entry/pending on historical bars
-7. RebuildTrackedPositions: detect partialClosed via volume < InpFixedLot
+1. Fetch InpCandlesInit bar HTF (skip bar yang belum closed)
+2. Trend awal HTF: DetermineInitialTrend atas bar-bar itu
+3. Fetch bar LTF SEPANJANG rentang kalender yang sama dengan window HTF
+   (bukan InpCandlesInit bar LTF — timeframe LTF/HTF bisa jauh beda skala,
+   fixed count akan under-cover window HTF)
+4. Trend awal LTF: dari InpCandlesInit bar TERAKHIR pada window LTF itu
+5. Merge kedua stream per waktu-close, replay bar-per-bar lewat UpdateHTF/
+   UpdateLTF yang SAMA dipakai live (isReplay=true)
+6. Setiap validasi HTF selama replay tetap men-trigger SaveLtfZonesForHtfBias
+   — EA keluar dari OnInit dengan bias & watch-list nyata, bukan kosong
+7. CheckRejectionRetests tetap resolve nasib tiap saved zone (break/reject)
+   terhadap bar historis, TAPI tidak pernah kirim order — harga sudah
+   bergerak jauh dari momen historis itu, tidak ada fill yang valid
+8. CSV/diagnostic write (zone quality tracker, excursion, drift) di-skip
+   selama replay — supaya CSV tidak dibanjiri data replay tiap kali restart
 ```

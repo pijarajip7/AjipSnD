@@ -1,10 +1,11 @@
 # AjipSnD — Supply & Demand Zone Trading EA
 
-> Multi-timeframe Supply & Demand strategy for MT5 EA. HTF identifies
-> retest zones (Supply/Demand), LTF triggers pending orders (BUY/SELL LIMIT)
-> at zone boundaries. Fixed lot, no SL/TP at entry — exit via partial close
-> (then SL to BE + trailing stop) + zone invalidation handler + batch/daily/
-> final close-all + aggregate SL safety net.
+> Multi-timeframe Supply & Demand strategy for MT5. HTF zone validation sets
+> a directional bias only — not a price range to sit inside. Matching LTF
+> zones are saved and watched; entry fires once that LTF zone's own retest
+> is REJECTED (wick back in, closed back out, real-bodied bar), as a market
+> order with structural SL/TP (zone-anchored stop, RR-derived target).
+> Risk-based lot sizing. Exit via broker SL/TP or daily/final close-all.
 
 ---
 
@@ -12,8 +13,8 @@
 
 | Dokumen | Isi |
 |---------|-----|
-| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, entry rules, zone invalidation, exit plan |
-| [docs/architecture.md](docs/architecture.md) | Input parameters, Init/OnTick flow, position management, CSV, panel |
+| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, bias + rejection-entry mechanism, zone invalidation, exit plan |
+| [docs/architecture.md](docs/architecture.md) | Input parameters, Init/OnTick flow, structural SL/TP, CSV, panel |
 
 ---
 
@@ -22,28 +23,28 @@
 | Fitur | Deskripsi |
 |-------|-----------|
 | SnD Detection | Raw candle bear/bull + body-break confirm, lowest-low / highest-high candidate |
-| Zone Invalidation | HTF zones dihapus saat price break boundary (sweep-aware) |
-| Pending Orders | BUY LIMIT at demand.high, SELL LIMIT at supply.low |
-| Invalid Position Handler | TP→BE jika entry zone invalidated atau floating loss > InpPosMaxLoss |
-| Trailing Stop | Fixed-step untuk posisi partial-closed, SL hanya maju |
-| Aggregate SL | Weighted average entry, satu level SL untuk semua posisi se-arah |
-| Partial Close | Once per position → SL ke BE, trailing stop aktif |
-| Batch/Daily/Final | Close-all dengan target/max loss, daily + final block entry |
-| Session + News | Session filter, news blackout (profit exits gated, max loss never) |
-| Panel | 22-line dashboard, HTF zone rectangles |
+| HTF = bias, not a zone | HTF validation sets a directional bias (demand/supply); never geometrically checked as a containment box |
+| Rejection watch | Matching LTF zones since the HTF bias's own origin bar are saved and watched, not traded immediately |
+| Rejection entry | Wick back into a saved zone, closed back out, body/ATR above threshold → market order |
+| Zone invalidation | Saved zones (and HTF structure) drop on a body CLOSE past the far edge (sweep-aware) — the same rule on both timeframes |
+| Structural SL/TP | SL anchored to the LTF zone's own swing + ATR buffer; TP a multiple of the actual SL distance |
+| Risk-based sizing | Lot derived from `InpRiskPerTrade` and the real stop distance, capped by `InpMaxRiskOvershoot` |
+| Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
+| Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
+| Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
 
 ---
 
 ## Panel Info
 
-22-line on-chart dashboard (Consolas 9, OBJ_RECTANGLE_LABEL background):
+20-line on-chart dashboard (Consolas 9, OBJ_RECTANGLE_LABEL background):
 
 | Section | Lines |
 |---------|-------|
 | Structure | Title, LTF/HTF trend + timeframe, Demands/Supplies/Entries count |
 | PnL | Today/Week/Month PnL (realized + floating), colored green/red |
-| Limits | Final/Daily/Batch limit status (TARGET/MAX LOSS/active/disabled) |
-| Gates | Batch cooldown, Session status, News blackout status |
+| Limits | Final/Daily limit status (TARGET/MAX LOSS/active/disabled) |
+| Session/News | Session status, news blackout status |
 | MFE/MAE | Open MFE/MAE summed across all tracked positions |
 
 ---
@@ -53,11 +54,13 @@
 | File | Deskripsi |
 |------|-----------|
 | `AjipSnD.mq5` | EA MQL5 main file — inputs, OnInit, OnTick, OnDeinit |
-| `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, PendingOrder), globals, helpers |
-| `AjipSnD_Zone.mqh` | SnD detection + zone management + invalidation + drawing |
-| `AjipSnD_Entry.mqh` | Entry gate (EntryGateBlocked, ZoneGapBlocked), RebuildTrackedPositions |
-| `AjipSnD_Trade.mqh` | Pending orders, trailing stop, invalid pos handler, partial close, close-all, aggregate SL, batch CSV, heartbeat, handoff |
+| `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, EntryFillInfo, LtfValidatedZone, SavedLtfZone), globals, helpers |
+| `AjipSnD_Zone.mqh` | SnD detection, zone lifecycle + invalidation, LTF validation history, drawing, zone-quality CSV |
+| `AjipSnD_Entry.mqh` | Entry gate (`EntryGateBlocked`), restart recovery (`RebuildTrackedPositions`) |
+| `AjipSnD_Trade.mqh` | Market-order entry (`OpenMarketWithStructuralStops`), risk sizing, close-all, per-trade CSV, heartbeat/handoff |
 | `AjipSnD_News.mqh` | News blackout filter |
-| `AjipSnD_Core.mqh` | InitStructure, UpdateLTF/HTF, DrawPanel |
+| `AjipSnD_Excursion.mqh` | First-touch grid diagnostic (currently dormant — see docs/architecture.md) |
+| `AjipSnD_Drift.mqh` | Forward-drift probe diagnostic — does zone confirmation predict anything? |
+| `AjipSnD_Core.mqh` | `ReplayInitialStructure`, `UpdateLTF`/`UpdateHTF`, `SaveLtfZonesForHtfBias`, `CheckRejectionRetests`, `DrawPanel` |
 | `docs/concept.md` | Konsep & strategi |
 | `docs/architecture.md` | EA architecture & parameters |
