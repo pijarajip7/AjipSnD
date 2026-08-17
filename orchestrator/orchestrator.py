@@ -4,11 +4,15 @@ AjipSnD multi-account rotation orchestrator.
 
 MT5 has no API to switch a running EA's own account, so the rotation
 happens at the TERMINAL level instead: this script keeps ONE MT5 terminal
-logged into ONE account at a time. When that account's EA hits its daily
-target/max-loss, it writes a handoff signal file to Common\\Files
-(AjipSnD_Trade.mqh:WriteHandoffSignal). This script polls for that file,
+logged into ONE account at a time. The EA writes a handoff signal file to
+Common\\Files (AjipSnD_Trade.mqh:WriteHandoffSignal) after EVERY trade
+close (reason=TRADE_CLOSED), and also when its daily target/max-loss is
+hit (reason=DAILY_TARGET/DAILY_MAX_LOSS). This script polls for that file,
 waits until the account is flat, then calls mt5.login() to move to the
-next account.
+next account. Only the daily-target/max-loss reasons bench an account for
+the rest of the day (see DAILY_LIMIT_REASONS) — a plain TRADE_CLOSED
+handoff just advances to the next account in line, so the same account
+comes back around once the rotation cycles through the rest.
 
 Setup:
     pip install -r requirements.txt
@@ -35,6 +39,13 @@ HANDOFF_HISTORY_PATH = os.path.join(os.path.dirname(__file__), "handoff_history.
 DEFAULT_POLL_INTERVAL_SECONDS = 5
 DEFAULT_HANDOFF_FILENAME = "AjipSnD_Handoff.csv"
 FLAT_WAIT_WARN_INTERVAL_SECONDS = 30
+
+# Handoff reasons that mean "this account is actually done for the day" —
+# only these bench the account until tomorrow. TRADE_CLOSED (fired after
+# every individual trade, win or lose) just rotates to the next account in
+# line without benching, so the same account is eligible again as soon as
+# its turn comes back around, even later the same day.
+DAILY_LIMIT_REASONS = {"DAILY_TARGET", "DAILY_MAX_LOSS"}
 
 DEFAULT_HEARTBEAT_FILENAME = "AjipSnD_Heartbeat.csv"
 DEFAULT_HEARTBEAT_GRACE_SECONDS = 60
@@ -264,7 +275,7 @@ def handle_handoff(cfg, state, accounts, handoff_path):
 
     day = today_str()
     maxed_today = state["maxed_today"].setdefault(day, [])
-    if int(current_account["login"]) not in maxed_today:
+    if reason in DAILY_LIMIT_REASONS and int(current_account["login"]) not in maxed_today:
         maxed_today.append(int(current_account["login"]))
 
     next_idx = pick_next_account(accounts, set(maxed_today), state["current_index"])

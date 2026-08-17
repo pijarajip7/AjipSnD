@@ -653,6 +653,9 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
 
 //==================================================================
 // CHECK ENTRY CLEANUP — positions closed outside close-all (SL/TP hit).
+// Each individual close here also fires the rotation handoff signal, so
+// the orchestrator switches accounts after every trade, not just when a
+// daily target/max-loss is hit.
 //==================================================================
 void CheckEntryCleanup()
   {
@@ -663,6 +666,7 @@ void CheckEntryCleanup()
          // Broker-side exits (SL, TP) land here, and here the closing deal has
          // settled — so this path yields the real exit reason, not a guess.
          double realized = ComputeRealizedPnl(i);
+         WriteHandoffSignal("TRADE_CLOSED", realized);
          LogTradeCsv(i, realized, "CLOSED");
          RemoveEntry(i);
         }
@@ -833,10 +837,13 @@ void CheckFinalMaxLossCloseAll()
   }
 
 //==================================================================
-// WRITE HANDOFF SIGNAL — fired when daily target/max-loss is hit.
-// This account should sit out the rest of the day.
+// WRITE HANDOFF SIGNAL — fired on every trade close (reason=TRADE_CLOSED,
+// pnl=that trade's own P&L) so the orchestrator rotates accounts after
+// each trade, and also when daily target/max-loss is hit
+// (reason=DAILY_TARGET/DAILY_MAX_LOSS, pnl=daily total) — that account
+// should sit out the rest of the day.
 //==================================================================
-void WriteHandoffSignal(const string reason, double dailyTotal)
+void WriteHandoffSignal(const string reason, double pnl)
   {
    if(!InpHandoffEnabled) return;
 
@@ -848,13 +855,13 @@ void WriteHandoffSignal(const string reason, double dailyTotal)
      }
 
    string line = StringFormat("login=%d\nreason=%s\npnl=%.2f\nsymbol=%s\nmagic=%d\ntime=%s\n",
-                               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, dailyTotal, _Symbol, InpMagicNumber,
+                               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, pnl, _Symbol, InpMagicNumber,
                                TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
    FileWriteString(handle, line);
    FileClose(handle);
 
    if(InpEnableLog) PrintFormat("AjipSnD: Handoff signal written — login=%d reason=%s pnl=%.2f file=%s",
-               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, dailyTotal, InpHandoffFile);
+               (int)AccountInfoInteger(ACCOUNT_LOGIN), reason, pnl, InpHandoffFile);
   }
 
 //==================================================================
