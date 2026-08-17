@@ -64,6 +64,13 @@ void RebuildTrackedPositions()
       else
          g_entries[idx].riskUsd = 0.0;
 
+      // Whether this position already partial-closed in an earlier run is not
+      // recoverable either — same limitation as atrAtEntry/zoneTime above.
+      // Worst case a restarted position gets one more partial-close shot than
+      // it should; trailing simply won't arm until that fires.
+      g_entries[idx].partialClosed       = false;
+      g_entries[idx].partialCloseSkipped = false;
+
       recovered++;
      }
 
@@ -104,6 +111,15 @@ bool EntryGateBlocked(int dir)
      {
       if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — Hedging disabled, opposite side open for %s",
                                    dir == 1 ? "BUY" : "SELL");
+      return(true);
+     }
+   if(CooldownBlocked())
+     {
+      if(InpEnableLog)
+        {
+         double remainSec = (double)(InpCooldownMinutes * 60 - (TimeCurrent() - g_lastTradeCloseTime));
+         PrintFormat("AjipSnD: Entry blocked — Cooldown active, %.0fs remaining", remainSec);
+        }
       return(true);
      }
    if(!InSession())

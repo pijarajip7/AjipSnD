@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "2.1-rejectiononly"
+#define EA_BUILD "2.4-htfma20"
 
 #include <Trade\Trade.mqh>
 
@@ -27,18 +27,28 @@ input group "Strategy"
 input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M5;   // LTF — entry timeframe
 input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_H1;  // HTF — retest zones timeframe
 input int              InpCandlesInit    = 50;          // Lookback candles for initial trend
-input int              InpMaxZones       = 2;           // Max active zones per type (demand/supply)
+input int              InpMaxZones       = 10;           // Max active zones per type (demand/supply)
 input bool             InpRequireZoneValidation = true; // Require HTF zone follow-through before active (LTF always on)
 input double           InpMaxZoneWidthAtr = 0;      // Max HTF zone width / ATR to allow entry (0=disabled)
 input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
-input bool             InpHtfMaFilter    = false;       // Enable HTF MA direction filter (BUY only above MA, SELL only below)
-input int              InpHtfMaPeriod    = 50;          // HTF MA period (only if InpHtfMaFilter=true)
+// Backtested across five 2-year windows spanning 2017-2026 (XAUUSD+ M5):
+// with the filter on, period=20 beat filter-off on profit factor in all
+// five windows and matched or beat period=50/100/200 in four of five —
+// the one exception (2025-2026) trails period=50 by a hair. Also cuts max
+// drawdown well below filter-off in every window tested.
+input bool             InpHtfMaFilter    = true;        // Enable HTF MA direction filter (BUY only above MA, SELL only below)
+input int              InpHtfMaPeriod    = 20;           // HTF MA period (only if InpHtfMaFilter=true)
 input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
 
 input group "Entry & Trade Sizing"
-input bool   InpAllowHedging = true;   // Allow BUY & SELL open simultaneously (false=block opposite)
+input bool   InpAllowHedging = false;   // Allow BUY & SELL open simultaneously (false=block opposite)
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
+// Backtested 2025.08-2026.08 (XAUUSD+ M5): 15 and 30 both beat 0 on every
+// metric (return, profit factor, max DD, expectancy) with no tradeoff, and
+// are tied with each other — this system's trade cadence rarely produces a
+// re-entry inside 30 minutes anyway, so 15 alone captures the effect.
+input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 
 input group "Stop Loss & Take Profit"
 input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection bar's own extreme, in LTF ATR
@@ -73,6 +83,22 @@ input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=dis
 // while still capping the observed tail at $18.73. 0 = accept any overshoot,
 // which restores the run #4 behaviour for an unbiased measurement pass.
 input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
+
+input group "Partial Close & Trailing Stop"
+// Fires once per position: when floating profit reaches this multiple of the
+// ORIGINAL stop distance (same price-distance RR convention as InpTakeProfitRR,
+// so a value here below InpTakeProfitRR fires before the full TP would), close
+// part of the position and move the remainder's SL to breakeven.
+input bool   InpPartialCloseEnabled   = true;   // Enable partial close at RR target + SL->breakeven
+input double InpPartialCloseRR        = 2.0;    // RR multiple of the original stop distance that triggers it
+input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the RR target
+input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry)
+// Trailing only ever arms AFTER the partial close above has fired on that
+// position — the remainder is the "runner." Distance/step are in LTF ATR,
+// same convention as InpZoneSlBufferAtr.
+input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
+input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
+input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
@@ -272,6 +298,11 @@ void OnTick()
    // 1a2. Trend probe — arms on its own timeframe's bar close, so it is checked
    // per tick and self-gates. Observation only; places no orders.
    DriftArmTrend();
+
+   // 1b. Partial close (RR target -> SL to BE) + trailing stop on runners that
+   // already partial-closed. Must run before the target/loss close-all checks
+   // below so their PnL gates see the just-updated position state.
+   ManagePartialCloseAndTrailing();
 
    // 2. Final target check (blocked during news blackout)
    if(!InNewsBlackout())

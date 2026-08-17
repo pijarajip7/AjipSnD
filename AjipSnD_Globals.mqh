@@ -85,6 +85,8 @@ struct EntryTracker
    double   riskUsd;         // intended risk at entry — denominator for R-multiples
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
+   bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
+   bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
   };
 
 // Fill info handed from an order-placing function to AddEntry() — what the
@@ -161,6 +163,11 @@ int            g_timezoneOffsetSeconds = 0;
 // ---- Heartbeat throttle ----
 const int      HEARTBEAT_INTERVAL_SECONDS = 30;
 datetime       g_lastHeartbeatTime = 0;
+
+// ---- Cooldown gate — stamped in RemoveEntry() on every confirmed trade
+// close (broker SL/TP or a close-all), whichever direction. 0 = no trade
+// has closed yet this run.
+datetime       g_lastTradeCloseTime = 0;
 
 // ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
 SnDZone        g_zoneTracker[];
@@ -274,6 +281,15 @@ bool DailyLimitReached()
    if(InpDailyMaxProfit > 0 && total >= InpDailyMaxProfit)
       return(true);
    return(false);
+  }
+
+//---- Cooldown gate: any trade close arms it, blocking ALL new entries
+// (both directions) until InpCooldownMinutes elapses ----
+bool CooldownBlocked()
+  {
+   if(InpCooldownMinutes <= 0 || g_lastTradeCloseTime <= 0)
+      return(false);
+   return(TimeCurrent() - g_lastTradeCloseTime < InpCooldownMinutes * 60);
   }
 
 //---- Check hedge blocked ----

@@ -111,6 +111,8 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].riskUsd         = po.riskUsd;
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
    g_entries[sz].zoneTime        = po.zoneTime;
+   g_entries[sz].partialClosed       = false;
+   g_entries[sz].partialCloseSkipped = false;
   }
 
 //==================================================================
@@ -118,6 +120,10 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
 //==================================================================
 void RemoveEntry(int idx)
   {
+   // Both call sites (CheckEntryCleanup, CloseAllAndLogTrades) only reach
+   // here after confirming the position is actually gone, so this is the
+   // one place that always sees a trade end — arm the cooldown gate here.
+   g_lastTradeCloseTime = TimeCurrent();
    ArrayRemove(g_entries, idx, 1);
   }
 
@@ -321,6 +327,157 @@ void UpdateMfeMae()
       double profit = PositionGetDouble(POSITION_PROFIT);
       if(profit > g_entries[i].mfe) g_entries[i].mfe = profit;
       if(profit < g_entries[i].mae) g_entries[i].mae = profit;
+     }
+  }
+
+//==================================================================
+// PARTIAL CLOSE — once floating profit reaches InpPartialCloseRR times the
+// ORIGINAL stop distance (same price-distance RR convention OpenMarketWith-
+// StructuralStops uses for InpTakeProfitRR), close a slice and move the
+// remainder's SL to breakeven. One-shot: partialClosed gates it from firing
+// twice, partialCloseSkipped gates a slice that can never be brokered.
+//==================================================================
+
+//---- Volume to carve off, respecting the broker's step/minimum. 0.0 means
+// the requested percentage can't produce a valid split for this position —
+// either the slice itself, or what it would leave behind, rounds under
+// g_volMin — and the caller must treat that as "not workable," not "close
+// nothing."
+double PartialCloseVolume(double currentVol)
+  {
+   double vol = currentVol * (InpPartialClosePercent / 100.0);
+   if(g_volStep > 0)
+      vol = MathFloor(vol / g_volStep) * g_volStep;
+   vol = NormalizeDouble(vol, 8);
+   if(vol < g_volMin) return(0.0);
+
+   double remainder = NormalizeDouble(currentVol - vol, 8);
+   if(remainder < g_volMin) return(0.0);   // would leave no valid runner (or close everything)
+
+   return(vol);
+  }
+
+//---- Check one entry against its RR trigger; close the slice + SL->BE ----
+void CheckPartialClose(int idx)
+  {
+   if(g_entries[idx].partialClosed || g_entries[idx].partialCloseSkipped) return;
+   if(!g_entries[idx].hasStructuralSl || g_entries[idx].slPrice <= 0.0) return;
+
+   int    dir    = g_entries[idx].dir;
+   double slDist = MathAbs(g_entries[idx].entryPrice - g_entries[idx].slPrice);
+   if(slDist <= 0.0) return;
+
+   double trigger = (dir == 1)
+                    ? g_entries[idx].entryPrice + InpPartialCloseRR * slDist
+                    : g_entries[idx].entryPrice - InpPartialCloseRR * slDist;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double exitPrice = (dir == 1) ? tick.bid : tick.ask;   // side the position actually closes on
+   bool   reached   = (dir == 1) ? (exitPrice >= trigger) : (exitPrice <= trigger);
+   if(!reached) return;
+
+   double currentVol = PositionGetDouble(POSITION_VOLUME);
+   double closeVol    = PartialCloseVolume(currentVol);
+   if(closeVol <= 0.0)
+     {
+      g_entries[idx].partialCloseSkipped = true;
+      PrintFormat("AjipSnD: Partial close SKIPPED ticket=%I64u — %.0f%% of %.2f lot (step=%.2f min=%.2f) leaves no workable split",
+                  g_entries[idx].ticket, InpPartialClosePercent, currentVol, g_volStep, g_volMin);
+      return;
+     }
+
+   ulong ticket = g_entries[idx].ticket;
+   if(!trade.PositionClosePartial(ticket, closeVol))
+     {
+      PrintFormat("AjipSnD: Partial close FAILED ticket=%I64u vol=%.2f retcode=%d",
+                  ticket, closeVol, trade.ResultRetcode());
+      return;   // retry next tick
+     }
+
+   g_entries[idx].partialClosed = true;
+   PrintFormat("AjipSnD: Partial close ticket=%I64u — closed %.2f lot @ RR>=%.1f (price=%.5f)",
+               ticket, closeVol, InpPartialCloseRR, exitPrice);
+
+   if(!PositionSelectByTicket(ticket)) return;   // broker closed it outright despite the split — nothing left to move to BE
+
+   double bePrice = (dir == 1)
+                    ? g_entries[idx].entryPrice + InpBreakEvenOffsetPoints * g_point
+                    : g_entries[idx].entryPrice - InpBreakEvenOffsetPoints * g_point;
+   bePrice = NormalizeDouble(bePrice, g_digits);
+
+   double curTp = PositionGetDouble(POSITION_TP);
+   if(!trade.PositionModify(ticket, bePrice, curTp))
+      PrintFormat("AjipSnD: SL->BE FAILED ticket=%I64u be=%.5f retcode=%d", ticket, bePrice, trade.ResultRetcode());
+   else
+      PrintFormat("AjipSnD: SL->BE ticket=%I64u -> %.5f", ticket, bePrice);
+  }
+
+//==================================================================
+// TRAILING STOP — only for positions that already partial-closed (the
+// "runner" half of the position). Tightens toward price in LTF-ATR steps and
+// only ever tightens; InpTrailingStepAtr throttles how often it actually
+// touches the broker so a trending market doesn't call PositionModify on
+// every single tick for a fractional-point improvement.
+//==================================================================
+void UpdateTrailingStop(int idx)
+  {
+   ulong ticket = g_entries[idx].ticket;
+   if(!PositionSelectByTicket(ticket)) return;
+
+   int    dir      = g_entries[idx].dir;
+   double atrLtf    = GetAtrValue(false);
+   double trailDist = InpTrailingStopAtr * atrLtf;
+   if(trailDist <= 0.0) return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double price = (dir == 1) ? tick.bid : tick.ask;
+
+   double newSl = (dir == 1)
+                  ? NormalizeDouble(price - trailDist, g_digits)
+                  : NormalizeDouble(price + trailDist, g_digits);
+
+   double curSl = PositionGetDouble(POSITION_SL);
+   bool improves = (curSl <= 0.0) || ((dir == 1) ? (newSl > curSl) : (newSl < curSl));
+   if(!improves) return;
+
+   double step = InpTrailingStepAtr * atrLtf;
+   if(step > 0.0 && curSl > 0.0 && MathAbs(newSl - curSl) < step) return;   // too small a move yet
+
+   long   stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist     = stopsLevel * g_point;
+   double distFromPx  = (dir == 1) ? (price - newSl) : (newSl - price);
+   if(stopsLevel > 0 && distFromPx < minDist) return;   // too close to price — wait for it to move further
+
+   double curTp = PositionGetDouble(POSITION_TP);
+   if(!trade.PositionModify(ticket, newSl, curTp))
+     {
+      PrintFormat("AjipSnD: Trailing SL FAILED ticket=%I64u newSl=%.5f retcode=%d", ticket, newSl, trade.ResultRetcode());
+      return;
+     }
+   PrintFormat("AjipSnD: Trailing SL ticket=%I64u %.5f -> %.5f", ticket, curSl, newSl);
+  }
+
+//==================================================================
+// DISPATCH — one pass over open entries: partial-close check, then trailing
+// for whichever of them already partial-closed. Called every tick, same as
+// UpdateMfeMae, since the RR trigger is a live price level, not a bar-close
+// event.
+//==================================================================
+void ManagePartialCloseAndTrailing()
+  {
+   if(!InpPartialCloseEnabled && !InpTrailingStopEnabled) return;
+
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+     {
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+
+      if(InpPartialCloseEnabled)
+         CheckPartialClose(i);
+
+      if(InpTrailingStopEnabled && g_entries[i].partialClosed)
+         UpdateTrailingStop(i);
      }
   }
 
