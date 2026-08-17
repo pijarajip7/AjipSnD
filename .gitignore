@@ -1,6 +1,12 @@
 # Dashboard auth (credentials)
 orchestrator/dashboard_auth.json
 
+# Orchestrator live state (credentials + runtime data, not project source)
+orchestrator/accounts.json
+orchestrator/state.json
+orchestrator/live_status.json
+orchestrator/handoff_history.csv
+
 # Python
 __pycache__/
 *.pyc
