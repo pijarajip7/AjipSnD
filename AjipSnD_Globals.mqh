@@ -85,6 +85,7 @@ struct EntryTracker
    double   riskUsd;         // intended risk at entry — denominator for R-multiples
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
+   string   triggerReason;      // which rejection criterion fired: criteria1/engulfing/pinbar/star ("unknown" if recovered across a restart)
    bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
    bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
   };
@@ -102,6 +103,22 @@ struct EntryFillInfo
    double   lot;       // volume actually submitted
    double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
    double   atrLtf;    // LTF ATR at placement — carried through to the position
+   string   triggerReason; // which rejection criterion fired
+  };
+
+// Pending-order mode only (see AjipSnD_PendingEntry.mqh) — one entry per
+// resting limit order, from placement until it either triggers (folds into
+// EntryTracker via AddEntry, same as any other fill) or expires/is cancelled.
+struct PendingOrderTracker
+  {
+   ulong    ticket;
+   int      dir;              // 1=BUY, -1=SELL
+   double   riskUsd;           // this order's split of InpPendingOrderTotalRisk
+   double   lot;
+   double   slPrice;
+   double   tpPrice;
+   datetime placedHtfBarTime;  // closed HTF bar time at placement — expiry counts from here
+   datetime zoneTime;          // LTF zone time — same join-key convention as EntryTracker.zoneTime
   };
 
 //==================================================================
@@ -125,6 +142,15 @@ ENUM_TREND     g_ltfTrend          = TREND_DOWN;
 SnDZone        g_ltfCandidate;
 datetime       g_ltfLastBarTime    = 0;
 
+// ---- Rolling history for multi-bar rejection patterns (engulfing, star) ----
+// [0]=most recently closed LTF bar, [1]=one bar back, [2]=two bars back.
+// Shifted in UpdateLTF, which is the single choke point both live ticks and
+// the OnInit replay funnel through in true chronological order — a live
+// CopyRates(shift) call inside CheckRejectionRetests would be wrong during
+// replay, since "shift" there means relative to actual now, not to whatever
+// historical bar is being replayed.
+MqlRates       g_ltfRecentBars[3];
+
 // ---- Zone follow-through validation ----
 // LTF: always-on. HTF: gated by InpRequireZoneValidation.
 SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
@@ -140,6 +166,9 @@ bool           g_htfAwaitingValidation = false;
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
 
+// ---- Pending-order tracking (pending-order entry mode only) ----
+PendingOrderTracker g_pendingOrders[];
+
 // ---- Symbol info cache ----
 int            g_digits;
 double         g_point;
@@ -148,6 +177,16 @@ double         g_volMin, g_volMax, g_volStep;
 // ---- ATR handles for zone quality metrics ----
 int            g_atrLtfHandle = INVALID_HANDLE;
 int            g_atrHtfHandle = INVALID_HANDLE;
+
+// ---- HTF MA filter handle — created in OnInit; GetHtfMaValue() below and
+// DrawHtfMaLine() (AjipSnD_Zone.mqh) both just read it ----
+int            g_htfMaHandle = INVALID_HANDLE;
+
+// ---- DrawHtfMaLine's own state (chart-drawing only, no bearing on the
+// filter logic above) — the last point drawn, so each new HTF bar close
+// only needs one new trend-line segment appended, not a full redraw ----
+datetime       g_maLineLastTime  = 0;
+double         g_maLineLastValue = 0.0;
 
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
@@ -192,14 +231,23 @@ struct LtfValidatedZone
   };
 LtfValidatedZone g_ltfValidatedHistory[];
 
-// ---- Rejection-entry mode — the EA's only entry mechanism ----
+// ---- Entry mechanism — two mutually exclusive modes, see InpUsePendingOrderEntry ----
 // HTF here is a pure directional bias, not a price range to sit inside: an
 // HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
-// direction get saved. A saved zone waits for ITS OWN retest + rejection
-// (wick back in, closed back out, with real momentum) before anything is
-// traded — no zone is ever traded straight off its own validation. Unproven
-// — written directly to spec, not measured first.
+// direction get saved. Rejection mode (default): a saved zone waits for ITS
+// OWN retest + rejection (wick back in, closed back out, with real momentum)
+// before anything is traded — no zone is ever traded straight off its own
+// validation. Unproven — written directly to spec, not measured first.
+// Pending-order mode: a saved zone gets a resting limit order at its
+// midpoint immediately, no rejection wait — see AjipSnD_PendingEntry.mqh.
 int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
+
+// The HTF zone backing the CURRENT g_htfBiasDir, remembered past the moment
+// it validates — pending-order mode's SL sits beyond this zone's own far
+// edge (low if demand, high if supply), not the LTF zone's edge, so every
+// pending order under the same HTF bias shares the same stop level.
+double g_htfBiasZoneHigh = 0.0;
+double g_htfBiasZoneLow  = 0.0;
 
 struct SavedLtfZone
   {
@@ -213,6 +261,15 @@ struct SavedLtfZone
    bool     used;        // resolved (rejected+traded, structurally broken, or superseded) — stop checking
   };
 SavedLtfZone g_savedLtfZones[];
+
+// ---- Drawing-only shadow of g_savedLtfZones, same size, grown in lockstep,
+// index-aligned. 0 = zone still live. Non-zero = the bar time it stopped
+// being watched (touched+rejected, broken, or superseded) — DrawSavedLtfZones
+// reads this to give an already-used zone a correct frozen right edge even
+// when it resolved during OnInit's replay, when no per-bar drawing runs.
+// Kept separate from SavedLtfZone itself so the trading struct stays exactly
+// what it was before this existed. ----
+datetime g_ltfZoneDrawEnd[];
 
 //==================================================================
 // HELPER FUNCTIONS
@@ -337,10 +394,11 @@ double GetHtfMaValue()
 
    static datetime lastCalcTime = 0;
    static double   lastMaValue  = 0.0;
-   static int      maHandle     = INVALID_HANDLE;
 
-   if(maHandle == INVALID_HANDLE)
-      maHandle = iMA(_Symbol, InpHtfTimeframe, InpHtfMaPeriod, 0, InpHtfMaMethod, PRICE_CLOSE);
+   // Normally already created in OnInit (so it can also be attached to the
+   // chart there); this is just a defensive fallback.
+   if(g_htfMaHandle == INVALID_HANDLE)
+      g_htfMaHandle = iMA(_Symbol, InpHtfTimeframe, InpHtfMaPeriod, 0, InpHtfMaMethod, PRICE_CLOSE);
 
    // Only recalculate on new HTF bar close
    MqlRates rates[1];
@@ -352,7 +410,7 @@ double GetHtfMaValue()
      {
       lastCalcTime = currentBarTime;
       double ma[1];
-      if(CopyBuffer(maHandle, 0, 0, 1, ma) > 0)
+      if(CopyBuffer(g_htfMaHandle, 0, 0, 1, ma) > 0)
          lastMaValue = ma[0];
      }
 

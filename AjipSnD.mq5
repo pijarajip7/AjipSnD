@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "2.5-handoffpertrade"
+#define EA_BUILD "3.2-pendingzonetouch"
 
 #include <Trade\Trade.mqh>
 
@@ -50,13 +50,32 @@ input long   InpMagicNumber  = 99002;  // Magic number
 // re-entry inside 30 minutes anyway, so 15 alone captures the effect.
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 
+input group "Rejection Confirmation Criteria"
+// Which pattern(s) count as a confirmed rejection, OR'd together — first
+// match on a given bar wins. Every criterion still requires the zone to have
+// been wicked into and this bar's close to have come back out; they only
+// differ on what shape counts as proof beyond that. Each can be toggled
+// independently to isolate its contribution in a backtest. None of these
+// thresholds are validated yet — starting values, not measured ones.
+input bool   InpCriteria1Enabled  = true;    // Criteria 1: strong close-back rejection (the original method)
+input double InpRejectionBodyAtr  = 0.5;     // Criteria 1: min rejection-bar body/ATR in the favourable direction
+input bool   InpEngulfingEnabled  = false;   // Engulfing pattern (2 bars)
+input double InpEngulfingBodyAtr  = 0.5;     // Engulfing: min engulfing-bar body/ATR
+input bool   InpPinBarEnabled     = false;   // Pin bar / hammer (1 bar)
+input double InpPinBarWickRatio   = 2.0;     // Pin bar: min wick length as a multiple of body (0 body treated as 1 point)
+input bool   InpStarEnabled       = false;   // Morning/evening star (3 bars)
+input double InpStarMiddleRatio   = 0.3;     // Star: max middle-bar body as a fraction of the first bar's body
+input double InpStarReclaimPct    = 0.5;     // Star: min reclaim of the first bar's body by the third bar's close
+// Applies after any of the 4 criteria above confirms — a late check on
+// where price actually is, not another shape to match. If the confirming
+// bar's close has already run past the zone by more than this multiple of
+// the zone's own width, the rejection is treated as too late to chase: the
+// zone keeps being watched rather than resolving here, in case a closer
+// rejection follows.
+input double InpMaxEntryDistanceZoneWidth = 1.0;  // Max entry distance beyond the zone, as a multiple of zone width (0=disabled)
+
 input group "Stop Loss & Take Profit"
-input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection bar's own extreme, in LTF ATR
-// How strong the rejection bar's body must be, relative to LTF ATR, in the
-// favourable direction, to count as a real rejection rather than a wick that
-// grazed the zone and drifted back. No prior measurement for this specific
-// threshold exists — starting value, not a validated one.
-input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the favourable direction
+input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection pattern's own extreme, in LTF ATR
 // Risk per trade in account currency; lot is derived from it and the stop
 // distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
 // figure because the broker's minimum lot puts a floor under achievable risk:
@@ -99,6 +118,25 @@ input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the B
 input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
 input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
 input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
+
+input group "Pending Order Entry (Alternative Mode)"
+// Mutually exclusive with rejection-confirmation entry (the "Rejection
+// Confirmation Criteria" and InpZoneSlBufferAtr/InpRejectionBodyAtr-style
+// settings above are ignored while this is on). Instead of waiting for a
+// rejection, every LTF zone saved under the current HTF bias gets an
+// immediate resting limit order at its own midpoint — no wait, no pattern
+// match. Unproven, written directly to spec — see AjipSnD_PendingEntry.mqh.
+input bool   InpUsePendingOrderEntry      = false;  // Use pending-limit-at-zone-midpoint entry instead of rejection-confirmation entry
+// Split evenly across however many pending orders are active the moment a
+// new one is placed — fixed at that point, not rebalanced later, so actual
+// total risk in flight drifts around this figure rather than holding it
+// exactly (see AjipSnD_PendingEntry.mqh for why).
+input double InpPendingOrderTotalRisk     = 150.0;  // Total risk ($) split evenly across all currently-active pending orders
+// SL sits beyond the HTF zone backing the CURRENT bias (its low if demand,
+// high if supply) plus this many multiples of HTF ATR — one shared stop
+// level for every pending order under that bias, not a per-zone stop.
+input double InpHtfSlBufferAtr            = 1.0;    // SL buffer beyond the HTF bias zone's extreme, in HTF ATR
+input int    InpPendingOrderExpiryHtfBars = 4;      // Cancel a pending order if not triggered within this many HTF bars (0=never expires)
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
@@ -188,6 +226,7 @@ input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal,
 #include "AjipSnD_News.mqh"
 #include "AjipSnD_Trade.mqh"
 #include "AjipSnD_Entry.mqh"
+#include "AjipSnD_PendingEntry.mqh"
 #include "AjipSnD_Core.mqh"
 
 //==================================================================
@@ -244,6 +283,18 @@ int OnInit()
    // ATR handles for zone quality metrics
    g_atrLtfHandle = iATR(_Symbol, InpTimeframe, 14);
    g_atrHtfHandle = iATR(_Symbol, InpHtfTimeframe, 14);
+
+   // HTF MA filter — handle created here (not lazily) so it's ready before
+   // the first tick, whether or not the line ends up drawn (DrawHtfMaLine
+   // in AjipSnD_Zone.mqh draws it manually as chart objects — ChartIndicatorAdd
+   // failed with error 4114 in testing, not worth chasing further).
+   if(InpHtfMaFilter && InpHtfMaPeriod > 0)
+     {
+      g_htfMaHandle = iMA(_Symbol, InpHtfTimeframe, InpHtfMaPeriod, 0, InpHtfMaMethod, PRICE_CLOSE);
+      if(g_htfMaHandle == INVALID_HANDLE)
+         PrintFormat("AjipSnD: HTF MA handle FAILED on %s period=%d — filter will not block anything",
+                     EnumToString(InpHtfTimeframe), InpHtfMaPeriod);
+     }
 
    // Trend probe MA — its own handle on its own timeframe
    if(InpDriftLog && InpDriftTrendProbe)
@@ -379,6 +430,7 @@ void OnDeinit(const int reason)
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
    if(g_atrHtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrHtfHandle);
    if(g_driftTrendMa != INVALID_HANDLE) IndicatorRelease(g_driftTrendMa);
+   if(g_htfMaHandle  != INVALID_HANDLE) IndicatorRelease(g_htfMaHandle);
 
    ObjectsDeleteAll(0, g_objPrefix);
    Print("AjipSnD: EA removed. Reason=", reason);

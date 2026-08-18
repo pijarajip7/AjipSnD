@@ -27,6 +27,75 @@ bool IsBullBar(const MqlRates &bar)
    return(bar.close > bar.open);
   }
 
+//==================================================================
+// ALTERNATE REJECTION-CONFIRMATION PATTERNS — each an independent OR'd
+// criterion CheckRejectionRetests can accept alongside (or instead of) the
+// original close-back-out method. All three assume the shared gates already
+// passed (zone wicked into, confirming bar's close back outside it) — they
+// only judge whether the bar(s) LOOK like a real reversal.
+//==================================================================
+
+//---- Engulfing: confirming bar's body fully contains the previous bar's
+// body, opposite colors, confirming bar itself strong enough ----
+bool IsEngulfing(const MqlRates &cur, const MqlRates &prev, bool isDemand, double atrLtf)
+  {
+   if(prev.time == 0) return(false);   // not enough history yet (EA just started)
+
+   if(isDemand)
+     {
+      if(!IsBullBar(cur) || !IsBearBar(prev)) return(false);
+      if(!(cur.open <= prev.close && cur.close >= prev.open)) return(false);
+     }
+   else
+     {
+      if(!IsBearBar(cur) || !IsBullBar(prev)) return(false);
+      if(!(cur.open >= prev.close && cur.close <= prev.open)) return(false);
+     }
+
+   double body = MathAbs(cur.close - cur.open);
+   return(atrLtf > 0 && body / atrLtf >= InpEngulfingBodyAtr);
+  }
+
+//---- Pin bar / hammer: small body, long wick on the rejection side, short
+// wick on the other — single bar, no history needed ----
+bool IsPinBar(const MqlRates &cur, bool isDemand)
+  {
+   double body = MathAbs(cur.close - cur.open);
+   if(body <= 0) body = _Point;   // avoid div-by-zero on a perfect doji
+   double lowerWick = MathMin(cur.open, cur.close) - cur.low;
+   double upperWick = cur.high - MathMax(cur.open, cur.close);
+
+   if(isDemand)
+      return(lowerWick >= InpPinBarWickRatio * body && lowerWick > upperWick);
+   else
+      return(upperWick >= InpPinBarWickRatio * body && upperWick > lowerWick);
+  }
+
+//---- Morning/evening star: big bar, small indecision bar, big reversal bar
+// reclaiming back into the first bar's body ----
+bool IsStar(const MqlRates &cur, const MqlRates &prev1, const MqlRates &prev2, bool isDemand)
+  {
+   if(prev1.time == 0 || prev2.time == 0) return(false);   // not enough history yet
+
+   double bodyFirst  = MathAbs(prev2.close - prev2.open);
+   double bodyMiddle = MathAbs(prev1.close - prev1.open);
+   if(bodyFirst <= 0) return(false);
+   if(bodyMiddle > InpStarMiddleRatio * bodyFirst) return(false);
+
+   if(isDemand)
+     {
+      if(!IsBearBar(prev2) || !IsBullBar(cur)) return(false);
+      double reclaimLevel = prev2.close + InpStarReclaimPct * bodyFirst;
+      return(cur.close >= reclaimLevel);
+     }
+   else
+     {
+      if(!IsBullBar(prev2) || !IsBearBar(cur)) return(false);
+      double reclaimLevel = prev2.close - InpStarReclaimPct * bodyFirst;
+      return(cur.close <= reclaimLevel);
+     }
+  }
+
 //---- Fill ATR-normalised metrics + evaluate the entry quality gate ----
 // Runs for every confirmed zone regardless of InpZoneQualityLog, because
 // qualityPass gates entries. Backtest over two separate 12-month XAUUSD
@@ -429,9 +498,9 @@ bool InvalidateHtfZones(const MqlRates &bar)
   }
 
 //---- Draw a single HTF zone rectangle ----
-void DrawHtfZoneRect(string name, datetime time, double price1, double price2, color clr)
+void DrawHtfZoneRect(string name, datetime time, double price1, double price2, color clr, datetime time2)
   {
-   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, TimeCurrent(), price2))
+   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, time2, price2))
       return;
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
@@ -440,30 +509,144 @@ void DrawHtfZoneRect(string name, datetime time, double price1, double price2, c
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
   }
 
-//---- Draw saved (awaiting-rejection) LTF zones — the only chart objects ----
-// HTF is a directional bias, not a price range to draw — the LTF zone is the
-// thing actually worth watching move to move. Zones already used (rejection
-// resolved, order attempted) are dropped rather than kept drawn — a used
-// zone has nothing left pending.
+//---- Draw saved (awaiting-rejection or resolved) LTF zones — the only chart
+// objects. HTF is a directional bias, not a price range to draw — the LTF
+// zone is the thing actually worth watching move to move. A zone still being
+// watched (unused) gets its rectangle created (if new) and stretched to the
+// current bar every call; once it resolves (used = true, whatever the
+// reason) this stops touching it at all rather than deleting it, so
+// whatever the rectangle looked like at that point stays on the chart and
+// the touch/break pattern is still visible afterward. A zone that resolved
+// during OnInit's replay (no per-bar drawing runs there — see UpdateLTF)
+// never got a rectangle at all yet; g_ltfZoneDrawEnd (set at the same three
+// spots g_savedLtfZones[].used is) gives it a correct frozen right edge the
+// first time this runs after replay, instead of skipping it forever. Note:
+// g_savedLtfZones only ever grows, so a long run accumulates one rectangle
+// per zone ever watched — fine for inspecting a backtest visually, but
+// worth trimming (or toggling InpDrawLines off) for anything long-running.
 void DrawSavedLtfZones()
   {
    if(!InpDrawLines) return;
 
    string prefix = g_objPrefix + "LTF_";
-   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
-     {
-      string objName = ObjectName(0, i);
-      if(StringFind(objName, prefix) == 0)
-         ObjectDelete(0, objName);
-     }
-
    int n = ArraySize(g_savedLtfZones);
    for(int i = 0; i < n; i++)
      {
-      if(g_savedLtfZones[i].used) continue;
-      color clr = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
-      DrawHtfZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time,
-                      g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
+      string name = prefix + IntegerToString(i);
+      color  clr  = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
+
+      if(g_savedLtfZones[i].used)
+        {
+         // Resolved, possibly before ever being drawn (replay). Draw once
+         // with its recorded freeze time, then leave it alone for good.
+         if(ObjectFind(0, name) < 0 && g_ltfZoneDrawEnd[i] > 0)
+            DrawHtfZoneRect(name, g_savedLtfZones[i].time,
+                            g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr,
+                            g_ltfZoneDrawEnd[i]);
+         continue;
+        }
+
+      if(ObjectFind(0, name) < 0)
+         DrawHtfZoneRect(name, g_savedLtfZones[i].time,
+                         g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr, TimeCurrent());
+      else
+         ObjectSetInteger(0, name, OBJPROP_TIME, 1, TimeCurrent());
+     }
+  }
+
+//---- Draw the HTF MA filter's own line, as connected trend-line segments
+// (ChartIndicatorAdd failed with error 4114 in testing on this setup, not
+// worth chasing further — this is the same approach DrawSavedLtfZones uses,
+// already proven reliable here). First call backfills a lookback so the
+// line isn't blank; after that, one new segment is appended per HTF bar
+// close. Segments are never touched again once drawn, same "leave it
+// there" philosophy as the zone rectangles above.
+void DrawHtfMaLine()
+  {
+   if(!InpHtfMaFilter || !InpDrawLines) return;
+   if(g_htfMaHandle == INVALID_HANDLE) return;
+
+   string prefix = g_objPrefix + "MA_";
+
+   if(g_maLineLastTime == 0)
+     {
+      int lookback = 100;
+      double   maBuf[];
+      datetime timeBuf[];
+      ArraySetAsSeries(maBuf, true);
+      ArraySetAsSeries(timeBuf, true);
+      int copied = CopyBuffer(g_htfMaHandle, 0, 0, lookback, maBuf);
+      if(copied <= 1) return;   // indicator not warmed up yet — retry next call
+      if(CopyTime(_Symbol, InpHtfTimeframe, 0, copied, timeBuf) != copied) return;
+
+      for(int i = copied - 1; i > 0; i--)
+        {
+         string name = prefix + IntegerToString((long)timeBuf[i-1]);
+         if(ObjectFind(0, name) < 0)
+           {
+            ObjectCreate(0, name, OBJ_TREND, 0, timeBuf[i], maBuf[i], timeBuf[i-1], maBuf[i-1]);
+            ObjectSetInteger(0, name, OBJPROP_COLOR, clrYellow);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+            ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+            ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+           }
+        }
+      g_maLineLastTime  = timeBuf[0];
+      g_maLineLastValue = maBuf[0];
+      return;
+     }
+
+   double   ma[1];
+   datetime t[1];
+   if(CopyBuffer(g_htfMaHandle, 0, 0, 1, ma) != 1) return;
+   if(CopyTime(_Symbol, InpHtfTimeframe, 0, 1, t) != 1) return;
+   if(t[0] == g_maLineLastTime) return;   // same HTF bar as last drawn point
+
+   string name = prefix + IntegerToString((long)t[0]);
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TREND, 0, g_maLineLastTime, g_maLineLastValue, t[0], ma[0]);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+     }
+   g_maLineLastTime  = t[0];
+   g_maLineLastValue = ma[0];
+  }
+
+//---- Draw a buy/sell marker + trigger-reason label where a rejection was
+// confirmed. Fires whenever CheckRejectionRetests finds a match, whether or
+// not EntryGateBlocked later vetoes the actual order and whether this is a
+// live bar or OnInit's replay — "confirmed" is about the pattern, not the
+// fill, so the marker tracks the former. Never touched again once drawn,
+// same as the zone rectangles and MA line above.
+void DrawEntrySignal(datetime time, double price, int dir, string reason)
+  {
+   string tag  = IntegerToString((long)time) + (dir == 1 ? "B" : "S");
+   string name = g_objPrefix + "SIG_" + tag;
+
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, dir == 1 ? OBJ_ARROW_BUY : OBJ_ARROW_SELL, 0, time, price);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, dir == 1 ? clrLime : clrRed);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+     }
+
+   string labelName = g_objPrefix + "SIGTXT_" + tag;
+   if(ObjectFind(0, labelName) < 0)
+     {
+      ObjectCreate(0, labelName, OBJ_TEXT, 0, time, price);
+      ObjectSetString(0, labelName, OBJPROP_TEXT, reason);
+      ObjectSetInteger(0, labelName, OBJPROP_COLOR, dir == 1 ? clrLime : clrRed);
+      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+      // Text drawn away from the arrow instead of on top of it — anchor at
+      // the label's own top for a BUY marker (text grows downward, further
+      // below the bar the arrow already sits under) and at its bottom for
+      // a SELL marker (text grows upward, further above the bar).
+      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, dir == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
      }
   }
 
@@ -762,6 +945,10 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
       if(g_savedLtfZones[j].touched)
         {
          g_savedLtfZones[j].used = true;
+         // No bar handy here — confirmed.time (the fresher zone that just
+         // superseded this one) is the moment we learned it's stale, close
+         // enough for a frozen right edge.
+         g_ltfZoneDrawEnd[j] = confirmed.time;
          if(InpEnableLog)
             PrintFormat("AjipSnD: %s watch zone [%.5f, %.5f] touched+superseded by fresher zone — dropped",
                         g_savedLtfZones[j].isDemand ? "DEMAND" : "SUPPLY",

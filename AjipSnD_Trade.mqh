@@ -13,7 +13,7 @@
 // so the realised reward:risk is enforced against the real fill rather than
 // an independent figure.
 //==================================================================
-ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
+ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime, string triggerReason)
   {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick)) return(0);
@@ -77,6 +77,7 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    po.lot      = lot;
    po.riskUsd  = actualRisk;
    po.atrLtf   = GetAtrValue(false);
+   po.triggerReason = triggerReason;
    AddEntry(ticket, dir, fillPrice, po);
 
    return(ticket);
@@ -111,6 +112,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].riskUsd         = po.riskUsd;
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
    g_entries[sz].zoneTime        = po.zoneTime;
+   g_entries[sz].triggerReason   = po.triggerReason;
    g_entries[sz].partialClosed       = false;
    g_entries[sz].partialCloseSkipped = false;
   }
@@ -185,11 +187,15 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 // overshoot stays within tolerance, otherwise return 0 and let the caller skip
 // the entry. Either way the real figure comes back through actualRisk, so the
 // overshoot is logged rather than hidden.
-double LotForRisk(double slDistance, double &actualRisk)
+// riskBudget < 0 (the default) means "use InpRiskPerTrade" — the pending-
+// order entry mode passes its own per-zone split instead, everything else
+// about the sizing math is identical either way.
+double LotForRisk(double slDistance, double &actualRisk, double riskBudget = -1.0)
   {
    actualRisk = 0.0;
+   if(riskBudget < 0) riskBudget = InpRiskPerTrade;
 
-   if(InpRiskPerTrade <= 0 || slDistance <= 0) return(0.0);
+   if(riskBudget <= 0 || slDistance <= 0) return(0.0);
 
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -198,7 +204,7 @@ double LotForRisk(double slDistance, double &actualRisk)
    double lossPerLot = slDistance * (tickValue / tickSize);
    if(lossPerLot <= 0) return(0.0);
 
-   double lot = InpRiskPerTrade / lossPerLot;
+   double lot = riskBudget / lossPerLot;
    if(g_volStep > 0)
       lot = MathFloor(lot / g_volStep) * g_volStep;
 
@@ -206,12 +212,12 @@ double LotForRisk(double slDistance, double &actualRisk)
      {
       double floorRisk = g_volMin * lossPerLot;
       if(InpMaxRiskOvershoot > 0
-         && floorRisk > InpRiskPerTrade * InpMaxRiskOvershoot)
+         && floorRisk > riskBudget * InpMaxRiskOvershoot)
         {
          PrintFormat("AjipSnD: entry skipped — min lot %.2f on a %.1f pt stop risks %.2f, "
                      "budget %.2f, cap %.2f",
-                     g_volMin, slDistance / g_point, floorRisk, InpRiskPerTrade,
-                     InpRiskPerTrade * InpMaxRiskOvershoot);
+                     g_volMin, slDistance / g_point, floorRisk, riskBudget,
+                     riskBudget * InpMaxRiskOvershoot);
          return(0.0);
         }
       lot = g_volMin;
@@ -619,7 +625,7 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
                 "sl_price", "tp_price", "sl_dist_pts", "sl_dist_atr",
                 "lot", "risk_usd", "exit_reason", "pnl_usd", "pnl_r",
                 "mfe_usd", "mae_usd", "mfe_r", "mae_r",
-                "atr_ltf", "atr_htf", "structural", "ltf_zone_time");
+                "atr_ltf", "atr_htf", "structural", "ltf_zone_time", "trigger_reason");
    else
       FileSeek(h, 0, SEEK_END);
 
@@ -646,7 +652,8 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
              DoubleToString(g_entries[idx].atrLtfAtEntry, g_digits),
              DoubleToString(g_entries[idx].atrAtEntry, g_digits),
              g_entries[idx].hasStructuralSl ? "1" : "0",
-             TimeToString(g_entries[idx].zoneTime, TIME_DATE | TIME_SECONDS));
+             TimeToString(g_entries[idx].zoneTime, TIME_DATE | TIME_SECONDS),
+             g_entries[idx].triggerReason);
 
    FileClose(h);
   }
