@@ -17,7 +17,7 @@
 // shouldn't arise given HTF zones strictly alternate direction at
 // confirmation (so two same-direction validations can't share overlapping
 // origins) — cheap insurance, not a known bug.
-void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay, datetime htfBarTime)
+void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay)
   {
    int n = ArraySize(g_ltfValidatedHistory);
    int candidates = 0;   // matched direction + postdates the HTF zone's origin
@@ -67,7 +67,7 @@ void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay, datetime htfB
       // from wherever a historical zone's midpoint sat, so there is no
       // legitimate resting order left to place.
       if(!isReplay)
-         PlacePendingOrderForZone(g_savedLtfZones[sz], htfBarTime);
+         PlacePendingOrderForZone(g_savedLtfZones[sz]);
       matches++;
      }
 
@@ -246,6 +246,11 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
      {
       DrawSavedLtfZones();
       DrawHtfMaLine();
+      // Fold triggered pending orders into g_entries, cancel ones whose zone
+      // left the watch list. Runs here (per closed LTF bar) rather than per
+      // HTF bar so a filled order starts being tracked — and a stale order
+      // gets cancelled — with minimal delay; see AjipSnD_PendingEntry.mqh.
+      ManagePendingOrders();
      }
   }
 
@@ -297,10 +302,8 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
          // validated since this HTF zone's own origin bar
          // (SaveLtfZonesForHtfBias logs the bias change and the replay result
          // together).
-         g_htfBiasDir      = g_htfPendingZone.isDemand ? 1 : -1;
-         g_htfBiasZoneHigh = g_htfPendingZone.high;
-         g_htfBiasZoneLow  = g_htfPendingZone.low;
-         SaveLtfZonesForHtfBias(g_htfPendingZone, isReplay, bar.time);
+         g_htfBiasDir = g_htfPendingZone.isDemand ? 1 : -1;
+         SaveLtfZonesForHtfBias(g_htfPendingZone, isReplay);
         }
      }
 
@@ -361,15 +364,8 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
 
    // Nothing drawn here — HTF is a directional bias, not a chart object.
    // DrawSavedLtfZones (called from UpdateLTF) is what actually matters on
-   // screen.
-
-   // Fold triggered pending orders into g_entries, cancel ones that timed
-   // out. Once per closed HTF bar (the unit InpPendingOrderExpiryHtfBars
-   // counts in), live only: replay has no real orders to manage, and
-   // RebuildTrackedPositions doesn't reconstruct g_pendingOrders on restart,
-   // so there is nothing to do differently for a fresh EA start either.
-   if(!isReplay)
-      ManagePendingOrders(bar.time);
+   // screen. Pending-order upkeep also happens there now (ManagePendingOrders,
+   // called from UpdateLTF) rather than here — see that call site for why.
   }
 
 //---- Replay LTF + HTF bars together, chronologically, to seed the EA's

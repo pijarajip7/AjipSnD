@@ -42,33 +42,26 @@ void RebuildTrackedPositions()
       g_entries[idx].atrAtEntry     = GetAtrValue(true);
       g_entries[idx].atrLtfAtEntry  = GetAtrValue(false);
 
-      // An SL already on the position came from the zone that justified it —
-      // treated as structural since a recovered position's original placement
-      // context is not reconstructable.
+      // No SL/TP exists at placement anymore — whatever is on the position
+      // now (curSl/curTp) only got there from this EA's own points-based
+      // exit logic having already fired at least once before the restart.
+      // hasStructuralSl is a slight misnomer here (kept for CSV schema
+      // stability) — it really means "some SL was already on the position."
       g_entries[idx].hasStructuralSl = (curSl != 0.0);
       g_entries[idx].slPrice         = curSl;
       g_entries[idx].tpPrice         = PositionGetDouble(POSITION_TP);
       g_entries[idx].zoneTime        = 0;   // originating zone is not recoverable
       g_entries[idx].triggerReason   = "unknown";   // not recoverable either
+      g_entries[idx].riskUsd         = 0.0;   // no risk-based sizing — always 0
 
-      // Reconstruct the risk this position represents from its live stop, so
-      // R-multiples stay meaningful for trades that straddle a restart.
-      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-      if(curSl != 0.0 && tickValue > 0 && tickSize > 0)
-        {
-         double dist = (dir == 1) ? (entryPrice - curSl) : (curSl - entryPrice);
-         g_entries[idx].riskUsd = (dist > 0)
-                                  ? dist * (tickValue / tickSize) * curVol
-                                  : 0.0;
-        }
-      else
-         g_entries[idx].riskUsd = 0.0;
-
-      // Whether this position already partial-closed in an earlier run is not
-      // recoverable either — same limitation as atrAtEntry/zoneTime above.
-      // Worst case a restarted position gets one more partial-close shot than
-      // it should; trailing simply won't arm until that fires.
+      // Whether this position already armed TP->BE / partial-closed in an
+      // earlier run is not recoverable either — same limitation as
+      // atrAtEntry/zoneTime above. Worst case a restarted position gets one
+      // more TP->BE-arm or partial-close shot than it should — both are
+      // idempotent against a broker-side level already sitting at the same
+      // price, so this costs a redundant PositionModify call, not a wrong
+      // one. Trailing simply won't arm until partial-close fires.
+      g_entries[idx].tpBeArmed           = false;
       g_entries[idx].partialClosed       = false;
       g_entries[idx].partialCloseSkipped = false;
 

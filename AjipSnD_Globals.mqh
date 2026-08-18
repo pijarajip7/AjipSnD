@@ -78,15 +78,16 @@ struct EntryTracker
    double   mfe;            // best POSITION_PROFIT seen ($)
    double   mae;            // worst POSITION_PROFIT seen ($)
    double   atrAtEntry;     // HTF ATR frozen at entry
-   double   initialVolume;   // volume at entry (lot sizing, CSV logging)
-   bool     hasStructuralSl; // SL came from the zone at placement
-   double   slPrice;         // structural SL price (0=none)
-   double   tpPrice;         // structural TP price (0=none)
-   double   riskUsd;         // intended risk at entry — denominator for R-multiples
+   double   initialVolume;   // volume at entry (fixed lot, CSV logging)
+   bool     hasStructuralSl; // always false — no SL/TP is ever set at placement, see AjipSnD_PendingEntry.mqh
+   double   slPrice;         // always 0 at entry (kept for CSV schema stability)
+   double   tpPrice;         // always 0 at entry (kept for CSV schema stability)
+   double   riskUsd;         // always 0 — no risk-based sizing (kept for CSV schema stability)
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
    string   triggerReason;      // always "pendingorder" ("unknown" if recovered across a restart)
-   bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
+   bool     tpBeArmed;           // loss-side TP->BE already armed (one-shot) — see CheckLossRecoveryTp
+   bool     partialClosed;       // profit-side partial close + SL->BE already fired (one-shot)
    bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
   };
 
@@ -98,10 +99,10 @@ struct EntryFillInfo
    int      dir;       // 1=BUY, -1=SELL
    double   price;     // fill price
    datetime zoneTime;  // LTF zone time that triggered this order
-   double   slPrice;   // structural SL frozen at placement
-   double   tpPrice;   // structural TP frozen at placement (0=none)
-   double   lot;       // volume actually submitted
-   double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
+   double   slPrice;   // always 0 (kept for CSV schema stability)
+   double   tpPrice;   // always 0 (kept for CSV schema stability)
+   double   lot;       // volume actually submitted (InpFixedLot)
+   double   riskUsd;   // always 0 — no risk-based sizing (kept for CSV schema stability)
    double   atrLtf;    // LTF ATR at placement — carried through to the position
    string   triggerReason; // always "pendingorder"
   };
@@ -112,13 +113,9 @@ struct EntryFillInfo
 struct PendingOrderTracker
   {
    ulong    ticket;
-   int      dir;              // 1=BUY, -1=SELL
-   double   riskUsd;           // this order's split of InpPendingOrderTotalRisk
-   double   lot;
-   double   slPrice;
-   double   tpPrice;
-   datetime placedHtfBarTime;  // closed HTF bar time at placement — expiry counts from here
-   datetime zoneTime;          // LTF zone time — same join-key convention as EntryTracker.zoneTime
+   int      dir;       // 1=BUY, -1=SELL
+   double   lot;        // InpFixedLot
+   datetime zoneTime;   // LTF zone time — join key into g_savedLtfZones (see ZoneStillWatched)
   };
 
 //==================================================================
@@ -229,13 +226,6 @@ LtfValidatedZone g_ltfValidatedHistory[];
 // midpoint immediately — no rejection wait, no pattern match. Unproven —
 // written directly to spec, not measured first.
 int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
-
-// The HTF zone backing the CURRENT g_htfBiasDir, remembered past the moment
-// it validates — pending-order mode's SL sits beyond this zone's own far
-// edge (low if demand, high if supply), not the LTF zone's edge, so every
-// pending order under the same HTF bias shares the same stop level.
-double g_htfBiasZoneHigh = 0.0;
-double g_htfBiasZoneLow  = 0.0;
 
 struct SavedLtfZone
   {

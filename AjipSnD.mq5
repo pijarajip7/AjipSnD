@@ -2,10 +2,12 @@
 //|                                                      AjipSnD.mq5 |
 //|  Supply & Demand EA — zone-based trading on MT5.                 |
 //|  HTF zone validation sets a directional bias, not a price range.  |
-//|  Every matching LTF zone gets an immediate resting limit order at |
-//|  its own midpoint — no rejection wait, no pattern match — with SL |
-//|  beyond the HTF bias zone's own extreme + ATR buffer. Exit via    |
-//|  broker SL/TP or daily/final/session close-all.                   |
+//|  Every matching LTF zone gets an immediate resting limit order,   |
+//|  fixed lot, at its own midpoint — no rejection wait, no pattern   |
+//|  match, no SL/TP at placement. Exit is managed entirely by this   |
+//|  EA in points from entry: a loss-side breakeven safety net, a     |
+//|  profit-side partial-close + breakeven, then an HTF-ATR trailing  |
+//|  stop — or daily/final/session close-all.                        |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -16,7 +18,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "4.0-pendingonly"
+#define EA_BUILD "5.0-fixedlotpoints"
 
 #include <Trade\Trade.mqh>
 
@@ -49,56 +51,40 @@ input long   InpMagicNumber  = 99002;  // Magic number
 // are tied with each other — this system's trade cadence rarely produces a
 // re-entry inside 30 minutes anyway, so 15 alone captures the effect.
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
-
-input group "Stop Loss & Take Profit"
-// TP as a multiple of the ACTUAL stop distance just computed (HTF far edge +
-// buffer), not an independent ATR figure — the two used to be sized from
-// unrelated bases, so the realised reward:risk floated wherever they happened
-// to land instead of being enforced. Default 2.0 is this project's own stated
-// floor (0=no TP).
-input double InpTakeProfitRR      = 4.0;   // TP = this many multiples of the actual SL distance (0=no TP)
+// No risk-based sizing — there is no SL at placement to size a stop
+// distance against (see "Exit Management" below), so every entry uses the
+// same lot regardless of price or zone width. Unvalidated: 0.01 (broker
+// minimum) is the safest starting point precisely BECAUSE no per-position
+// stop caps the downside — raise it only once the points-based exit
+// thresholds below are tuned and trusted.
+input double InpFixedLot = 0.01;   // Fixed lot size for every entry
 // Counts open positions in the direction.
 input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
-// The broker's minimum lot puts a hard floor under achievable risk: once the
-// stop is wide enough that the budget buys less than volMin, the position can
-// only be opened by risking MORE than the budget. This caps how much more.
-// Measured on run #4, where the floor was accepted unconditionally: 5.2% of
-// trades exceeded the budget and the worst risked $38.26 against $15 — 2.5x.
-// 1.25 is not a hard 1.00 because volume-step rounding puts many trades barely
-// over the line; at 1.00 it would drop 5.8% of entries, at 1.25 only 3.4%,
-// while still capping the observed tail at $18.73. 0 = accept any overshoot,
-// which restores the run #4 behaviour for an unbiased measurement pass.
-input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of the risk budget (0=no cap)
 
-input group "Partial Close & Trailing Stop"
-// Fires once per position: when floating profit reaches this multiple of the
-// ORIGINAL stop distance (same price-distance RR convention as InpTakeProfitRR,
-// so a value here below InpTakeProfitRR fires before the full TP would), close
-// part of the position and move the remainder's SL to breakeven.
-input bool   InpPartialCloseEnabled   = true;   // Enable partial close at RR target + SL->breakeven
-input double InpPartialCloseRR        = 2.0;    // RR multiple of the original stop distance that triggers it
-input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the RR target
-input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry)
+input group "Exit Management (Points-Based)"
+// No SL/TP exists at placement (see AjipSnD_PendingEntry.mqh) — every exit
+// below is this EA moving the broker-side SL/TP itself, in points from
+// entry. Unvalidated thresholds throughout this group — starting values,
+// not measured ones.
+//
+// Loss side: once floating loss reaches this many points, rest a TP at
+// breakeven so the position closes there if it ever recovers, rather than
+// needing a full profit target after already being this far underwater.
+// Does NOT cap the loss — there is still no SL. 0 = disabled, in which case
+// a losing position has no exit at all besides the account-level
+// daily/final max-loss close-all below (both off by default).
+input double InpLossPointsSetTpBe = 300;  // Loss (points) that arms a TP at breakeven (0=disabled)
+// Profit side: once floating profit reaches this many points, close a
+// slice and move the remainder's SL to breakeven.
+input bool   InpPartialCloseEnabled   = true;   // Enable partial close at profit target + SL->breakeven
+input double InpPartialClosePoints    = 300;    // Profit (points) that triggers partial close + SL->breakeven
+input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the profit target
+input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop/TP (0=exact entry)
 // Trailing only ever arms AFTER the partial close above has fired on that
-// position — the remainder is the "runner." Distance/step are in LTF ATR.
+// position — the remainder is the "runner." Distance/step are in HTF ATR.
 input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
-input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
-input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
-
-input group "Pending Order Entry"
-// Every LTF zone saved under the current HTF bias gets an immediate resting
-// limit order at its own midpoint — no wait, no pattern match. Unproven,
-// written directly to spec — see AjipSnD_PendingEntry.mqh.
-// Split evenly across however many pending orders are active the moment a
-// new one is placed — fixed at that point, not rebalanced later, so actual
-// total risk in flight drifts around this figure rather than holding it
-// exactly (see AjipSnD_PendingEntry.mqh for why).
-input double InpPendingOrderTotalRisk     = 150.0;  // Total risk ($) split evenly across all currently-active pending orders
-// SL sits beyond the HTF zone backing the CURRENT bias (its low if demand,
-// high if supply) plus this many multiples of HTF ATR — one shared stop
-// level for every pending order under that bias, not a per-zone stop.
-input double InpHtfSlBufferAtr            = 1.0;    // SL buffer beyond the HTF bias zone's extreme, in HTF ATR
-input int    InpPendingOrderExpiryHtfBars = 4;      // Cancel a pending order if not triggered within this many HTF bars (0=never expires)
+input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in HTF ATR
+input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (HTF ATR) before re-modifying the broker
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
@@ -202,10 +188,11 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | lot=%.2f lossBEpts=%.0f partialPts=%.0f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
-               InpMaxRiskOvershoot,
-               InpTakeProfitRR,
+               InpFixedLot,
+               InpLossPointsSetTpBe,
+               InpPartialClosePoints,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",
@@ -277,9 +264,9 @@ int OnInit()
 
    Print("══════════════════════════════════════");
    Print("AjipSnD initialized successfully");
-   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, PendingTotalRisk=%.2f",
+   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, FixedLot=%.2f",
                EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
-               InpMaxZones, InpPendingOrderTotalRisk);
+               InpMaxZones, InpFixedLot);
    PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
                InpSessionStart, InpSessionEnd,
                g_sessionFilterEnabled ? "ENABLED" : "ALL DAY",

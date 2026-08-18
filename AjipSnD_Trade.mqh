@@ -92,58 +92,6 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
    return(widened);
   }
 
-//---- Lot sized so that hitting slDistance costs about riskBudget ----
-// Rounds DOWN to the broker's volume step: rounding up would spend more than
-// the risk budget, and the budget is the whole point. Returns 0.0 — meaning
-// "do not trade this setup" — whenever risk cannot actually be sized
-// (riskBudget<=0, no stop distance, or broker tick data unavailable).
-// Callers must treat 0.0 as a skip, not as a lot. riskBudget is the caller's
-// own per-zone split of InpPendingOrderTotalRisk — see AjipSnD_PendingEntry.mqh.
-//
-// The broker's minimum lot puts a hard floor under achievable risk. When the
-// computed lot lands under it the position can only be opened by risking more
-// than the budget, so InpMaxRiskOvershoot decides: accept the floor while the
-// overshoot stays within tolerance, otherwise return 0 and let the caller skip
-// the entry. Either way the real figure comes back through actualRisk, so the
-// overshoot is logged rather than hidden.
-double LotForRisk(double slDistance, double &actualRisk, double riskBudget)
-  {
-   actualRisk = 0.0;
-   if(riskBudget <= 0 || slDistance <= 0) return(0.0);
-
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0) return(0.0);
-
-   double lossPerLot = slDistance * (tickValue / tickSize);
-   if(lossPerLot <= 0) return(0.0);
-
-   double lot = riskBudget / lossPerLot;
-   if(g_volStep > 0)
-      lot = MathFloor(lot / g_volStep) * g_volStep;
-
-   if(lot < g_volMin)
-     {
-      double floorRisk = g_volMin * lossPerLot;
-      if(InpMaxRiskOvershoot > 0
-         && floorRisk > riskBudget * InpMaxRiskOvershoot)
-        {
-         PrintFormat("AjipSnD: entry skipped — min lot %.2f on a %.1f pt stop risks %.2f, "
-                     "budget %.2f, cap %.2f",
-                     g_volMin, slDistance / g_point, floorRisk, riskBudget,
-                     riskBudget * InpMaxRiskOvershoot);
-         return(0.0);
-        }
-      lot = g_volMin;
-     }
-
-   if(lot > g_volMax) lot = g_volMax;
-
-   lot = NormalizeDouble(lot, 8);
-   actualRisk = lot * lossPerLot;
-   return(lot);
-  }
-
 //==================================================================
 // GET PERIOD PNL — sum realized profit in [from, to]
 //==================================================================
@@ -251,11 +199,13 @@ void UpdateMfeMae()
   }
 
 //==================================================================
-// PARTIAL CLOSE — once floating profit reaches InpPartialCloseRR times the
-// ORIGINAL stop distance (same price-distance RR convention OpenMarketWith-
-// StructuralStops uses for InpTakeProfitRR), close a slice and move the
-// remainder's SL to breakeven. One-shot: partialClosed gates it from firing
-// twice, partialCloseSkipped gates a slice that can never be brokered.
+// POINTS-BASED EXIT MANAGEMENT — no SL/TP exists at placement (fixed lot,
+// no stop distance to size or anchor either one against — see
+// AjipSnD_PendingEntry.mqh), so everything below is what actually closes a
+// position: either this EA modifying the broker-side SL/TP itself, or the
+// account-level daily/final max-loss close-all as a last resort. There is
+// no per-position protective stop until one of CheckLossRecoveryTp or
+// CheckPartialClose sets one.
 //==================================================================
 
 //---- Volume to carve off, respecting the broker's step/minimum. 0.0 means
@@ -277,25 +227,73 @@ double PartialCloseVolume(double currentVol)
    return(vol);
   }
 
-//---- Check one entry against its RR trigger; close the slice + SL->BE ----
+//---- Adverse-side safety net: once floating loss reaches InpLossPointsSetTpBe,
+// rest a TP at breakeven so the position closes there the instant (if ever)
+// price recovers, instead of needing to run all the way to a full profit
+// target after having already been this far underwater. Does not cap the
+// loss itself — there is no SL here, only a TP the position may never reach.
+// One-shot (tpBeArmed); skipped entirely once partialClosed, since the
+// remainder's SL is already at or better than breakeven by then (see
+// CheckPartialClose) — a TP resting exactly at breakeven at that point
+// would only ever fire on the way back DOWN through it, undercutting
+// whatever the trailing stop has already locked in above breakeven.
+//==================================================================
+void CheckLossRecoveryTp(int idx)
+  {
+   if(InpLossPointsSetTpBe <= 0) return;
+   if(g_entries[idx].tpBeArmed || g_entries[idx].partialClosed) return;
+
+   ulong ticket = g_entries[idx].ticket;
+   if(!PositionSelectByTicket(ticket)) return;
+
+   int    dir        = g_entries[idx].dir;
+   double entryPrice = g_entries[idx].entryPrice;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double curPrice = (dir == 1) ? tick.bid : tick.ask;   // side the position actually closes on
+
+   double lossPoints = (dir == 1)
+                       ? (entryPrice - curPrice) / g_point
+                       : (curPrice - entryPrice) / g_point;
+   if(lossPoints < InpLossPointsSetTpBe) return;
+
+   double bePrice = (dir == 1)
+                    ? entryPrice + InpBreakEvenOffsetPoints * g_point
+                    : entryPrice - InpBreakEvenOffsetPoints * g_point;
+   bePrice = NormalizeDouble(bePrice, g_digits);
+
+   double curSl = PositionGetDouble(POSITION_SL);
+   if(!trade.PositionModify(ticket, curSl, bePrice))
+     {
+      PrintFormat("AjipSnD: TP->BE FAILED ticket=%I64u be=%.5f retcode=%d", ticket, bePrice, trade.ResultRetcode());
+      return;   // retry next tick
+     }
+
+   g_entries[idx].tpBeArmed = true;
+   PrintFormat("AjipSnD: TP->BE armed ticket=%I64u (loss %.1f pts >= %.1f) -> TP %.5f",
+               ticket, lossPoints, InpLossPointsSetTpBe, bePrice);
+  }
+
+//---- Favourable-side: once floating profit reaches InpPartialClosePoints,
+// close a slice and move the remainder's SL to breakeven. One-shot:
+// partialClosed gates it from firing twice, partialCloseSkipped gates a
+// slice that can never be brokered. ----
 void CheckPartialClose(int idx)
   {
    if(g_entries[idx].partialClosed || g_entries[idx].partialCloseSkipped) return;
-   if(!g_entries[idx].hasStructuralSl || g_entries[idx].slPrice <= 0.0) return;
 
-   int    dir    = g_entries[idx].dir;
-   double slDist = MathAbs(g_entries[idx].entryPrice - g_entries[idx].slPrice);
-   if(slDist <= 0.0) return;
-
-   double trigger = (dir == 1)
-                    ? g_entries[idx].entryPrice + InpPartialCloseRR * slDist
-                    : g_entries[idx].entryPrice - InpPartialCloseRR * slDist;
+   int    dir        = g_entries[idx].dir;
+   double entryPrice = g_entries[idx].entryPrice;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick)) return;
    double exitPrice = (dir == 1) ? tick.bid : tick.ask;   // side the position actually closes on
-   bool   reached   = (dir == 1) ? (exitPrice >= trigger) : (exitPrice <= trigger);
-   if(!reached) return;
+
+   double profitPoints = (dir == 1)
+                         ? (exitPrice - entryPrice) / g_point
+                         : (entryPrice - exitPrice) / g_point;
+   if(profitPoints < InpPartialClosePoints) return;
 
    double currentVol = PositionGetDouble(POSITION_VOLUME);
    double closeVol    = PartialCloseVolume(currentVol);
@@ -316,14 +314,14 @@ void CheckPartialClose(int idx)
      }
 
    g_entries[idx].partialClosed = true;
-   PrintFormat("AjipSnD: Partial close ticket=%I64u — closed %.2f lot @ RR>=%.1f (price=%.5f)",
-               ticket, closeVol, InpPartialCloseRR, exitPrice);
+   PrintFormat("AjipSnD: Partial close ticket=%I64u — closed %.2f lot @ profit>=%.1f pts (price=%.5f)",
+               ticket, closeVol, InpPartialClosePoints, exitPrice);
 
    if(!PositionSelectByTicket(ticket)) return;   // broker closed it outright despite the split — nothing left to move to BE
 
    double bePrice = (dir == 1)
-                    ? g_entries[idx].entryPrice + InpBreakEvenOffsetPoints * g_point
-                    : g_entries[idx].entryPrice - InpBreakEvenOffsetPoints * g_point;
+                    ? entryPrice + InpBreakEvenOffsetPoints * g_point
+                    : entryPrice - InpBreakEvenOffsetPoints * g_point;
    bePrice = NormalizeDouble(bePrice, g_digits);
 
    double curTp = PositionGetDouble(POSITION_TP);
@@ -335,7 +333,7 @@ void CheckPartialClose(int idx)
 
 //==================================================================
 // TRAILING STOP — only for positions that already partial-closed (the
-// "runner" half of the position). Tightens toward price in LTF-ATR steps and
+// "runner" half of the position). Tightens toward price in HTF-ATR steps and
 // only ever tightens; InpTrailingStepAtr throttles how often it actually
 // touches the broker so a trending market doesn't call PositionModify on
 // every single tick for a fractional-point improvement.
@@ -346,8 +344,8 @@ void UpdateTrailingStop(int idx)
    if(!PositionSelectByTicket(ticket)) return;
 
    int    dir      = g_entries[idx].dir;
-   double atrLtf    = GetAtrValue(false);
-   double trailDist = InpTrailingStopAtr * atrLtf;
+   double atrHtf    = GetAtrValue(true);
+   double trailDist = InpTrailingStopAtr * atrHtf;
    if(trailDist <= 0.0) return;
 
    MqlTick tick;
@@ -362,7 +360,7 @@ void UpdateTrailingStop(int idx)
    bool improves = (curSl <= 0.0) || ((dir == 1) ? (newSl > curSl) : (newSl < curSl));
    if(!improves) return;
 
-   double step = InpTrailingStepAtr * atrLtf;
+   double step = InpTrailingStepAtr * atrHtf;
    if(step > 0.0 && curSl > 0.0 && MathAbs(newSl - curSl) < step) return;   // too small a move yet
 
    long   stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -380,18 +378,20 @@ void UpdateTrailingStop(int idx)
   }
 
 //==================================================================
-// DISPATCH — one pass over open entries: partial-close check, then trailing
-// for whichever of them already partial-closed. Called every tick, same as
-// UpdateMfeMae, since the RR trigger is a live price level, not a bar-close
-// event.
+// DISPATCH — one pass over open entries: loss-recovery TP, then partial-close,
+// then trailing for whichever already partial-closed. Called every tick, same
+// as UpdateMfeMae, since every trigger here is a live price level, not a
+// bar-close event.
 //==================================================================
 void ManagePartialCloseAndTrailing()
   {
-   if(!InpPartialCloseEnabled && !InpTrailingStopEnabled) return;
+   if(InpLossPointsSetTpBe <= 0 && !InpPartialCloseEnabled && !InpTrailingStopEnabled) return;
 
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
       if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+
+      CheckLossRecoveryTp(i);
 
       if(InpPartialCloseEnabled)
          CheckPartialClose(i);
@@ -447,8 +447,10 @@ double ComputeRealizedPnl(int idx)
 
 //==================================================================
 // PER-TRADE CSV — one row per closed position. Records the exit reason
-// the broker actually used and normalises P&L by the risk the trade
-// was sized for, so results are stated in R.
+// the broker actually used. risk_usd/pnl_r/mfe_r/mae_r are R-multiple
+// columns from the earlier risk-based-sizing era — riskUsd is always 0 now
+// (fixed lot, no stop to size against), so those four always read 0 rather
+// than a real multiple. Kept for CSV schema stability rather than removed.
 //
 // ltf_zone_time is the join key back to the zone CSV: it is what
 // connects a trade's outcome to the characteristics of the zone that
