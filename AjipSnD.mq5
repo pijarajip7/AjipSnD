@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.1-htfcontainment"
+#define EA_BUILD "5.2-tpbeinit"
 
 #include <Trade\Trade.mqh>
 
@@ -300,9 +300,10 @@ void OnTick()
    // per tick and self-gates. Observation only; places no orders.
    DriftArmTrend();
 
-   // 1b. Partial close (RR target -> SL to BE) + trailing stop on runners that
-   // already partial-closed. Must run before the target/loss close-all checks
-   // below so their PnL gates see the just-updated position state.
+   // 1b. Loss-side TP->BE, profit-side partial close -> SL to BE, then
+   // trailing stop on runners that already partial-closed. Must run before
+   // the target/loss close-all checks below so their PnL gates see the
+   // just-updated position state.
    ManagePartialCloseAndTrailing();
 
    // 2. Final target check (blocked during news blackout)

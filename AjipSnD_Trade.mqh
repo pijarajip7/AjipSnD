@@ -31,6 +31,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
    g_entries[sz].zoneTime        = po.zoneTime;
    g_entries[sz].triggerReason   = po.triggerReason;
+   g_entries[sz].tpBeArmed           = false;
    g_entries[sz].partialClosed       = false;
    g_entries[sz].partialCloseSkipped = false;
   }
