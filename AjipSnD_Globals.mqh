@@ -85,7 +85,7 @@ struct EntryTracker
    double   riskUsd;         // intended risk at entry — denominator for R-multiples
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
-   string   triggerReason;      // which rejection criterion fired: criteria1/engulfing/pinbar/star ("unknown" if recovered across a restart)
+   string   triggerReason;      // always "pendingorder" ("unknown" if recovered across a restart)
    bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
    bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
   };
@@ -103,12 +103,12 @@ struct EntryFillInfo
    double   lot;       // volume actually submitted
    double   riskUsd;   // intended risk this order was sized for (0=fixed-lot mode)
    double   atrLtf;    // LTF ATR at placement — carried through to the position
-   string   triggerReason; // which rejection criterion fired
+   string   triggerReason; // always "pendingorder"
   };
 
-// Pending-order mode only (see AjipSnD_PendingEntry.mqh) — one entry per
-// resting limit order, from placement until it either triggers (folds into
-// EntryTracker via AddEntry, same as any other fill) or expires/is cancelled.
+// See AjipSnD_PendingEntry.mqh — one entry per resting limit order, from
+// placement until it either triggers (folds into EntryTracker via AddEntry,
+// same as any other fill) or expires/is cancelled.
 struct PendingOrderTracker
   {
    ulong    ticket;
@@ -142,15 +142,6 @@ ENUM_TREND     g_ltfTrend          = TREND_DOWN;
 SnDZone        g_ltfCandidate;
 datetime       g_ltfLastBarTime    = 0;
 
-// ---- Rolling history for multi-bar rejection patterns (engulfing, star) ----
-// [0]=most recently closed LTF bar, [1]=one bar back, [2]=two bars back.
-// Shifted in UpdateLTF, which is the single choke point both live ticks and
-// the OnInit replay funnel through in true chronological order — a live
-// CopyRates(shift) call inside CheckRejectionRetests would be wrong during
-// replay, since "shift" there means relative to actual now, not to whatever
-// historical bar is being replayed.
-MqlRates       g_ltfRecentBars[3];
-
 // ---- Zone follow-through validation ----
 // LTF: always-on. HTF: gated by InpRequireZoneValidation.
 SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
@@ -166,7 +157,7 @@ bool           g_htfAwaitingValidation = false;
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
 
-// ---- Pending-order tracking (pending-order entry mode only) ----
+// ---- Pending-order tracking ----
 PendingOrderTracker g_pendingOrders[];
 
 // ---- Symbol info cache ----
@@ -231,15 +222,12 @@ struct LtfValidatedZone
   };
 LtfValidatedZone g_ltfValidatedHistory[];
 
-// ---- Entry mechanism — two mutually exclusive modes, see InpUsePendingOrderEntry ----
+// ---- Entry mechanism — pending-order entry, see AjipSnD_PendingEntry.mqh ----
 // HTF here is a pure directional bias, not a price range to sit inside: an
 // HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
-// direction get saved. Rejection mode (default): a saved zone waits for ITS
-// OWN retest + rejection (wick back in, closed back out, with real momentum)
-// before anything is traded — no zone is ever traded straight off its own
-// validation. Unproven — written directly to spec, not measured first.
-// Pending-order mode: a saved zone gets a resting limit order at its
-// midpoint immediately, no rejection wait — see AjipSnD_PendingEntry.mqh.
+// direction get saved. A saved zone gets a resting limit order at its
+// midpoint immediately — no rejection wait, no pattern match. Unproven —
+// written directly to spec, not measured first.
 int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
 
 // The HTF zone backing the CURRENT g_htfBiasDir, remembered past the moment
@@ -258,7 +246,7 @@ struct SavedLtfZone
    datetime time;
    bool     isDemand;
    bool     touched;     // live: any wick has re-entered the range, whether or not it resolved
-   bool     used;        // resolved (rejected+traded, structurally broken, or superseded) — stop checking
+   bool     used;        // resolved (touched, or superseded) — stop checking
   };
 SavedLtfZone g_savedLtfZones[];
 

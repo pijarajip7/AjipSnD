@@ -2,10 +2,10 @@
 //|                                                      AjipSnD.mq5 |
 //|  Supply & Demand EA — zone-based trading on MT5.                 |
 //|  HTF zone validation sets a directional bias, not a price range.  |
-//|  Matching LTF zones are saved and watched; entry fires only once  |
-//|  that LTF zone's own retest is REJECTED (wick back in, closed     |
-//|  back out, real-bodied bar) — a market order with structural      |
-//|  SL/TP. Exit via broker SL/TP or daily/final/session close-all.   |
+//|  Every matching LTF zone gets an immediate resting limit order at |
+//|  its own midpoint — no rejection wait, no pattern match — with SL |
+//|  beyond the HTF bias zone's own extreme + ATR buffer. Exit via    |
+//|  broker SL/TP or daily/final/session close-all.                   |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "3.2-pendingzonetouch"
+#define EA_BUILD "4.0-pendingonly"
 
 #include <Trade\Trade.mqh>
 
@@ -50,40 +50,7 @@ input long   InpMagicNumber  = 99002;  // Magic number
 // re-entry inside 30 minutes anyway, so 15 alone captures the effect.
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 
-input group "Rejection Confirmation Criteria"
-// Which pattern(s) count as a confirmed rejection, OR'd together — first
-// match on a given bar wins. Every criterion still requires the zone to have
-// been wicked into and this bar's close to have come back out; they only
-// differ on what shape counts as proof beyond that. Each can be toggled
-// independently to isolate its contribution in a backtest. None of these
-// thresholds are validated yet — starting values, not measured ones.
-input bool   InpCriteria1Enabled  = true;    // Criteria 1: strong close-back rejection (the original method)
-input double InpRejectionBodyAtr  = 0.5;     // Criteria 1: min rejection-bar body/ATR in the favourable direction
-input bool   InpEngulfingEnabled  = false;   // Engulfing pattern (2 bars)
-input double InpEngulfingBodyAtr  = 0.5;     // Engulfing: min engulfing-bar body/ATR
-input bool   InpPinBarEnabled     = false;   // Pin bar / hammer (1 bar)
-input double InpPinBarWickRatio   = 2.0;     // Pin bar: min wick length as a multiple of body (0 body treated as 1 point)
-input bool   InpStarEnabled       = false;   // Morning/evening star (3 bars)
-input double InpStarMiddleRatio   = 0.3;     // Star: max middle-bar body as a fraction of the first bar's body
-input double InpStarReclaimPct    = 0.5;     // Star: min reclaim of the first bar's body by the third bar's close
-// Applies after any of the 4 criteria above confirms — a late check on
-// where price actually is, not another shape to match. If the confirming
-// bar's close has already run past the zone by more than this multiple of
-// the zone's own width, the rejection is treated as too late to chase: the
-// zone keeps being watched rather than resolving here, in case a closer
-// rejection follows.
-input double InpMaxEntryDistanceZoneWidth = 1.0;  // Max entry distance beyond the zone, as a multiple of zone width (0=disabled)
-
 input group "Stop Loss & Take Profit"
-input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection pattern's own extreme, in LTF ATR
-// Risk per trade in account currency; lot is derived from it and the stop
-// distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
-// figure because the broker's minimum lot puts a floor under achievable risk:
-// with 0.01 min lot and the measured XAUUSD stop distances, a $5 budget is
-// unreachable on 64% of trades and the realised average lands near $10
-// anyway. At $15 only 19% are floored and the realised average matches the
-// target.
-input double InpRiskPerTrade      = 50.0;  // Risk per trade ($; 0=disable sizing, no trades)
 // TP as a multiple of the ACTUAL stop distance just computed (HTF far edge +
 // buffer), not an independent ATR figure — the two used to be sized from
 // unrelated bases, so the realised reward:risk floated wherever they happened
@@ -101,7 +68,7 @@ input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=dis
 // over the line; at 1.00 it would drop 5.8% of entries, at 1.25 only 3.4%,
 // while still capping the observed tail at $18.73. 0 = accept any overshoot,
 // which restores the run #4 behaviour for an unbiased measurement pass.
-input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
+input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of the risk budget (0=no cap)
 
 input group "Partial Close & Trailing Stop"
 // Fires once per position: when floating profit reaches this multiple of the
@@ -113,20 +80,15 @@ input double InpPartialCloseRR        = 2.0;    // RR multiple of the original s
 input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the RR target
 input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry)
 // Trailing only ever arms AFTER the partial close above has fired on that
-// position — the remainder is the "runner." Distance/step are in LTF ATR,
-// same convention as InpZoneSlBufferAtr.
+// position — the remainder is the "runner." Distance/step are in LTF ATR.
 input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
 input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
 input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
 
-input group "Pending Order Entry (Alternative Mode)"
-// Mutually exclusive with rejection-confirmation entry (the "Rejection
-// Confirmation Criteria" and InpZoneSlBufferAtr/InpRejectionBodyAtr-style
-// settings above are ignored while this is on). Instead of waiting for a
-// rejection, every LTF zone saved under the current HTF bias gets an
-// immediate resting limit order at its own midpoint — no wait, no pattern
-// match. Unproven, written directly to spec — see AjipSnD_PendingEntry.mqh.
-input bool   InpUsePendingOrderEntry      = false;  // Use pending-limit-at-zone-midpoint entry instead of rejection-confirmation entry
+input group "Pending Order Entry"
+// Every LTF zone saved under the current HTF bias gets an immediate resting
+// limit order at its own midpoint — no wait, no pattern match. Unproven,
+// written directly to spec — see AjipSnD_PendingEntry.mqh.
 // Split evenly across however many pending orders are active the moment a
 // new one is placed — fixed at that point, not rebalanced later, so actual
 // total risk in flight drifts around this figure rather than holding it
@@ -240,11 +202,10 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f rejectionBodyAtr=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
                InpMaxRiskOvershoot,
                InpTakeProfitRR,
-               InpRejectionBodyAtr,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",
@@ -316,9 +277,9 @@ int OnInit()
 
    Print("══════════════════════════════════════");
    Print("AjipSnD initialized successfully");
-   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, RiskPerTrade=%.2f",
+   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, PendingTotalRisk=%.2f",
                EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
-               InpMaxZones, InpRiskPerTrade);
+               InpMaxZones, InpPendingOrderTotalRisk);
    PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
                InpSessionStart, InpSessionEnd,
                g_sessionFilterEnabled ? "ENABLED" : "ALL DAY",

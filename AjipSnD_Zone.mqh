@@ -27,75 +27,6 @@ bool IsBullBar(const MqlRates &bar)
    return(bar.close > bar.open);
   }
 
-//==================================================================
-// ALTERNATE REJECTION-CONFIRMATION PATTERNS — each an independent OR'd
-// criterion CheckRejectionRetests can accept alongside (or instead of) the
-// original close-back-out method. All three assume the shared gates already
-// passed (zone wicked into, confirming bar's close back outside it) — they
-// only judge whether the bar(s) LOOK like a real reversal.
-//==================================================================
-
-//---- Engulfing: confirming bar's body fully contains the previous bar's
-// body, opposite colors, confirming bar itself strong enough ----
-bool IsEngulfing(const MqlRates &cur, const MqlRates &prev, bool isDemand, double atrLtf)
-  {
-   if(prev.time == 0) return(false);   // not enough history yet (EA just started)
-
-   if(isDemand)
-     {
-      if(!IsBullBar(cur) || !IsBearBar(prev)) return(false);
-      if(!(cur.open <= prev.close && cur.close >= prev.open)) return(false);
-     }
-   else
-     {
-      if(!IsBearBar(cur) || !IsBullBar(prev)) return(false);
-      if(!(cur.open >= prev.close && cur.close <= prev.open)) return(false);
-     }
-
-   double body = MathAbs(cur.close - cur.open);
-   return(atrLtf > 0 && body / atrLtf >= InpEngulfingBodyAtr);
-  }
-
-//---- Pin bar / hammer: small body, long wick on the rejection side, short
-// wick on the other — single bar, no history needed ----
-bool IsPinBar(const MqlRates &cur, bool isDemand)
-  {
-   double body = MathAbs(cur.close - cur.open);
-   if(body <= 0) body = _Point;   // avoid div-by-zero on a perfect doji
-   double lowerWick = MathMin(cur.open, cur.close) - cur.low;
-   double upperWick = cur.high - MathMax(cur.open, cur.close);
-
-   if(isDemand)
-      return(lowerWick >= InpPinBarWickRatio * body && lowerWick > upperWick);
-   else
-      return(upperWick >= InpPinBarWickRatio * body && upperWick > lowerWick);
-  }
-
-//---- Morning/evening star: big bar, small indecision bar, big reversal bar
-// reclaiming back into the first bar's body ----
-bool IsStar(const MqlRates &cur, const MqlRates &prev1, const MqlRates &prev2, bool isDemand)
-  {
-   if(prev1.time == 0 || prev2.time == 0) return(false);   // not enough history yet
-
-   double bodyFirst  = MathAbs(prev2.close - prev2.open);
-   double bodyMiddle = MathAbs(prev1.close - prev1.open);
-   if(bodyFirst <= 0) return(false);
-   if(bodyMiddle > InpStarMiddleRatio * bodyFirst) return(false);
-
-   if(isDemand)
-     {
-      if(!IsBearBar(prev2) || !IsBullBar(cur)) return(false);
-      double reclaimLevel = prev2.close + InpStarReclaimPct * bodyFirst;
-      return(cur.close >= reclaimLevel);
-     }
-   else
-     {
-      if(!IsBullBar(prev2) || !IsBearBar(cur)) return(false);
-      double reclaimLevel = prev2.close - InpStarReclaimPct * bodyFirst;
-      return(cur.close <= reclaimLevel);
-     }
-  }
-
 //---- Fill ATR-normalised metrics + evaluate the entry quality gate ----
 // Runs for every confirmed zone regardless of InpZoneQualityLog, because
 // qualityPass gates entries. Backtest over two separate 12-month XAUUSD
@@ -509,7 +440,7 @@ void DrawHtfZoneRect(string name, datetime time, double price1, double price2, c
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
   }
 
-//---- Draw saved (awaiting-rejection or resolved) LTF zones — the only chart
+//---- Draw saved (awaiting-touch or resolved) LTF zones — the only chart
 // objects. HTF is a directional bias, not a price range to draw — the LTF
 // zone is the thing actually worth watching move to move. A zone still being
 // watched (unused) gets its rectangle created (if new) and stretched to the
@@ -615,39 +546,6 @@ void DrawHtfMaLine()
      }
    g_maLineLastTime  = t[0];
    g_maLineLastValue = ma[0];
-  }
-
-//---- Draw a buy/sell marker + trigger-reason label where a rejection was
-// confirmed. Fires whenever CheckRejectionRetests finds a match, whether or
-// not EntryGateBlocked later vetoes the actual order and whether this is a
-// live bar or OnInit's replay — "confirmed" is about the pattern, not the
-// fill, so the marker tracks the former. Never touched again once drawn,
-// same as the zone rectangles and MA line above.
-void DrawEntrySignal(datetime time, double price, int dir, string reason)
-  {
-   string tag  = IntegerToString((long)time) + (dir == 1 ? "B" : "S");
-   string name = g_objPrefix + "SIG_" + tag;
-
-   if(ObjectFind(0, name) < 0)
-     {
-      ObjectCreate(0, name, dir == 1 ? OBJ_ARROW_BUY : OBJ_ARROW_SELL, 0, time, price);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, dir == 1 ? clrLime : clrRed);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-     }
-
-   string labelName = g_objPrefix + "SIGTXT_" + tag;
-   if(ObjectFind(0, labelName) < 0)
-     {
-      ObjectCreate(0, labelName, OBJ_TEXT, 0, time, price);
-      ObjectSetString(0, labelName, OBJPROP_TEXT, reason);
-      ObjectSetInteger(0, labelName, OBJPROP_COLOR, dir == 1 ? clrLime : clrRed);
-      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
-      // Text drawn away from the arrow instead of on top of it — anchor at
-      // the label's own top for a BUY marker (text grows downward, further
-      // below the bar the arrow already sits under) and at its bottom for
-      // a SELL marker (text grows upward, further above the bar).
-      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, dir == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
-     }
   }
 
 //==================================================================
@@ -895,7 +793,7 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
 // touchedAtValidation is passed in rather than read from g_zoneTracker: that
 // tracker only exists when InpZoneQualityLog is on (TrackZone is what
 // creates the slot FindTrackedZone below looks up), so deriving it from
-// there made the ENTIRE rejection-entry mechanism below — superseded-marking
+// there made the ENTIRE pending-order mechanism below — superseded-marking
 // and the g_ltfValidatedHistory append, not just the CSV diagnostic fields —
 // silently stop working the moment quality logging was switched off. The
 // caller (UpdateLTF) now tracks g_ltfPendingTouched independently for

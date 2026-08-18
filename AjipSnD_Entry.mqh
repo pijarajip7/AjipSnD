@@ -49,7 +49,7 @@ void RebuildTrackedPositions()
       g_entries[idx].slPrice         = curSl;
       g_entries[idx].tpPrice         = PositionGetDouble(POSITION_TP);
       g_entries[idx].zoneTime        = 0;   // originating zone is not recoverable
-      g_entries[idx].triggerReason   = "unknown";   // which criterion fired is not recoverable either
+      g_entries[idx].triggerReason   = "unknown";   // not recoverable either
 
       // Reconstruct the risk this position represents from its live stop, so
       // R-multiples stay meaningful for trades that straddle a restart.

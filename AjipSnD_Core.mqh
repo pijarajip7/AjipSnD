@@ -61,192 +61,34 @@ void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay, datetime htfB
       ArrayResize(g_ltfZoneDrawEnd, sz + 1);
       g_ltfZoneDrawEnd[sz] = 0;
       // Placing the order doesn't retire the zone — it stays watched (and
-      // drawn live) exactly like rejection mode, until CheckPendingZoneTouches
-      // (called from UpdateLTF) sees price actually reach it. Only the live
-      // order itself is skipped during replay, same as
-      // OpenMarketWithStructuralStops never firing there either.
-      if(InpUsePendingOrderEntry && !isReplay)
+      // drawn live) until CheckPendingZoneTouches (called from UpdateLTF)
+      // sees price actually reach it. Only the live order itself is skipped
+      // during replay — by the time OnInit runs, price has already moved on
+      // from wherever a historical zone's midpoint sat, so there is no
+      // legitimate resting order left to place.
+      if(!isReplay)
          PlacePendingOrderForZone(g_savedLtfZones[sz], htfBarTime);
       matches++;
      }
 
    if(InpEnableLog)
-      PrintFormat("AjipSnD: HTF bias -> %s — %d LTF zone(s) matched since %s, saved %d for rejection watch",
+      PrintFormat("AjipSnD: HTF bias -> %s — %d LTF zone(s) matched since %s, saved %d for pending-order watch",
                   htfZone.isDemand ? "DEMAND" : "SUPPLY", candidates,
                   TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES), matches);
   }
 
-//---- Check every saved zone against this closed bar: break, or rejection ----
-// A saved zone stays watchable through any number of weak/shallow touches —
-// it is NOT one-shot on first contact. It only resolves two ways:
-//   1. Structural break — a body CLOSE beyond the zone's far edge (or its
-//      sweep level, if it had one at confirmation), exactly the rule
-//      InvalidateHtfZones already uses for HTF zones. Price didn't just
-//      retest and fail, it went straight through — the thesis is gone.
-//   2. Rejection — wick re-enters the zone's range AND this bar's own body
-//      is large relative to LTF ATR in the favourable direction AND the
-//      close ends back outside the zone. All three together, not just the
-//      close-back-out alone (which InpRejectEntryProbe already showed is
-//      close to the weakest possible bar of the "wick vs close" definitions
-//      this project has tried) — the body requirement is what separates a
-//      genuine rejection from a wick that grazed the level and drifted back
-//      on no momentum.
-// A touch that is neither a break nor a qualifying rejection resolves
-// nothing on its own — the zone is still intact and still worth waiting
-// on — but it is recorded (SavedLtfZone.touched) so SaveLtfZonesForHtfBias
-// can retire it later if a fresher same-direction zone shows up first.
+//---- Touch bookkeeping for every saved zone against this closed bar. The
+// order was already placed the instant the zone was saved (see
+// SaveLtfZonesForHtfBias) — there is no pattern to wait for here, only the
+// question of when to stop treating the zone as "still watching": the
+// moment price actually wicks into it, whether or not that also happened to
+// trigger the resting order. DrawSavedLtfZones reads used/g_ltfZoneDrawEnd
+// to freeze the zone's rectangle at that point instead of stretching it to
+// the current bar forever.
 //
-// isReplay (OnInit historical replay) still resolves a zone's fate exactly
-// as live does — used=true on a break or a confirmed rejection — but never
-// calls OpenMarketWithStructuralStops: by the time OnInit runs, price has
-// already moved on from wherever a historical rejection bar closed, so
-// there is no legitimate fill left to send at today's market price.
-void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
-  {
-   int n = ArraySize(g_savedLtfZones);
-   if(n == 0) return;
-
-   double atrLtf = GetAtrValue(false);
-   if(atrLtf <= 0) return;
-
-   double bodyAtr = MathAbs(bar.close - bar.open) / atrLtf;
-
-   for(int i = 0; i < n; i++)
-     {
-      if(g_savedLtfZones[i].used) continue;
-      if(bar.time <= g_savedLtfZones[i].time) continue;   // skip the zone's own confirm bar
-
-      bool   isDemand = g_savedLtfZones[i].isDemand;
-      double zLow     = g_savedLtfZones[i].low;
-      double zHigh    = g_savedLtfZones[i].high;
-
-      double breakLevel = isDemand
-                          ? (g_savedLtfZones[i].sweepLow  > 0 ? g_savedLtfZones[i].sweepLow  : zLow)
-                          : (g_savedLtfZones[i].sweepHigh > 0 ? g_savedLtfZones[i].sweepHigh : zHigh);
-      bool broken = isDemand ? (bar.close < breakLevel) : (bar.close > breakLevel);
-      if(broken)
-        {
-         g_savedLtfZones[i].used = true;
-         g_ltfZoneDrawEnd[i] = bar.time;
-         if(InpEnableLog)
-            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] BROKEN (close %.5f past %.5f) — invalidated",
-                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bar.close, breakLevel);
-         continue;
-        }
-
-      bool wickedIn = isDemand ? (bar.low <= zHigh) : (bar.high >= zLow);
-      if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
-
-      // Captured before the flag below flips it — pin bar is restricted to
-      // the zone's very first touch (see the IsPinBar call further down): a
-      // sharp single-bar rejection means something different the first time
-      // price reaches a fresh level than it does after the level has
-      // already been tested and held once.
-      bool isFirstTouch = !g_savedLtfZones[i].touched;
-
-      // Recorded even if this particular touch doesn't resolve anything —
-      // SaveLtfZonesForHtfBias reads this to retire the zone the moment a
-      // fresher same-direction one is saved, instead of it lingering touched
-      // but never explicitly resolved.
-      g_savedLtfZones[i].touched = true;
-
-      // Shared gate across every criterion below: the confirming bar must
-      // have closed back outside the zone. None of criteria 1/engulfing/pin
-      // bar/star can fire on a bar that's still sitting inside the range.
-      bool closedOut = isDemand ? (bar.close > zHigh) : (bar.close < zLow);
-      if(!closedOut) continue;   // touched but hasn't closed back out yet — still watching
-
-      bool   matched     = false;
-      string patternName = "";
-      int    patternBars = 1;   // how many trailing bars (incl. bar) feed the SL extreme
-
-      if(InpCriteria1Enabled)
-        {
-         bool rightColor = isDemand ? IsBullBar(bar) : IsBearBar(bar);
-         if(rightColor && bodyAtr >= InpRejectionBodyAtr)
-           {
-            matched = true; patternName = "criteria1"; patternBars = 1;
-           }
-        }
-      if(!matched && InpEngulfingEnabled && IsEngulfing(bar, g_ltfRecentBars[1], isDemand, atrLtf))
-        {
-         matched = true; patternName = "engulfing"; patternBars = 2;
-        }
-      if(!matched && InpPinBarEnabled && isFirstTouch && IsPinBar(bar, isDemand))
-        {
-         matched = true; patternName = "pinbar"; patternBars = 1;
-        }
-      if(!matched && InpStarEnabled && IsStar(bar, g_ltfRecentBars[1], g_ltfRecentBars[2], isDemand))
-        {
-         matched = true; patternName = "star"; patternBars = 3;
-        }
-      if(!matched) continue;   // touched, closed out, but no enabled criterion confirmed — still watching
-
-      if(InpMaxEntryDistanceZoneWidth > 0)
-        {
-         double zoneWidth     = zHigh - zLow;
-         double entryDistance = isDemand ? (bar.close - zHigh) : (zLow - bar.close);
-         if(zoneWidth > 0 && entryDistance > InpMaxEntryDistanceZoneWidth * zoneWidth)
-           {
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: %s rejection on %s zone [%.5f, %.5f] SKIPPED — entry %.5f too far "
-                           "(dist=%.5f > %.1fx width=%.5f)",
-                           patternName, isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bar.close,
-                           entryDistance, InpMaxEntryDistanceZoneWidth, zoneWidth);
-            continue;   // too far to chase — keep watching, a closer rejection might still come
-           }
-        }
-
-      g_savedLtfZones[i].used = true;
-      g_ltfZoneDrawEnd[i] = bar.time;
-
-      int    dir    = isDemand ? 1 : -1;
-      if(InpDrawLines)
-         DrawEntrySignal(bar.time, isDemand ? bar.low : bar.high, dir, patternName);
-
-      double buffer = InpZoneSlBufferAtr * atrLtf;
-      // Anchored to the rejection pattern's OWN extreme across however many
-      // bars it spans, not the zone's static boundary — the wick(s) that
-      // just got rejected are the actual proof the level held, and can sit
-      // shallower or deeper than the zone's edge (wickedIn only requires
-      // touching the range, not stopping at zLow/zHigh).
-      double patternExtreme = isDemand ? bar.low : bar.high;
-      if(patternBars >= 2)
-         patternExtreme = isDemand ? MathMin(patternExtreme, g_ltfRecentBars[1].low)
-                                    : MathMax(patternExtreme, g_ltfRecentBars[1].high);
-      if(patternBars >= 3)
-         patternExtreme = isDemand ? MathMin(patternExtreme, g_ltfRecentBars[2].low)
-                                    : MathMax(patternExtreme, g_ltfRecentBars[2].high);
-      double slPrice = isDemand
-                       ? NormalizeDouble(patternExtreme - buffer, g_digits)
-                       : NormalizeDouble(patternExtreme + buffer, g_digits);
-
-      if(isReplay)
-        {
-         if(InpEnableLog)
-            PrintFormat("AjipSnD: REJECTION confirmed (%s, init replay) on %s zone [%.5f, %.5f] bodyAtr=%.2f — resolved, no live order",
-                        patternName, isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr);
-         continue;
-        }
-
-      if(InpEnableLog)
-         PrintFormat("AjipSnD: REJECTION confirmed (%s) on %s zone [%.5f, %.5f] bodyAtr=%.2f — entering %s market",
-                     patternName, isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr, dir == 1 ? "BUY" : "SELL");
-
-      if(!EntryGateBlocked(dir))
-         OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time, patternName);
-     }
-  }
-
-//---- Pending-order mode's own touch bookkeeping — CheckRejectionRetests is
-// skipped entirely in this mode (the order was already placed the instant
-// the zone was saved; there is no rejection pattern left to look for), but
-// the zone still needs to leave the "still watching" state once price
-// actually reaches it, same as rejection mode's own touched/used lifecycle,
-// so DrawSavedLtfZones freezes the rectangle there instead of stretching it
-// forever. Deliberately does nothing about a zone whose pending order later
-// expires without ever being touched — that zone's rectangle keeps growing
-// until (if ever) price reaches it.
+// Deliberately does nothing about a zone whose pending order later expires
+// without ever being touched — that zone's rectangle keeps growing until
+// (if ever) price reaches it. Known gap, not yet handled.
 void CheckPendingZoneTouches(const MqlRates &bar)
   {
    int n = ArraySize(g_savedLtfZones);
@@ -273,7 +115,7 @@ void CheckPendingZoneTouches(const MqlRates &bar)
 // the excursion/drift probes) and per-bar chart redraws, since those either
 // write to disk or are meaningless replayed against bars that already
 // happened — but every core structural/decision step (zone detection,
-// validation, touch tracking, superseded-marking, the rejection watch list)
+// validation, touch tracking, superseded-marking, the pending-order watch list)
 // still runs exactly as it does live, via the SAME code path, so replay ends
 // in the same state continuous live operation would have reached.
 void UpdateLTF(const MqlRates &bar, bool isReplay = false)
@@ -282,14 +124,6 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       return;
 
    g_ltfLastBarTime = bar.time;
-
-   // Shift the rolling bar history BEFORE anything below reads it, so
-   // CheckRejectionRetests sees "bar" as current and g_ltfRecentBars[1]/[2]
-   // as one/two bars back — same order live ticks and the OnInit replay
-   // both process bars in, so this stays correct either way.
-   g_ltfRecentBars[2] = g_ltfRecentBars[1];
-   g_ltfRecentBars[1] = g_ltfRecentBars[0];
-   g_ltfRecentBars[0] = bar;
 
    // Quality tracker per-bar stats (excursions, first touch)
    if(InpZoneQualityLog && !isReplay)
@@ -336,7 +170,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched);
          // Nothing trades here: an LTF zone validating does not by itself earn
-         // an order. Saving for the rejection watch is triggered by HTF
+         // an order. Saving for the pending-order watch is triggered by HTF
          // validation instead (SaveLtfZonesForHtfBias in UpdateHTF), replaying
          // g_ltfValidatedHistory back to the HTF zone's own origin, so an LTF
          // zone that validates before the matching HTF bias exists is still
@@ -402,18 +236,12 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       g_ltfPendingTouched = false;
      }
 
-   // Check every saved zone against this closed bar. Rejection matching is
-   // skipped entirely in pending-order mode — the order was already placed
-   // the moment the zone was saved (see SaveLtfZonesForHtfBias) — but the
-   // zone still needs its own touch bookkeeping there, run regardless of
+   // Check every saved zone against this closed bar. Runs regardless of
    // isReplay so a zone that resolves during the OnInit replay doesn't sit
    // "still watching" forever once live processing starts.
    // Redraw is skipped during replay — ReplayInitialStructure draws once at
    // the end instead of redrawing on every historical bar.
-   if(!InpUsePendingOrderEntry)
-      CheckRejectionRetests(bar, isReplay);
-   else
-      CheckPendingZoneTouches(bar);
+   CheckPendingZoneTouches(bar);
    if(!isReplay)
      {
       DrawSavedLtfZones();
@@ -535,18 +363,17 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
    // DrawSavedLtfZones (called from UpdateLTF) is what actually matters on
    // screen.
 
-   // Pending-order mode's own upkeep — fold triggered orders into
-   // g_entries, cancel ones that timed out. Once per closed HTF bar (the
-   // unit InpPendingOrderExpiryHtfBars counts in), live only: replay has no
-   // real orders to manage, and RebuildTrackedPositions doesn't reconstruct
-   // g_pendingOrders on restart, so there is nothing to do differently for
-   // a fresh EA start either.
-   if(InpUsePendingOrderEntry && !isReplay)
+   // Fold triggered pending orders into g_entries, cancel ones that timed
+   // out. Once per closed HTF bar (the unit InpPendingOrderExpiryHtfBars
+   // counts in), live only: replay has no real orders to manage, and
+   // RebuildTrackedPositions doesn't reconstruct g_pendingOrders on restart,
+   // so there is nothing to do differently for a fresh EA start either.
+   if(!isReplay)
       ManagePendingOrders(bar.time);
   }
 
 //---- Replay LTF + HTF bars together, chronologically, to seed the EA's
-// initial structure AND the rejection-entry bias/history/save state — so it
+// initial structure AND the pending-order bias/history/save state — so it
 // starts with the same g_htfBiasDir/g_savedLtfZones it would have accumulated
 // running continuously through the lookback window, instead of sitting with
 // no bias until the first LIVE HTF validation.
@@ -555,11 +382,11 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
 // path, so there is exactly one definition of what a validated HTF/LTF zone
 // is — see their own comments for what isReplay skips (CSV/diagnostic writes,
 // per-bar chart redraws) and what it never skips (zone detection, follow-
-// through validation, touch/superseded bookkeeping, the rejection watch
-// list). It never places a real order: CheckRejectionRetests still resolves
-// every saved zone's fate against the historical bars that follow it, but
-// isReplay suppresses the actual market fill, since by the time this runs
-// price has already moved on from wherever a historical rejection closed.
+// through validation, touch/superseded bookkeeping, the zone watch list and
+// its own touch bookkeeping). It never places a real order: SaveLtfZonesFor-
+// HtfBias skips PlacePendingOrderForZone whenever isReplay is true, since by
+// the time this runs price has already moved on from wherever a historical
+// zone's midpoint sat — there is no legitimate resting order left to place.
 //
 // Interleaving the two streams by close time, not replaying LTF then HTF (or
 // vice versa) in two separate passes, is required for correctness, not just

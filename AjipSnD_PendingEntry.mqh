@@ -2,11 +2,9 @@
 #define AJIPSND_PENDINGENTRY_MQH
 
 //==================================================================
-// PENDING ORDER ENTRY — alternative to rejection-confirmation entry.
-// Active only when InpUsePendingOrderEntry=true (mutually exclusive with
-// CheckRejectionRetests — see UpdateLTF). Instead of waiting for a
-// rejection, every LTF zone saved under the current HTF bias gets an
-// immediate resting limit order at its own midpoint. SL sits beyond the
+// PENDING ORDER ENTRY — the EA's only entry mechanism. Every LTF zone saved
+// under the current HTF bias gets an immediate resting limit order at its
+// own midpoint — no rejection wait, no pattern match. SL sits beyond the
 // HTF bias zone's own far edge (g_htfBiasZoneHigh/Low) + an HTF-ATR
 // buffer — the same stop for every pending order sharing that bias, not a
 // per-zone stop. Risk is InpPendingOrderTotalRisk split evenly across

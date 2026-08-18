@@ -2,88 +2,6 @@
 #define AJIPSND_TRADE_MQH
 
 //==================================================================
-// OPEN MARKET WITH STRUCTURAL STOPS — the EA's only entry path.
-// Fills immediately at the current market price rather than resting at a
-// limit: the rejection has already happened by the time this is called (the
-// bar that confirmed it just closed), so there is no edge left to wait at —
-// price is already moving off the zone.
-//
-// slPrice is the caller's stop, anchored to the rejection bar's own extreme;
-// TP is derived here from the SAME price this order actually transacts at,
-// so the realised reward:risk is enforced against the real fill rather than
-// an independent figure.
-//==================================================================
-ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime, string triggerReason)
-  {
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick)) return(0);
-   double price = (dir == 1) ? tick.ask : tick.bid;
-
-   slPrice = ClampToStopsLevel(dir, price, slPrice, true);
-
-   double tpPrice = 0.0;
-   if(InpTakeProfitRR > 0 && slPrice > 0.0)
-     {
-      double riskDist = MathAbs(price - slPrice);
-      double reach = InpTakeProfitRR * riskDist;
-      tpPrice = (dir == 1)
-                ? NormalizeDouble(price + reach, g_digits)
-                : NormalizeDouble(price - reach, g_digits);
-      tpPrice = ClampToStopsLevel(dir, price, tpPrice, false);
-     }
-
-   double slDistance = (slPrice > 0.0) ? ((dir == 1) ? (price - slPrice) : (slPrice - price)) : 0.0;
-   if(slDistance <= 0.0)
-     {
-      Print("AjipSnD: Rejection entry skipped — non-positive SL distance");
-      return(0);
-     }
-
-   double actualRisk = 0.0;
-   double lot = LotForRisk(slDistance, actualRisk);
-   if(lot <= 0.0) return(0);
-   if(lot < g_volMin || lot > g_volMax)
-     {
-      PrintFormat("AjipSnD: Rejection entry skip — lot %.2f outside broker range", lot);
-      return(0);
-     }
-
-   string comment = StringFormat("AjipSnD %s REJECT", dir == 1 ? "BUY" : "SELL");
-   bool ok;
-   if(dir == 1)
-      ok = trade.Buy(lot, _Symbol, price, slPrice, tpPrice, comment);
-   else
-      ok = trade.Sell(lot, _Symbol, price, slPrice, tpPrice, comment);
-
-   if(!ok)
-     {
-      PrintFormat("AjipSnD: Rejection entry failed. retcode=%d", trade.ResultRetcode());
-      return(0);
-     }
-
-   ulong ticket = trade.ResultOrder();
-   double fillPrice = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_PRICE_OPEN) : price;
-   PrintFormat("AjipSnD: %s market-filled (rejection). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
-               dir == 1 ? "BUY" : "SELL", ticket, lot, fillPrice, slPrice, tpPrice);
-
-   EntryFillInfo po;
-   ZeroMemory(po);
-   po.ticket   = ticket;
-   po.dir      = dir;
-   po.price    = fillPrice;
-   po.zoneTime = zoneTime;
-   po.slPrice  = slPrice;
-   po.tpPrice  = tpPrice;
-   po.lot      = lot;
-   po.riskUsd  = actualRisk;
-   po.atrLtf   = GetAtrValue(false);
-   po.triggerReason = triggerReason;
-   AddEntry(ticket, dir, fillPrice, po);
-
-   return(ticket);
-  }
-
-//==================================================================
 // ADD ENTRY to tracking
 //==================================================================
 // The EntryFillInfo is passed through so the position inherits what the
@@ -174,12 +92,13 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
    return(widened);
   }
 
-//---- Lot sized so that hitting slDistance costs about InpRiskPerTrade ----
+//---- Lot sized so that hitting slDistance costs about riskBudget ----
 // Rounds DOWN to the broker's volume step: rounding up would spend more than
 // the risk budget, and the budget is the whole point. Returns 0.0 — meaning
 // "do not trade this setup" — whenever risk cannot actually be sized
-// (InpRiskPerTrade=0, no stop distance, or broker tick data unavailable).
-// Callers must treat 0.0 as a skip, not as a lot.
+// (riskBudget<=0, no stop distance, or broker tick data unavailable).
+// Callers must treat 0.0 as a skip, not as a lot. riskBudget is the caller's
+// own per-zone split of InpPendingOrderTotalRisk — see AjipSnD_PendingEntry.mqh.
 //
 // The broker's minimum lot puts a hard floor under achievable risk. When the
 // computed lot lands under it the position can only be opened by risking more
@@ -187,14 +106,9 @@ double ClampToStopsLevel(int dir, double price, double level, bool isStopLoss)
 // overshoot stays within tolerance, otherwise return 0 and let the caller skip
 // the entry. Either way the real figure comes back through actualRisk, so the
 // overshoot is logged rather than hidden.
-// riskBudget < 0 (the default) means "use InpRiskPerTrade" — the pending-
-// order entry mode passes its own per-zone split instead, everything else
-// about the sizing math is identical either way.
-double LotForRisk(double slDistance, double &actualRisk, double riskBudget = -1.0)
+double LotForRisk(double slDistance, double &actualRisk, double riskBudget)
   {
    actualRisk = 0.0;
-   if(riskBudget < 0) riskBudget = InpRiskPerTrade;
-
    if(riskBudget <= 0 || slDistance <= 0) return(0.0);
 
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
