@@ -31,6 +31,7 @@
 | HTF containment filter | Of the LTF zones matching the bias direction since the HTF zone's own origin bar, only those fully contained inside that specific HTF zone's `[low, high]` get saved and get a pending order |
 | Pending-order entry | Each qualifying LTF zone gets an immediate resting limit order at its own midpoint — no wait, no pattern match |
 | Fixed-lot sizing | Every entry uses `InpFixedLot` — no SL exists at placement to size risk-based sizing against |
+| Direction mode | `InpTradeMode` restricts pending orders to BUY-only, SELL-only, or both — checked in `EntryGateBlocked`, same as the other entry gates |
 | Zone touch tracking | A saved zone's rectangle freezes the moment price wicks into it (order already resting since save time); HTF structure itself still drops on a body CLOSE past the far edge (sweep-aware) |
 | Zone-watch cancellation | A resting order is cancelled once its own zone leaves the watch list (touched, or superseded) — no fixed-bar expiry |
 | No SL/TP at placement | Orders are placed bare; there is no per-position protective stop until the points-based exit logic below sets one |

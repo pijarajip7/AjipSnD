@@ -126,6 +126,16 @@ bool EntryGateBlocked(int dir)
       if(InpEnableLog) Print("AjipSnD: Entry blocked — News blackout");
       return(true);
      }
+   if(InpTradeMode == DIRECTION_BUY_ONLY && dir == -1)
+     {
+      if(InpEnableLog) Print("AjipSnD: Entry blocked — Trade mode is BUY-only");
+      return(true);
+     }
+   if(InpTradeMode == DIRECTION_SELL_ONLY && dir == 1)
+     {
+      if(InpEnableLog) Print("AjipSnD: Entry blocked — Trade mode is SELL-only");
+      return(true);
+     }
    if(dir == 1 && HtfMaBlocksBuy())
      {
       if(InpEnableLog) Print("AjipSnD: Entry blocked — HTF close below MA (BUY only above MA)");
