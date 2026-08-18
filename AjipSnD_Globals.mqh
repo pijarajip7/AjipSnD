@@ -361,6 +361,27 @@ bool MaxPositionsReached(int dir)
    return(DirectionalExposureCount(dir) >= InpMaxPositionsPerDir);
   }
 
+//---- Highest (dir=1/BUY) or lowest (dir=-1/SELL) entry price among
+// currently open, EA-tracked positions in this direction. 0.0 if none —
+// the caller then knows this would be the first position in that
+// direction. Used by MartingaleLotForDirection (AjipSnD_PendingEntry.mqh);
+// "open position" here means an actual filled position (g_entries), never
+// a still-resting pending order (g_pendingOrders isn't consulted).
+double ExtremeOpenEntryPrice(int dir)
+  {
+   double extreme = 0.0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(g_entries[i].dir != dir) continue;
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;   // closed since last check
+      if(extreme == 0.0
+         || (dir == 1  && g_entries[i].entryPrice > extreme)
+         || (dir == -1 && g_entries[i].entryPrice < extreme))
+         extreme = g_entries[i].entryPrice;
+     }
+   return(extreme);
+  }
+
 //---- Float getters (forward-declared, implemented in Trade.mqh) ----
 double GetDailyPnL();
 double GetFloatingPnL();

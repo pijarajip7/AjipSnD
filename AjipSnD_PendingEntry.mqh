@@ -4,12 +4,16 @@
 //==================================================================
 // PENDING ORDER ENTRY — the EA's only entry mechanism. Every LTF zone saved
 // under the current HTF bias gets an immediate resting limit order at its
-// own midpoint — no rejection wait, no pattern match. Fixed lot
-// (InpFixedLot), no SL/TP at placement: with no stop distance to size
-// against, risk-based sizing has nothing to compute, so every entry uses
-// the same lot. Exit is managed entirely after the fill, by the points-based
-// logic in AjipSnD_Trade.mqh (CheckLossRecoveryTp, CheckPartialClose,
-// UpdateTrailingStop).
+// own midpoint — no rejection wait, no pattern match, no SL/TP at
+// placement. Lot is InpFixedLot for the first entry in a direction, then
+// optionally doubles per InpMartingaleStepPoints for later ones in the same
+// direction — see MartingaleLotForDirection below. The trigger is always a
+// qualifying LTF zone; martingale only ever changes the LOT of an order
+// that a zone was already going to produce, it never places one on its own.
+// Exit is managed entirely after the fill, by the points-based logic in
+// AjipSnD_Trade.mqh (CheckLossRecoveryTp, CheckPartialClose,
+// UpdateTrailingStop) — independently per position, including for
+// martingale legs (each uses its own entry price, not a basket average).
 //
 // No time-based expiry: a resting order is cancelled only when its own
 // zone leaves the watch list — touched, or superseded by a fresher
@@ -25,22 +29,60 @@
 // it later fills).
 //==================================================================
 
+//---- Lot for a new pending order in this direction, given the price it
+// will actually rest at (refPrice — the zone's own midpoint, NOT current
+// market price: a limit order may sit unfilled for a while, so what
+// matters is how far past the extreme open position THIS ORDER'S OWN
+// level sits, not wherever the market happens to be trading right now at
+// placement time). InpFixedLot with nothing open yet in this direction, or
+// if this order's own price hasn't even reached past the extreme.
+// Otherwise doubles once per full InpMartingaleStepPoints crossed past the
+// highest (BUY) / lowest (SELL) currently open same-direction position —
+// compounding (2 levels = 4x, not 2x twice) — capped by
+// InpMartingaleMaxLevels. ----
+double MartingaleLotForDirection(int dir, double refPrice)
+  {
+   if(InpMartingaleStepPoints <= 0) return(InpFixedLot);
+
+   double extreme = ExtremeOpenEntryPrice(dir);
+   if(extreme <= 0.0) return(InpFixedLot);   // nothing open yet in this direction
+
+   double adverse = (dir == 1) ? (extreme - refPrice) : (refPrice - extreme);
+   if(adverse <= 0.0) return(InpFixedLot);   // this order's own price isn't even past the extreme
+
+   int levels = (int)MathFloor(adverse / g_point / InpMartingaleStepPoints);
+   if(InpMartingaleMaxLevels > 0 && levels > InpMartingaleMaxLevels)
+      levels = InpMartingaleMaxLevels;
+   if(levels <= 0) return(InpFixedLot);
+
+   double lot = InpFixedLot * MathPow(2.0, levels);
+   if(g_volStep > 0)
+      lot = MathFloor(lot / g_volStep) * g_volStep;
+   lot = NormalizeDouble(lot, 8);
+
+   if(InpEnableLog)
+      PrintFormat("AjipSnD: Martingale lot for %s — %d level(s) past extreme open @ %.5f (this order @ %.5f) -> lot=%.2f",
+                  dir == 1 ? "BUY" : "SELL", levels, extreme, refPrice, lot);
+
+   return(lot);
+  }
+
 //---- Place one resting limit order at a saved LTF zone's midpoint ----
 void PlacePendingOrderForZone(const SavedLtfZone &zone)
   {
    int dir = zone.isDemand ? 1 : -1;
    if(EntryGateBlocked(dir)) return;
 
-   double lot = InpFixedLot;
+   double midPrice = NormalizeDouble((zone.high + zone.low) / 2.0, g_digits);
+
+   double lot = MartingaleLotForDirection(dir, midPrice);
    if(lot < g_volMin || lot > g_volMax)
      {
       if(InpEnableLog)
-         PrintFormat("AjipSnD: Pending order skipped — InpFixedLot %.2f outside broker range [%.2f, %.2f]",
+         PrintFormat("AjipSnD: Pending order skipped — lot %.2f outside broker range [%.2f, %.2f]",
                      lot, g_volMin, g_volMax);
       return;
      }
-
-   double midPrice = NormalizeDouble((zone.high + zone.low) / 2.0, g_digits);
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick)) return;

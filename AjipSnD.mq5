@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.3-directionmode"
+#define EA_BUILD "5.4-martingale"
 
 #include <Trade\Trade.mqh>
 
@@ -66,12 +66,31 @@ input ENUM_DIRECTION_MODE InpTradeMode = DIRECTION_BOTH;  // Restrict pending or
 // re-entry inside 30 minutes anyway, so 15 alone captures the effect.
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 // No risk-based sizing — there is no SL at placement to size a stop
-// distance against (see "Exit Management" below), so every entry uses the
-// same lot regardless of price or zone width. Unvalidated: 0.01 (broker
-// minimum) is the safest starting point precisely BECAUSE no per-position
-// stop caps the downside — raise it only once the points-based exit
-// thresholds below are tuned and trusted.
-input double InpFixedLot = 0.01;   // Fixed lot size for every entry
+// distance against (see "Exit Management" below), so the FIRST entry in a
+// direction always uses this lot regardless of price or zone width
+// (InpMartingaleStepPoints below can double it for later entries in the
+// same direction). Unvalidated: 0.01 (broker minimum) is the safest
+// starting point precisely BECAUSE no per-position stop caps the downside
+// — raise it only once the points-based exit thresholds below are tuned
+// and trusted.
+input double InpFixedLot = 0.01;   // Base lot size — the first entry in a direction, and the martingale floor
+// Martingale add-on: this only changes the LOT for a zone-triggered pending
+// order — it never creates an entry on its own, entries still come
+// exclusively from qualifying LTF zones, exactly as always. Before placing
+// a new order, checks how far past the highest (BUY) / lowest (SELL)
+// currently OPEN (filled) same-direction position THIS ORDER'S OWN resting
+// price sits — not wherever the market happens to be trading right now,
+// since a limit order may not fill for a while. Every full
+// InpMartingaleStepPoints crossed doubles the lot again (compounding:
+// 1 level = 2x, 2 levels = 4x, 3 = 8x...). 0 = disabled, always InpFixedLot.
+// Resets naturally once a direction has no open positions left — the next
+// entry there is a fresh "first" one, back at InpFixedLot. Unvalidated —
+// starting values from the spec, not measured ones.
+input double InpMartingaleStepPoints = 5000;  // Points past the extreme open position that doubles the next entry's lot (0=disabled)
+// Uncapped, this compounds fast — level 10 is already 1024x InpFixedLot —
+// and every one of those lots carries no SL. 0 = uncapped, which is a real
+// risk, not a placeholder for "no limit needed."
+input int    InpMartingaleMaxLevels = 5;  // Cap on how many times the lot can double (0=uncapped)
 // Counts open positions in the direction.
 input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
 
