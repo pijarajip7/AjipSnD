@@ -17,10 +17,18 @@
 // shouldn't arise given HTF zones strictly alternate direction at
 // confirmation (so two same-direction validations can't share overlapping
 // origins) — cheap insurance, not a known bug.
+//
+// Direction and timing alone are not enough: an LTF zone only qualifies if
+// its own [low, high] sits entirely inside htfZone's — full containment,
+// not mere overlap. htfZone here is genuinely a price range for this one
+// check, even though the bias it sets is directional everywhere else in
+// this file (see g_htfBiasDir's own comment) — a same-direction LTF zone
+// that validated somewhere price has since moved away from is not the
+// refinement this specific HTF zone is meant to be traded off of.
 void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay)
   {
    int n = ArraySize(g_ltfValidatedHistory);
-   int candidates = 0;   // matched direction + postdates the HTF zone's origin
+   int candidates = 0;   // matched direction + timing + contained in htfZone's range
    int matches    = 0;   // of those, newly saved (not already saved)
    for(int i = 0; i < n; i++)
      {
@@ -29,6 +37,15 @@ void SaveLtfZonesForHtfBias(const SnDZone &htfZone, bool isReplay)
       // Already touched by the time a newer same-direction zone validated —
       // stale, the market has moved on. See MarkLtfValidationContext.
       if(g_ltfValidatedHistory[i].superseded) continue;
+      if(g_ltfValidatedHistory[i].low < htfZone.low || g_ltfValidatedHistory[i].high > htfZone.high)
+        {
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: LTF %s zone [%.5f, %.5f] outside HTF zone [%.5f, %.5f] — not saved",
+                        htfZone.isDemand ? "DEMAND" : "SUPPLY",
+                        g_ltfValidatedHistory[i].low, g_ltfValidatedHistory[i].high,
+                        htfZone.low, htfZone.high);
+         continue;
+        }
       candidates++;
 
       bool already = false;
@@ -297,11 +314,13 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
            }
          g_htfAwaitingValidation = false;
 
-         // HTF validation sets a pure directional bias, not a price range to
-         // sit inside, then immediately replays LTF history for zones already
-         // validated since this HTF zone's own origin bar
-         // (SaveLtfZonesForHtfBias logs the bias change and the replay result
-         // together).
+         // HTF validation sets a pure directional bias, not a price range
+         // entries are gated on currently sitting inside, then immediately
+         // replays LTF history for zones already validated since this HTF
+         // zone's own origin bar. SaveLtfZonesForHtfBias logs the bias
+         // change and the replay result together, and still uses this SAME
+         // zone's own range for its containment filter — see its header
+         // comment.
          g_htfBiasDir = g_htfPendingZone.isDemand ? 1 : -1;
          SaveLtfZonesForHtfBias(g_htfPendingZone, isReplay);
         }

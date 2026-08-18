@@ -1,13 +1,15 @@
 # AjipSnD — Supply & Demand Zone Trading EA
 
 > Multi-timeframe Supply & Demand strategy for MT5. HTF zone validation sets
-> a directional bias only — not a price range to sit inside. Every matching
-> LTF zone gets an immediate resting limit order, fixed lot, at its own
-> midpoint — no rejection wait, no pattern match, no SL/TP at placement. A
-> resting order is cancelled once its own zone leaves the watch list, not
-> after a fixed time. Exit is managed entirely by this EA in points from
-> entry: a loss-side breakeven safety net, a profit-side partial-close +
-> breakeven, then an HTF-ATR trailing stop — or daily/final close-all.
+> a directional bias — not a price range entries are gated on currently
+> sitting inside — but only LTF zones fully contained inside that specific
+> HTF zone's own range qualify to trade off it. Each gets an immediate
+> resting limit order, fixed lot, at its own midpoint — no rejection wait,
+> no pattern match, no SL/TP at placement. A resting order is cancelled
+> once its own zone leaves the watch list, not after a fixed time. Exit is
+> managed entirely by this EA in points from entry: a loss-side breakeven
+> safety net, a profit-side partial-close + breakeven, then an HTF-ATR
+> trailing stop — or daily/final close-all.
 
 ---
 
@@ -25,8 +27,9 @@
 | Fitur | Deskripsi |
 |-------|-----------|
 | SnD Detection | Raw candle bear/bull + body-break confirm, lowest-low / highest-high candidate |
-| HTF = bias, not a zone | HTF validation sets a directional bias (demand/supply); never geometrically checked as a containment box |
-| Pending-order entry | Matching LTF zones since the HTF bias's own origin bar get an immediate resting limit order at their own midpoint — no wait, no pattern match |
+| HTF = bias, not a price-must-sit-inside zone | HTF validation sets a directional bias (demand/supply); entries are never gated on price currently being inside an HTF zone |
+| HTF containment filter | Of the LTF zones matching the bias direction since the HTF zone's own origin bar, only those fully contained inside that specific HTF zone's `[low, high]` get saved and get a pending order |
+| Pending-order entry | Each qualifying LTF zone gets an immediate resting limit order at its own midpoint — no wait, no pattern match |
 | Fixed-lot sizing | Every entry uses `InpFixedLot` — no SL exists at placement to size risk-based sizing against |
 | Zone touch tracking | A saved zone's rectangle freezes the moment price wicks into it (order already resting since save time); HTF structure itself still drops on a body CLOSE past the far edge (sweep-aware) |
 | Zone-watch cancellation | A resting order is cancelled once its own zone leaves the watch list (touched, or superseded) — no fixed-bar expiry |

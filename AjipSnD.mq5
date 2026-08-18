@@ -1,13 +1,15 @@
 //+------------------------------------------------------------------+
 //|                                                      AjipSnD.mq5 |
 //|  Supply & Demand EA — zone-based trading on MT5.                 |
-//|  HTF zone validation sets a directional bias, not a price range.  |
-//|  Every matching LTF zone gets an immediate resting limit order,   |
-//|  fixed lot, at its own midpoint — no rejection wait, no pattern   |
-//|  match, no SL/TP at placement. Exit is managed entirely by this   |
-//|  EA in points from entry: a loss-side breakeven safety net, a     |
-//|  profit-side partial-close + breakeven, then an HTF-ATR trailing  |
-//|  stop — or daily/final/session close-all.                        |
+//|  HTF zone validation sets a directional bias, not a price range   |
+//|  to currently sit inside — but only LTF zones fully contained     |
+//|  inside THAT HTF zone's own range qualify to trade off it. Each   |
+//|  gets an immediate resting limit order, fixed lot, at its own     |
+//|  midpoint — no rejection wait, no pattern match, no SL/TP at      |
+//|  placement. Exit is managed entirely by this EA in points from    |
+//|  entry: a loss-side breakeven safety net, a profit-side partial-  |
+//|  close + breakeven, then an HTF-ATR trailing stop — or            |
+//|  daily/final/session close-all.                                  |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -18,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.0-fixedlotpoints"
+#define EA_BUILD "5.1-htfcontainment"
 
 #include <Trade\Trade.mqh>
 

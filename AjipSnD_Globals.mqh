@@ -220,11 +220,15 @@ struct LtfValidatedZone
 LtfValidatedZone g_ltfValidatedHistory[];
 
 // ---- Entry mechanism — pending-order entry, see AjipSnD_PendingEntry.mqh ----
-// HTF here is a pure directional bias, not a price range to sit inside: an
-// HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
-// direction get saved. A saved zone gets a resting limit order at its
-// midpoint immediately — no rejection wait, no pattern match. Unproven —
-// written directly to spec, not measured first.
+// g_htfBiasDir itself is just a direction flag, not a price range — it never
+// gates entries on whether price is CURRENTLY inside any HTF zone. But which
+// LTF zones qualify to save under that bias does still use the specific HTF
+// zone's own range: an HTF zone validating sets g_htfBiasDir, and only
+// same-direction LTF zones whose own [low, high] sits entirely inside THAT
+// HTF zone's [low, high] get saved (see SaveLtfZonesForHtfBias). A saved
+// zone gets a resting limit order at its midpoint immediately — no
+// rejection wait, no pattern match. Unproven — written directly to spec,
+// not measured first.
 int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
 
 struct SavedLtfZone
