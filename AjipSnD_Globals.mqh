@@ -30,8 +30,11 @@ struct SnDZone
    int      index;       // index in the active zones array (for reference)
    //--- Quality gate (entry filter) ---
    bool     qualityPass;      // zone width + displacement passed the entry filter
-   //--- Quality tracking (CSV backtest analysis) ---
-   bool     isHtf;            // tracker key: which timeframe this zone belongs to
+   //--- Quality tracking metrics — computed by ComputeZoneMetrics; not read
+   // back by anything now that the zone-quality CSV writer is gone, kept
+   // on the struct rather than trimmed given how widely SnDZone is passed
+   // around the zone-detection core ---
+   bool     isHtf;            // which timeframe this zone belongs to
    int      htfTrendAtConfirm;// HTF trend when this zone confirmed (LTF: cross-TF alignment)
    bool     validated;        // follow-through validation passed
    int      trendAtConfirm;   // trend of this TF at confirmation (1=UP, -1=DOWN)
@@ -48,8 +51,7 @@ struct SnDZone
    double   dispRangeAtr;     // confirming bar range / ATR
    bool     trackingActive;   // true while outcome stats are being collected
    bool     entryPlaced;      // reserved — no writer since the rejection-only
-                               // rewrite; always false. Kept for CSV schema
-                               // stability.
+                               // rewrite; always false.
    bool     touched;          // wick re-entered zone range after confirmation
    //--- LTF-only, snapshotted at the exact moment validation passes ---
    // Deliberately NOT derived from touched's final state: that reflects the
@@ -78,13 +80,8 @@ struct EntryTracker
    double   mfe;            // best POSITION_PROFIT seen ($)
    double   mae;            // worst POSITION_PROFIT seen ($)
    double   atrAtEntry;     // HTF ATR frozen at entry
-   double   initialVolume;   // volume at entry (fixed lot, CSV logging)
-   bool     hasStructuralSl; // always false — no SL/TP is ever set at placement, see AjipSnD_PendingEntry.mqh
-   double   slPrice;         // always 0 at entry (kept for CSV schema stability)
-   double   tpPrice;         // always 0 at entry (kept for CSV schema stability)
-   double   riskUsd;         // always 0 — no risk-based sizing (kept for CSV schema stability)
+   double   initialVolume;   // volume at entry (fixed lot)
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
-   datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
    string   triggerReason;      // always "pendingorder" ("unknown" if recovered across a restart)
    bool     tpBeArmed;           // loss-side TP->BE already armed (one-shot) — see CheckLossRecoveryTp
    bool     partialClosed;       // profit-side partial close + SL->BE already fired (one-shot)
@@ -98,11 +95,7 @@ struct EntryFillInfo
    ulong    ticket;
    int      dir;       // 1=BUY, -1=SELL
    double   price;     // fill price
-   datetime zoneTime;  // LTF zone time that triggered this order
-   double   slPrice;   // always 0 (kept for CSV schema stability)
-   double   tpPrice;   // always 0 (kept for CSV schema stability)
    double   lot;       // volume actually submitted (InpFixedLot)
-   double   riskUsd;   // always 0 — no risk-based sizing (kept for CSV schema stability)
    double   atrLtf;    // LTF ATR at placement — carried through to the position
    string   triggerReason; // always "pendingorder"
   };
@@ -143,10 +136,9 @@ datetime       g_ltfLastBarTime    = 0;
 // LTF: always-on. HTF: gated by InpRequireZoneValidation.
 SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
 bool           g_ltfAwaitingValidation = false;
-// Wick re-entry into g_ltfPendingZone's own range since it started waiting,
-// tracked independently of g_zoneTracker (InpZoneQualityLog) so
-// MarkLtfValidationContext gets an accurate touchedAtValidation even when
-// quality tracking is off, or during the OnInit historical replay.
+// Wick re-entry into g_ltfPendingZone's own range since it started waiting —
+// so MarkLtfValidationContext gets an accurate touchedAtValidation even
+// during the OnInit historical replay.
 bool           g_ltfPendingTouched = false;
 SnDZone        g_htfPendingZone;              // HTF zone awaiting follow-through validation
 bool           g_htfAwaitingValidation = false;
@@ -195,9 +187,6 @@ datetime       g_lastHeartbeatTime = 0;
 // close (broker SL/TP or a close-all), whichever direction. 0 = no trade
 // has closed yet this run.
 datetime       g_lastTradeCloseTime = 0;
-
-// ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
-SnDZone        g_zoneTracker[];
 
 // ---- LTF validation history, searched backward on every HTF bias change ----
 // Every LTF zone that ever validates gets appended here and stays forever —
@@ -387,7 +376,7 @@ double GetDailyPnL();
 double GetFloatingPnL();
 double GetFloatingPnLByDirection(int dir);
 double GetPeriodPnL(datetime from, datetime to);
-void   CloseAllAndLogTrades(string reason, int dirFilter = 0);
+void   CloseAllAndUntrack(string reason, int dirFilter = 0);
 double ComputeRealizedPnl(int idx);
 
 //---- Forward-declared, implemented in AjipSnD_PendingEntry.mqh ----

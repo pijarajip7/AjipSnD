@@ -128,13 +128,13 @@ void CheckPendingZoneTouches(const MqlRates &bar)
 
 //---- Update LTF on new closed bar ----
 // isReplay=true is the OnInit historical replay (see ReplayInitialStructure):
-// it skips CSV/diagnostic writes (UpdateZoneTracking, TrackZone+ZoneCsvWrite,
-// the excursion/drift probes) and per-bar chart redraws, since those either
-// write to disk or are meaningless replayed against bars that already
-// happened — but every core structural/decision step (zone detection,
-// validation, touch tracking, superseded-marking, the pending-order watch list)
-// still runs exactly as it does live, via the SAME code path, so replay ends
-// in the same state continuous live operation would have reached.
+// it skips per-bar chart redraws and live order placement/management, since
+// those are either meaningless replayed against bars that already happened
+// or would send real orders at stale historical prices — but every core
+// structural/decision step (zone detection, validation, touch tracking,
+// superseded-marking, the pending-order watch list) still runs exactly as
+// it does live, via the SAME code path, so replay ends in the same state
+// continuous live operation would have reached.
 void UpdateLTF(const MqlRates &bar, bool isReplay = false)
   {
    if(bar.time == g_ltfLastBarTime)
@@ -142,31 +142,11 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
 
    g_ltfLastBarTime = bar.time;
 
-   // Quality tracker per-bar stats (excursions, first touch)
-   if(InpZoneQualityLog && !isReplay)
-      UpdateZoneTracking(bar, false);
-
-   // Keep touch status current, independent of InpZoneQualityLog — the
-   // history it updates is what SaveLtfZonesForHtfBias's backward replay reads
-   // and what MarkLtfValidationContext's own touched+superseded check reads,
-   // not the CSV.
+   // History SaveLtfZonesForHtfBias's backward replay reads and
+   // MarkLtfValidationContext's own touched+superseded check reads.
    UpdateLtfValidatedHistoryTouch(bar);
 
-   if(!isReplay)
-     {
-      // Rejection-entry confirmation: the one check that must run on a closed
-      // bar rather than a tick — see UpdateExcursionRejects() for why.
-      UpdateExcursionRejects(bar);
-
-      // Forward-drift probe: baseline draw + horizon stamping, every bar,
-      // independent of whether a zone confirms on it.
-      DriftArmBaseline(bar);
-      UpdateDriftRecords(bar);
-     }
-
-   // Wick re-entry into the currently-pending zone, tracked independently of
-   // g_zoneTracker so MarkLtfValidationContext gets an accurate
-   // touchedAtValidation whether or not CSV tracking is on. Runs before the
+   // Wick re-entry into the currently-pending zone. Runs before the
    // validation check below so this same closing bar's own wick counts.
    if(g_ltfAwaitingValidation && !g_ltfPendingTouched)
      {
@@ -184,7 +164,6 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
                     : (bar.close < g_ltfPendingZone.confirmLevel);
       if(passed)
         {
-         MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched);
          // Nothing trades here: an LTF zone validating does not by itself earn
          // an order. Saving for the pending-order watch is triggered by HTF
@@ -209,7 +188,6 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF %s zone validation FAILED — opposite zone formed first",
                         g_ltfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
-         LogZoneOutcome("FAILED_OPPOSITE", false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          g_ltfAwaitingValidation = false;
         }
 
@@ -218,12 +196,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       // Metrics + quality gate — before the zone is stored anywhere
       ComputeZoneMetrics(confirmed, false, bar);
 
-      if(!isReplay)
-         // Forward-drift probe: arm on every confirmation, gate ignored — the
-         // raw zone concept is what is on trial, not our entry filter.
-         DriftArmZone(confirmed);
-
-      // Add to zone array (data-only — keeps count/logging consistent)
+      // Add to zone array
       if(confirmed.isDemand)
         {
          AddDemandZone(g_ltfDemandZones, confirmed);
@@ -237,14 +210,6 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
                         confirmed.low, confirmed.high, TimeToString(confirmed.time));
-        }
-
-      // Quality tracking: metrics + CONFIRM row (tracker copy carries isHtf=false)
-      if(InpZoneQualityLog && !isReplay)
-        {
-         SnDZone tracked = confirmed;
-         TrackZone(tracked, false);
-         ZoneCsvWrite("CONFIRM", tracked, "");
         }
 
       // Hold for follow-through validation
@@ -281,11 +246,6 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
 
    g_htfLastBarTime = bar.time;
 
-   // Quality tracker per-bar stats BEFORE invalidation, so the
-   // invalidating bar's excursion is captured in the OUTCOME row
-   if(InpZoneQualityLog && !isReplay)
-      UpdateZoneTracking(bar, true);
-
    // Invalidate active zones broken by price action
    InvalidateHtfZones(bar);
 
@@ -297,7 +257,6 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
                     : (bar.close < g_htfPendingZone.confirmLevel);
       if(passed)
         {
-         MarkZoneValidated(true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
          if(g_htfPendingZone.isDemand)
            {
             AddDemandZone(g_htfDemandZones, g_htfPendingZone);
@@ -333,8 +292,8 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
      {
       confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
 
-      // Metrics + quality gate — also sets isHtf, the tracker key for outcome
-      // logging. Must run before the zone is held as pending or activated.
+      // Metrics + quality gate. Must run before the zone is held as pending
+      // or activated.
       ComputeZoneMetrics(confirmed, true, bar);
 
       if(InpRequireZoneValidation)
@@ -345,7 +304,6 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
             if(InpEnableLog)
                PrintFormat("AjipSnD: HTF %s zone validation FAILED — opposite zone formed first",
                            g_htfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
-            LogZoneOutcome("FAILED_OPPOSITE", true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
             g_htfAwaitingValidation = false;
            }
 
@@ -371,14 +329,6 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
                            confirmed.low, confirmed.high);
            }
         }
-
-      // Quality tracking: metrics + CONFIRM row
-      if(InpZoneQualityLog && !isReplay)
-        {
-         SnDZone tracked = confirmed;
-         TrackZone(tracked, true);
-         ZoneCsvWrite("CONFIRM", tracked, "");
-        }
      }
 
    // Nothing drawn here — HTF is a directional bias, not a chart object.
@@ -395,11 +345,12 @@ void UpdateHTF(const MqlRates &bar, bool isReplay = false)
 //
 // Reuses UpdateHTF/UpdateLTF (isReplay=true) rather than a parallel replay
 // path, so there is exactly one definition of what a validated HTF/LTF zone
-// is — see their own comments for what isReplay skips (CSV/diagnostic writes,
-// per-bar chart redraws) and what it never skips (zone detection, follow-
-// through validation, touch/superseded bookkeeping, the zone watch list and
-// its own touch bookkeeping). It never places a real order: SaveLtfZonesFor-
-// HtfBias skips PlacePendingOrderForZone whenever isReplay is true, since by
+// is — see their own comments for what isReplay skips (per-bar chart
+// redraws, live order placement/management) and what it never skips (zone
+// detection, follow-through validation, touch/superseded bookkeeping, the
+// zone watch list and its own touch bookkeeping). It never places a real
+// order: SaveLtfZonesForHtfBias skips PlacePendingOrderForZone whenever
+// isReplay is true, since by
 // the time this runs price has already moved on from wherever a historical
 // zone's midpoint sat — there is no legitimate resting order left to place.
 //

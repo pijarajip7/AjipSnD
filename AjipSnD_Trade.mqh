@@ -4,11 +4,6 @@
 //==================================================================
 // ADD ENTRY to tracking
 //==================================================================
-// The EntryFillInfo is passed through so the position inherits what the
-// order already knew — its structural stop, the risk it was sized for, and
-// the LTF zone that triggered it. Without that hand-off the link between a
-// trade and its originating zone is lost at the moment of the fill, and the
-// per-trade CSV has nothing to join back to the zone log on.
 void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
   {
    int sz = ArraySize(g_entries);
@@ -24,12 +19,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].initialVolume   = PositionSelectByTicket(ticket)
                                    ? PositionGetDouble(POSITION_VOLUME)
                                    : po.lot;
-   g_entries[sz].hasStructuralSl = (po.slPrice > 0.0);
-   g_entries[sz].slPrice         = po.slPrice;
-   g_entries[sz].tpPrice         = po.tpPrice;
-   g_entries[sz].riskUsd         = po.riskUsd;
    g_entries[sz].atrLtfAtEntry   = po.atrLtf;
-   g_entries[sz].zoneTime        = po.zoneTime;
    g_entries[sz].triggerReason   = po.triggerReason;
    g_entries[sz].tpBeArmed           = false;
    g_entries[sz].partialClosed       = false;
@@ -41,7 +31,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
 //==================================================================
 void RemoveEntry(int idx)
   {
-   // Both call sites (CheckEntryCleanup, CloseAllAndLogTrades) only reach
+   // Both call sites (CheckEntryCleanup, CloseAllAndUntrack) only reach
    // here after confirming the position is actually gone, so this is the
    // one place that always sees a trade end — arm the cooldown gate here.
    g_lastTradeCloseTime = TimeCurrent();
@@ -466,135 +456,6 @@ double ComputeRealizedPnl(int idx)
   }
 
 //==================================================================
-// PER-TRADE CSV — one row per closed position. Records the exit reason
-// the broker actually used. risk_usd/pnl_r/mfe_r/mae_r are R-multiple
-// columns from the earlier risk-based-sizing era — riskUsd is always 0 now
-// (fixed lot, no stop to size against), so those four always read 0 rather
-// than a real multiple. Kept for CSV schema stability rather than removed.
-//
-// ltf_zone_time is the join key back to the zone CSV: it is what
-// connects a trade's outcome to the characteristics of the zone that
-// produced it.
-//==================================================================
-string DealReasonText(long reason)
-  {
-   switch((int)reason)
-     {
-      case DEAL_REASON_CLIENT:   return("CLIENT");
-      case DEAL_REASON_MOBILE:   return("MOBILE");
-      case DEAL_REASON_WEB:      return("WEB");
-      case DEAL_REASON_EXPERT:   return("EXPERT");
-      case DEAL_REASON_SL:       return("SL");
-      case DEAL_REASON_TP:       return("TP");
-      case DEAL_REASON_SO:       return("STOPOUT");
-      case DEAL_REASON_ROLLOVER: return("ROLLOVER");
-      case DEAL_REASON_VMARGIN:  return("VMARGIN");
-      case DEAL_REASON_SPLIT:    return("SPLIT");
-     }
-   return("OTHER");
-  }
-
-void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
-  {
-   if(!InpTradeLog) return;
-   if(idx < 0 || idx >= ArraySize(g_entries)) return;
-
-   ulong  ticket   = g_entries[idx].ticket;
-   double exitPx   = 0.0;
-   double dealPnl  = 0.0;
-   bool   haveDeal = false;
-   string reason   = fallbackReason;
-
-   // Closing deal carries both the exit price and the reason the broker
-   // applied. On the close-all path the deal may not have settled yet, so
-   // this is best-effort and falls back to what the caller knows.
-   if(HistorySelect(g_entries[idx].entryTime, TimeCurrent() + 1))
-     {
-      int ndeals = HistoryDealsTotal();
-      for(int i = 0; i < ndeals; i++)
-        {
-         ulong d = HistoryDealGetTicket(i);
-         if(d == 0) continue;
-         if(HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagicNumber) continue;
-         if((ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID) != ticket) continue;
-
-         dealPnl += HistoryDealGetDouble(d, DEAL_PROFIT)
-                  + HistoryDealGetDouble(d, DEAL_SWAP)
-                  + HistoryDealGetDouble(d, DEAL_COMMISSION);
-
-         if(HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_OUT)
-           {
-            exitPx   = HistoryDealGetDouble(d, DEAL_PRICE);
-            reason   = DealReasonText(HistoryDealGetInteger(d, DEAL_REASON));
-            haveDeal = true;
-           }
-        }
-     }
-
-   // Deal figures include commission; the snapshot the caller passes in
-   // does not. Prefer the deal when it settled — R is meant to be net.
-   double pnl = haveDeal ? dealPnl : fallbackPnl;
-
-   double risk    = g_entries[idx].riskUsd;
-   double slDist  = 0.0;
-   if(g_entries[idx].slPrice > 0.0)
-      slDist = (g_entries[idx].dir == 1)
-               ? (g_entries[idx].entryPrice - g_entries[idx].slPrice)
-               : (g_entries[idx].slPrice - g_entries[idx].entryPrice);
-
-   string filename = "AjipSnD_Trades_" + _Symbol + "_"
-                   + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
-   bool exists = FileIsExist(filename, FILE_COMMON);
-
-   int h = FileOpen(filename,
-                    FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
-                    ',', CP_UTF8);
-   if(h == INVALID_HANDLE)
-     {
-      PrintFormat("AjipSnD: Cannot open trade CSV %s", filename);
-      return;
-     }
-
-   if(!exists)
-      FileWrite(h,
-                "entry_time", "exit_time", "dir", "entry_price", "exit_price",
-                "sl_price", "tp_price", "sl_dist_pts", "sl_dist_atr",
-                "lot", "risk_usd", "exit_reason", "pnl_usd", "pnl_r",
-                "mfe_usd", "mae_usd", "mfe_r", "mae_r",
-                "atr_ltf", "atr_htf", "structural", "ltf_zone_time", "trigger_reason");
-   else
-      FileSeek(h, 0, SEEK_END);
-
-   FileWrite(h,
-             TimeToString(g_entries[idx].entryTime, TIME_DATE | TIME_SECONDS),
-             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-             g_entries[idx].dir == 1 ? "BUY" : "SELL",
-             DoubleToString(g_entries[idx].entryPrice, g_digits),
-             DoubleToString(exitPx, g_digits),
-             DoubleToString(g_entries[idx].slPrice, g_digits),
-             DoubleToString(g_entries[idx].tpPrice, g_digits),
-             DoubleToString(slDist / g_point, 1),
-             DoubleToString(g_entries[idx].atrLtfAtEntry > 0
-                            ? slDist / g_entries[idx].atrLtfAtEntry : 0.0, 3),
-             DoubleToString(g_entries[idx].initialVolume, 2),
-             DoubleToString(risk, 2),
-             reason,
-             DoubleToString(pnl, 2),
-             DoubleToString(risk > 0 ? pnl / risk : 0.0, 3),
-             DoubleToString(g_entries[idx].mfe, 2),
-             DoubleToString(g_entries[idx].mae, 2),
-             DoubleToString(risk > 0 ? g_entries[idx].mfe / risk : 0.0, 3),
-             DoubleToString(risk > 0 ? g_entries[idx].mae / risk : 0.0, 3),
-             DoubleToString(g_entries[idx].atrLtfAtEntry, g_digits),
-             DoubleToString(g_entries[idx].atrAtEntry, g_digits),
-             g_entries[idx].hasStructuralSl ? "1" : "0",
-             TimeToString(g_entries[idx].zoneTime, TIME_DATE | TIME_SECONDS),
-             g_entries[idx].triggerReason);
-
-   FileClose(h);
-  }
-
-//==================================================================
 // CHECK ENTRY CLEANUP — positions closed outside close-all (SL/TP hit).
 // Each individual close here also fires the rotation handoff signal, so
 // the orchestrator switches accounts after every trade, not just when a
@@ -606,11 +467,11 @@ void CheckEntryCleanup()
      {
       if(!PositionSelectByTicket(g_entries[i].ticket))
         {
-         // Broker-side exits (SL, TP) land here, and here the closing deal has
-         // settled — so this path yields the real exit reason, not a guess.
+         // Broker-side exits (SL, TP) land here, and the closing deal has
+         // settled by now, so ComputeRealizedPnl's deal-history fallback is
+         // reliable if the live position lookup already came up empty.
          double realized = ComputeRealizedPnl(i);
          WriteHandoffSignal("TRADE_CLOSED", realized);
-         LogTradeCsv(i, realized, "CLOSED");
          RemoveEntry(i);
         }
      }
@@ -641,56 +502,28 @@ void CloseAllPositions(int dirFilter = 0)
   }
 
 //==================================================================
-// CLOSE ALL AND LOG TRADES. dirFilter=0 (default) is the original
-// every-direction close-all every existing caller still uses unchanged;
-// dirFilter=1/-1 scopes the whole operation — snapshot, close, log,
-// "incomplete" retry count — to just that direction, leaving the other
-// direction's positions (and g_entries rows) completely untouched.
-//
-// Snapshot POSITION_PROFIT BEFORE closing to avoid the history-timing gap
-// where the deal hasn't settled yet, but only log a position once the
-// close has actually removed it.
+// CLOSE ALL TRACKED POSITIONS, untracking each once it's actually gone.
+// dirFilter=0 (default) is the original every-direction close-all every
+// existing caller still uses unchanged; dirFilter=1/-1 scopes the whole
+// operation to just that direction, leaving the other direction's
+// positions (and g_entries rows) completely untouched.
 //==================================================================
-void CloseAllAndLogTrades(string reason, int dirFilter = 0)
+void CloseAllAndUntrack(string reason, int dirFilter = 0)
   {
-   int n = ArraySize(g_entries);
-
-   // ---- Snapshot live P&L BEFORE closing ----
-   // Once PositionClose succeeds the position is gone and the deal may not
-   // have settled into history yet, so the open position is the only reliable
-   // source for its profit. Index-aligned with g_entries; CloseAllPositions
-   // below does not resize that array, so the indices stay valid through the
-   // logging loop.
-   double net[];
-   ArrayResize(net, n);
-   for(int i = 0; i < n; i++)
-     {
-      net[i] = 0.0;
-      if(dirFilter != 0 && g_entries[i].dir != dirFilter) continue;   // out of scope for this close — never read below either
-      if(PositionSelectByTicket(g_entries[i].ticket))
-         net[i] = PositionGetDouble(POSITION_PROFIT)
-                + PositionGetDouble(POSITION_SWAP);  // commission is on the deal, not the position
-     }
-
    CloseAllPositions(dirFilter);
 
-   // ---- Log ONLY what actually closed ----
+   // ---- Untrack ONLY what actually closed ----
    // A close can be rejected — market closed over a holiday, trade context
-   // busy — and the position then survives the call. Logging it anyway (which
-   // is what this function used to do, before CloseAllPositions was even
-   // called) wrote a row for positions still open; the next tick found the
-   // same trigger still true and repeated the whole thing, producing
-   // duplicate rows. MathMin guards net[] against a future caller that adds
-   // entries mid-close: an out-of-range read halts the EA outright, and only
-   // the snapshot's own indices carry a P&L figure anyway.
-   for(int i = MathMin(ArraySize(g_entries), n) - 1; i >= 0; i--)
+   // busy — and the position then survives the call. Untracking it anyway
+   // would lose the link to a position that's still actually open; the next
+   // tick finds the same trigger still true and retries.
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
       if(dirFilter != 0 && g_entries[i].dir != dirFilter) continue;   // wasn't in scope, wasn't touched — leave tracked
 
       if(PositionSelectByTicket(g_entries[i].ticket))
          continue;                      // still open — retry on the next tick
 
-      LogTradeCsv(i, net[i], reason);
       RemoveEntry(i);
      }
 
@@ -725,7 +558,7 @@ void CheckDirectionUnrealizedTarget()
       PrintFormat("AjipSnD: %s DIRECTION TARGET HIT (%.2f >= %.2f) — closing all %s + cancelling its pending orders",
                   d == 1 ? "BUY" : "SELL", floating, InpDirectionUnrealizedTarget, d == 1 ? "BUY" : "SELL");
       WriteHandoffSignal(reason, floating);
-      CloseAllAndLogTrades(reason, d);
+      CloseAllAndUntrack(reason, d);
       CancelPendingOrdersForDirection(d);
      }
   }
@@ -741,7 +574,7 @@ void CheckDailyTargetCloseAll()
      {
       PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all", total, InpDailyMaxProfit);
       WriteHandoffSignal("DAILY_TARGET", total);
-      CloseAllAndLogTrades("DAILY_TARGET");
+      CloseAllAndUntrack("DAILY_TARGET");
      }
   }
 
@@ -756,7 +589,7 @@ void CheckDailyMaxLossCloseAll()
      {
       PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
       WriteHandoffSignal("DAILY_MAX_LOSS", total);
-      CloseAllAndLogTrades("DAILY_MAX_LOSS");
+      CloseAllAndUntrack("DAILY_MAX_LOSS");
      }
   }
 
@@ -808,7 +641,7 @@ void CheckFinalTargetCloseAll()
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) >= InpFinalProfitTarget)
      {
       PrintFormat("AjipSnD: FINAL TARGET REACHED — closing all PERMANENTLY");
-      CloseAllAndLogTrades("FINAL_TARGET");
+      CloseAllAndUntrack("FINAL_TARGET");
      }
   }
 
@@ -821,7 +654,7 @@ void CheckFinalMaxLossCloseAll()
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) <= -InpFinalMaxLoss)
      {
       PrintFormat("AjipSnD: FINAL MAX LOSS REACHED — closing all PERMANENTLY");
-      CloseAllAndLogTrades("FINAL_MAX_LOSS");
+      CloseAllAndUntrack("FINAL_MAX_LOSS");
      }
   }
 

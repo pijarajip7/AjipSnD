@@ -184,7 +184,6 @@ void ManagePendingOrders()
             po.ticket        = positionId;
             po.dir           = g_pendingOrders[i].dir;
             po.price         = fillPrice;
-            po.zoneTime      = g_pendingOrders[i].zoneTime;
             po.lot           = g_pendingOrders[i].lot;
             po.atrLtf        = GetAtrValue(false);
             po.triggerReason = "pendingorder";

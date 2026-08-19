@@ -32,31 +32,18 @@ void RebuildTrackedPositions()
       g_entries[idx].mfe           = PositionGetDouble(POSITION_PROFIT);
       g_entries[idx].mae           = PositionGetDouble(POSITION_PROFIT);
 
-      double curVol = PositionGetDouble(POSITION_VOLUME);
-      double curSl  = PositionGetDouble(POSITION_SL);
-
-      g_entries[idx].initialVolume = curVol;
+      g_entries[idx].initialVolume = PositionGetDouble(POSITION_VOLUME);
 
       // ATR at the original entry is not recoverable on restart — use the
       // current reading.
       g_entries[idx].atrAtEntry     = GetAtrValue(true);
       g_entries[idx].atrLtfAtEntry  = GetAtrValue(false);
 
-      // No SL/TP exists at placement anymore — whatever is on the position
-      // now (curSl/curTp) only got there from this EA's own points-based
-      // exit logic having already fired at least once before the restart.
-      // hasStructuralSl is a slight misnomer here (kept for CSV schema
-      // stability) — it really means "some SL was already on the position."
-      g_entries[idx].hasStructuralSl = (curSl != 0.0);
-      g_entries[idx].slPrice         = curSl;
-      g_entries[idx].tpPrice         = PositionGetDouble(POSITION_TP);
-      g_entries[idx].zoneTime        = 0;   // originating zone is not recoverable
-      g_entries[idx].triggerReason   = "unknown";   // not recoverable either
-      g_entries[idx].riskUsd         = 0.0;   // no risk-based sizing — always 0
+      g_entries[idx].triggerReason   = "unknown";   // originating zone/criterion not recoverable
 
       // Whether this position already armed TP->BE / partial-closed in an
       // earlier run is not recoverable either — same limitation as
-      // atrAtEntry/zoneTime above. Worst case a restarted position gets one
+      // atrAtEntry above. Worst case a restarted position gets one
       // more TP->BE-arm or partial-close shot than it should — both are
       // idempotent against a broker-side level already sitting at the same
       // price, so this costs a redundant PositionModify call, not a wrong

@@ -28,11 +28,11 @@ bool IsBullBar(const MqlRates &bar)
   }
 
 //---- Fill ATR-normalised metrics + evaluate the entry quality gate ----
-// Runs for every confirmed zone regardless of InpZoneQualityLog, because
-// qualityPass gates entries. Backtest over two separate 12-month XAUUSD
-// periods: neither threshold does anything on its own — width alone and
-// displacement alone both leave the MFE/MAE ratio at the baseline. Together
-// they lift median MFE without moving MAE, and that held out of sample.
+// qualityPass gates entries directly — this is core sizing logic, not
+// diagnostics. Backtest over two separate 12-month XAUUSD periods: neither
+// threshold does anything on its own — width alone and displacement alone
+// both leave the MFE/MAE ratio at the baseline. Together they lift median
+// MFE without moving MAE, and that held out of sample.
 void ComputeZoneMetrics(SnDZone &zone, bool htf, const MqlRates &confirmBar)
   {
    zone.isHtf        = htf;
@@ -221,7 +221,6 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
       if(newZone.low < zones[i].low)
         {
          // New zone is LOWER → old zone deactivated
-         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          ArrayRemove(zones, i, 1);
          continue;
         }
@@ -230,24 +229,17 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
       // "lower" by the check above — the market has produced new structure,
       // so the old zone is trading yesterday's setup.
       if(zones[i].isHtf && zones[i].touched)
-        {
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zones[i].time);
          ArrayRemove(zones, i, 1);
-        }
      }
-  
+
    // Add new zone
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-  
+
    // Enforce InpMaxZones
    while(ArraySize(zones) > InpMaxZones)
-     {
-      // Remove oldest (index 0)
-      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
-      ArrayRemove(zones, 0, 1);
-     }
+      ArrayRemove(zones, 0, 1);   // remove oldest (index 0)
   }
 
 void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
@@ -257,62 +249,20 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
       if(newZone.high > zones[i].high)
         {
          // New zone is HIGHER → old zone deactivated
-         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
          ArrayRemove(zones, i, 1);
          continue;
         }
       // HTF only — see AddDemandZone's matching comment.
       if(zones[i].isHtf && zones[i].touched)
-        {
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zones[i].time);
          ArrayRemove(zones, i, 1);
-        }
      }
-  
+
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-  
+
    while(ArraySize(zones) > InpMaxZones)
-     {
-      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
       ArrayRemove(zones, 0, 1);
-     }
-  }
-
-//---- Index of the TRADEABLE zone containing price, or -1 ----
-// Zones failing the quality gate stay in the array — they keep taking part in
-// replacement, expiry and invalidation exactly as before, so zone lifecycle and
-// the CSV log are unchanged — but they are not offered here.
-// Used by MarkLtfValidationContext() for the htfContextValidated diagnostic.
-//
-// When several zones contain the price, the one whose FAR edge sits furthest
-// away wins. That only matters to callers wanting the zone itself: a
-// structural stop is placed beyond the far edge, so picking the furthest is
-// the conservative choice — it never yields a stop tighter than some other
-// equally valid zone would have justified.
-int FindContainingZoneIdx(double price, const SnDZone &zones[], bool isDemand)
-  {
-   int    best     = -1;
-   double bestEdge = 0.0;
-
-   for(int i = 0; i < ArraySize(zones); i++)
-     {
-      if(!zones[i].qualityPass) continue;
-      if(price < zones[i].low || price > zones[i].high) continue;
-
-      // Demand: stop goes below, so the lowest low is furthest.
-      // Supply: stop goes above, so the highest high is furthest.
-      double farEdge = isDemand ? zones[i].low : zones[i].high;
-      if(best < 0
-         || (isDemand  && farEdge < bestEdge)
-         || (!isDemand && farEdge > bestEdge))
-        {
-         best     = i;
-         bestEdge = farEdge;
-        }
-     }
-   return(best);
   }
 
 //---- Count zones that passed the quality gate (panel display) ----
@@ -391,14 +341,13 @@ bool InvalidateHtfZones(const MqlRates &bar)
             PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] sweepLow=%.5f bar.close=%.5f",
                         g_htfDemandZones[i].low, g_htfDemandZones[i].high,
                         g_htfDemandZones[i].sweepLow, bar.close);
-         LogZoneOutcome("INVALIDATED", true, g_htfDemandZones[i].isDemand, g_htfDemandZones[i].time);
          ArrayRemove(g_htfDemandZones, i, 1);
          anyChange = true;
         }
       // Live touch tracking — wick re-entry after the zone's own confirm bar.
-      // .touched on g_zoneTracker[] is a separate copy updated elsewhere; this
-      // is the only writer for the live HTF arrays, and it feeds the
-      // touched+superseded invalidation in AddDemandZone/AddSupplyZone below.
+      // This is the only writer for the live HTF arrays' .touched, and it
+      // feeds the touched+superseded invalidation in AddDemandZone/AddSupplyZone
+      // below.
       else if(!g_htfDemandZones[i].touched && bar.time > g_htfDemandZones[i].time
               && bar.low <= g_htfDemandZones[i].high)
          g_htfDemandZones[i].touched = true;
@@ -416,7 +365,6 @@ bool InvalidateHtfZones(const MqlRates &bar)
             PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] sweepHigh=%.5f bar.close=%.5f",
                         g_htfSupplyZones[i].low, g_htfSupplyZones[i].high,
                         g_htfSupplyZones[i].sweepHigh, bar.close);
-         LogZoneOutcome("INVALIDATED", true, g_htfSupplyZones[i].isDemand, g_htfSupplyZones[i].time);
          ArrayRemove(g_htfSupplyZones, i, 1);
          anyChange = true;
         }
@@ -548,274 +496,29 @@ void DrawHtfMaLine()
    g_maLineLastValue = ma[0];
   }
 
-//==================================================================
-// ZONE QUALITY TRACKER — CSV backtest analysis log.
-// Live-confirmed zones are tracked from confirmation to outcome.
-// One row per event; CONFIRM + OUTCOME join via TF/isDemand/zone_time.
-//==================================================================
 
-//---- CSV filename (Common\Files) ----
-string ZoneCsvFilename()
-  {
-   return("AjipSnD_Zones_" + _Symbol + "_"
-          + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv");
-  }
-
-//---- Append one zone event row ----
-void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
-  {
-   string filename = ZoneCsvFilename();
-   bool exists = FileIsExist(filename, FILE_COMMON);
-
-   // FILE_CSV makes FileWrite insert the delimiter between fields; with plain
-   // FILE_TXT every field is concatenated into one unparseable string.
-   // FILE_ANSI is what makes the CP_UTF8 codepage apply — without it the file
-   // is written as UTF-16.
-   int handle = FileOpen(filename,
-                         FILE_COMMON | FILE_WRITE | FILE_READ | FILE_CSV | FILE_ANSI,
-                         ',', CP_UTF8);
-   if(handle == INVALID_HANDLE)
-     {
-      if(InpEnableLog)
-         PrintFormat("AjipSnD: Cannot open zone CSV %s", filename);
-      return;
-     }
-
-   // Header if new file — one argument per column, so the delimiter count
-   // always matches the data rows below
-   if(!exists)
-     {
-      FileWrite(handle,
-         "action", "outcome", "tf", "type", "zone_time",
-         "high", "low", "confirm_close", "confirm_level",
-         "atr", "width_atr", "disp_body_atr", "disp_range_atr", "base_bars",
-         "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
-         "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
-         "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
-         "htf_trend", "touched_at_validation", "htf_context_validated");
-     }
-   else
-      FileSeek(handle, 0, SEEK_END);
-
-   FileWrite(handle,
-      action, outcome,
-      zone.isHtf ? "HTF" : "LTF",
-      zone.isDemand ? "DEMAND" : "SUPPLY",
-      TimeToString(zone.time, TIME_DATE | TIME_SECONDS),
-      DoubleToString(zone.high, g_digits),
-      DoubleToString(zone.low, g_digits),
-      DoubleToString(zone.confirmClose, g_digits),
-      DoubleToString(zone.confirmLevel, g_digits),
-      DoubleToString(zone.atrAtConfirm, g_digits),
-      DoubleToString(zone.widthAtr, 2),
-      DoubleToString(zone.dispBodyAtr, 2),
-      DoubleToString(zone.dispRangeAtr, 2),
-      IntegerToString(zone.baseBars),
-      zone.sweepLow > 0 ? "1" : "0",
-      zone.sweepHigh > 0 ? "1" : "0",
-      zone.validated ? "1" : "0",
-      zone.entryPlaced ? "1" : "0",
-      zone.qualityPass ? "1" : "0",
-      IntegerToString(zone.barsSinceConfirm),
-      IntegerToString(zone.barsToTouch),
-      zone.touched ? "1" : "0",
-      DoubleToString(zone.touchDepthPts, 1),
-      DoubleToString(zone.maxFavPts, 1),
-      DoubleToString(zone.maxAdvPts, 1),
-      DoubleToString(zone.favAfterTouchPts, 1),
-      zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
-      zone.htfTrendAtConfirm == (int)TREND_UP ? "UP" : "DOWN",
-      zone.touchedAtValidation ? "1" : "0",
-      zone.htfContextValidated ? "1" : "0");
-
-   FileClose(handle);
-  }
-
-//---- Register a zone in the quality tracker ----
-// Metrics must already be filled by ComputeZoneMetrics().
-void TrackZone(SnDZone &zone, bool htf)
-  {
-   zone.trendAtConfirm = htf ? g_htfTrend : g_ltfTrend;
-   zone.validated      = false;
-   zone.entryPlaced    = false;
-   zone.trackingActive = true;
-   zone.touched        = false;
-   zone.barsSinceConfirm  = 0;
-   zone.barsToTouch       = 0;
-   zone.touchDepthPts     = 0.0;
-   zone.maxFavPts         = 0.0;
-   zone.maxAdvPts         = 0.0;
-   zone.favAfterTouchPts  = 0.0;
-   zone.touchedAtValidation = false;
-   zone.htfContextValidated = false;
-
-   int sz = ArraySize(g_zoneTracker);
-   ArrayResize(g_zoneTracker, sz + 1);
-   g_zoneTracker[sz] = zone;
-  }
-
-//---- Per-bar stats: excursions, first touch ----
-void UpdateZoneTracking(const MqlRates &bar, bool htf)
-  {
-   int n = ArraySize(g_zoneTracker);
-   for(int i = 0; i < n; i++)
-     {
-      if(!g_zoneTracker[i].trackingActive) continue;
-      if(g_zoneTracker[i].isHtf != htf) continue;
-      if(bar.time <= g_zoneTracker[i].time) continue; // skip confirmation bar itself
-
-      g_zoneTracker[i].barsSinceConfirm++;
-      double base = g_zoneTracker[i].confirmClose;
-
-      if(g_zoneTracker[i].isDemand)
-        {
-         // Favorable = up (BUY side) — stored in points
-         double fav  = (bar.high - base) / g_point;
-         double adv  = (base - bar.low) / g_point;
-         if(fav > g_zoneTracker[i].maxFavPts) g_zoneTracker[i].maxFavPts = fav;
-         if(adv > g_zoneTracker[i].maxAdvPts) g_zoneTracker[i].maxAdvPts = adv;
-
-         // First touch: wick re-enters zone range [low, high]
-         if(!g_zoneTracker[i].touched && bar.low <= g_zoneTracker[i].high)
-           {
-            g_zoneTracker[i].touched       = true;
-            g_zoneTracker[i].barsToTouch   = g_zoneTracker[i].barsSinceConfirm;
-            double depth = (g_zoneTracker[i].high - bar.low) / g_point;
-            if(depth < 0) depth = 0;
-            g_zoneTracker[i].touchDepthPts = depth;
-           }
-         if(g_zoneTracker[i].touched)
-           {
-            double favT = (bar.high - base) / g_point;
-            if(favT > g_zoneTracker[i].favAfterTouchPts)
-               g_zoneTracker[i].favAfterTouchPts = favT;
-           }
-        }
-      else
-        {
-         // Favorable = down (SELL side) — stored in points
-         double fav  = (base - bar.low) / g_point;
-         double adv  = (bar.high - base) / g_point;
-         if(fav > g_zoneTracker[i].maxFavPts) g_zoneTracker[i].maxFavPts = fav;
-         if(adv > g_zoneTracker[i].maxAdvPts) g_zoneTracker[i].maxAdvPts = adv;
-
-         // First touch: wick re-enters zone range [low, high]
-         if(!g_zoneTracker[i].touched && bar.high >= g_zoneTracker[i].low)
-           {
-            g_zoneTracker[i].touched       = true;
-            g_zoneTracker[i].barsToTouch   = g_zoneTracker[i].barsSinceConfirm;
-            double depth = (bar.high - g_zoneTracker[i].low) / g_point;
-            if(depth < 0) depth = 0;
-            g_zoneTracker[i].touchDepthPts = depth;
-           }
-         if(g_zoneTracker[i].touched)
-           {
-            double favT = (base - bar.low) / g_point;
-            if(favT > g_zoneTracker[i].favAfterTouchPts)
-               g_zoneTracker[i].favAfterTouchPts = favT;
-           }
-        }
-     }
-  }
-
-//---- Find a tracked zone by TF + type + confirmation time ----
-// Only zones still collecting stats are matched. A resolved zone keeps its
-// slot in the array, and matching it again would write a second OUTCOME row
-// carrying frozen stats (UpdateZoneTracking skips inactive entries).
-int FindTrackedZone(bool htf, bool isDemand, datetime zoneTime)
-  {
-   for(int i = 0; i < ArraySize(g_zoneTracker); i++)
-     {
-      if(g_zoneTracker[i].trackingActive &&
-         g_zoneTracker[i].isHtf == htf &&
-         g_zoneTracker[i].isDemand == isDemand &&
-         g_zoneTracker[i].time == zoneTime)
-         return(i);
-     }
-   return(-1);
-  }
-
-//---- Log outcome + stop tracking ----
-void LogZoneOutcome(string outcome, bool htf, bool isDemand, datetime zoneTime)
-  {
-   int i = FindTrackedZone(htf, isDemand, zoneTime);
-   if(i < 0) return;
-
-   ZoneCsvWrite("OUTCOME", g_zoneTracker[i], outcome);
-   g_zoneTracker[i].trackingActive = false;
-  }
-
-//---- Mark a tracked zone as validated (still collecting outcome) ----
-void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
-  {
-   int i = FindTrackedZone(htf, isDemand, zoneTime);
-   if(i >= 0) g_zoneTracker[i].validated = true;
-  }
-
-//---- LTF-only: snapshot touch/HTF-context state at the exact validation instant
-// Must be called right after MarkZoneValidated(false, ...) at the same call
-// site, while 'confirmed' is still the pending zone that just passed.
-// htfContextValidated is diagnostic-only now (see the RESULT block below) —
-// FindContainingZoneIdx against the ACTIVE, already-validated HTF arrays (an
-// HTF zone only enters g_htfDemandZones/g_htfSupplyZones once it has itself
-// validated), recorded standalone in the zone CSV rather than feeding any
-// live decision.
+//---- LTF-only: core superseded-marking + history append, keyed off whether
+// this zone was already touched at the exact instant it validated.
 //------------------------------------------------------------------
-// RESULT — period A, XAUUSD M1/M15, 21,372 validated LTF zones
-//------------------------------------------------------------------
-// Tested: does a zone that validates before ever being touched, inside an
-// already-validated HTF zone, predict direction? Four cells (touched-at-
-// validation x htf-context), direction-adjusted hit rate:
-//
-//                              5m     15m      1h      4h      1d
-//   no-touch + HTF (proposal) 75.77  62.96  56.63  53.74  48.00
-//   no-touch + no-HTF         75.92  62.55  54.88  52.15  52.02
-//   touched  + HTF            57.60  60.57  55.65  54.36  50.25
-//   touched  + no-HTF         56.48  61.37  54.97  52.06  51.00
-//
-// HTF context adds nothing: the two no-touch rows track each other within a
-// point at every horizon, and so do the two touched rows. The touch-timing
-// split shows a real gap at 5m/15m (75%+ vs ~57%) that decays through 1h/4h
-// and, at 1d, REVERSES — the proposal cell finishes lowest of the four
-// (48.00%, the only one below 50). That shape is the signature of the same
+// RESULT (past research, XAUUSD M1/M15, 21,372 validated LTF zones): tested
+// whether a zone validating before ever being touched, inside an
+// already-validated HTF zone, predicts direction. It doesn't — HTF context
+// added nothing, and the touch-timing split that looked promising at 5m/15m
+// (75%+ vs ~57%) decayed through 1h/4h and reversed by 1d, the same
 // circularity already found in the plain 'validated' flag: a zone that
 // reaches confirmLevel without dipping back did so via a sharp, immediate
 // move, so a snapshot minutes later is still measuring THAT move, not
-// predicting a new one. Demand/supply near-balanced in all four cells
-// (46-54%), so this is not the H1 trend probe's imbalance artifact repeating.
-//
-// CONSEQUENCE: no real information here either. touchedAtValidation and
-// htfContextValidated stay in the tracker as reusable, real-time-honest
-// primitives — the mistake worth avoiding next time is deriving either from
-// touched's whole-lifetime state instead of snapshotting at the decision
-// moment, not the existence of the fields.
+// predicting a new one. Nothing left to build on here — noted so it isn't
+// re-tried the same way.
 //------------------------------------------------------------------
-// touchedAtValidation is passed in rather than read from g_zoneTracker: that
-// tracker only exists when InpZoneQualityLog is on (TrackZone is what
-// creates the slot FindTrackedZone below looks up), so deriving it from
-// there made the ENTIRE pending-order mechanism below — superseded-marking
-// and the g_ltfValidatedHistory append, not just the CSV diagnostic fields —
-// silently stop working the moment quality logging was switched off. The
-// caller (UpdateLTF) now tracks g_ltfPendingTouched independently for
-// exactly this reason, and the same value feeds the OnInit historical
-// replay, which never runs TrackZone at all.
+// touchedAtValidation is passed in rather than derived from anything
+// re-read off the zone later: it has to be a snapshot taken at exactly
+// this instant (see the RESULT note above this function), and the OnInit
+// historical replay reaches this same function too, so whatever it uses
+// has to hold up there as well. The caller (UpdateLTF) tracks
+// g_ltfPendingTouched independently for exactly this reason.
 void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation)
   {
-   // CSV-diagnostic fields — safe no-op when this zone isn't being tracked
-   // (InpZoneQualityLog=false, or the OnInit replay). Everything below this
-   // block is core state and must run regardless.
-   int i = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
-   if(i >= 0)
-     {
-      g_zoneTracker[i].touchedAtValidation = touchedAtValidation;
-
-      double limitPrice = confirmed.isDemand ? confirmed.high : confirmed.low;
-      int htfIdx = confirmed.isDemand
-                   ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
-                   : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
-      g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
-     }
-
    // A same-direction zone already touched by now is stale the moment this
    // new one validates — same TOUCHED_SUPERSEDED rule AddDemandZone/
    // AddSupplyZone already apply to HTF zones, needed here too. This is the
@@ -876,13 +579,13 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
   }
 
 //---- Keep touchedEver current for every zone in the persistent history ----
-// Called once per closed LTF bar. g_zoneTracker's own 'touched' stops updating
-// the moment a zone is REPLACED/EXPIRED and evicted, but g_ltfValidatedHistory
-// entries outlive that by design — a zone the HTF trigger searches for next
-// month must still have an accurate answer to "touched since?", long after its
-// tracker slot is gone. Skips entries already true (nothing left to detect)
-// entirely, and match's own confirm bar (the definition 'touched' already
-// uses everywhere else in this file: re-entry AFTER confirmation, not on it).
+// Called once per closed LTF bar. g_ltfValidatedHistory entries outlive
+// eviction from the active zone arrays by design (see its own struct
+// comment) — a zone the HTF trigger searches for next month must still have
+// an accurate answer to "touched since?", long after it would otherwise be
+// gone. Skips entries already true (nothing left to detect) entirely, and
+// each entry's own confirm bar (the definition 'touched' already uses
+// everywhere else in this file: re-entry AFTER confirmation, not on it).
 void UpdateLtfValidatedHistoryTouch(const MqlRates &bar)
   {
    int n = ArraySize(g_ltfValidatedHistory);
@@ -897,18 +600,6 @@ void UpdateLtfValidatedHistoryTouch(const MqlRates &bar)
       if(touched)
          g_ltfValidatedHistory[i].touchedEver = true;
      }
-  }
-
-//---- Flush unresolved trackers on EA deinit ----
-void FlushUnresolvedZoneOutcomes()
-  {
-   for(int i = 0; i < ArraySize(g_zoneTracker); i++)
-     {
-      if(!g_zoneTracker[i].trackingActive) continue;
-      ZoneCsvWrite("OUTCOME", g_zoneTracker[i], "UNRESOLVED");
-      g_zoneTracker[i].trackingActive = false;
-     }
-   ArrayFree(g_zoneTracker);
   }
 
 #endif // AJIPSND_ZONE_MQH

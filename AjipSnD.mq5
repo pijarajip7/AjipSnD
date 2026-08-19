@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.6-directionmodeonly"
+#define EA_BUILD "6.0-nocsv"
 
 #include <Trade\Trade.mqh>
 
@@ -161,49 +161,6 @@ input int              InpPanelY      = 50;                 // Panel Y offset
 
 input group "Diagnostics"
 input bool InpEnableLog = true;  // Enable Print/PrintFormat output
-input bool InpZoneQualityLog = true;
-// One row per closed position: exit reason the broker actually used, and P&L
-// normalised by the risk the trade was sized for (pnl_r), so results are
-// comparable across trades regardless of lot size.
-input bool InpTradeLog       = true;  // Log per-trade CSV for backtest analysis
-// First-touch grid logger. Pure observation — it places no orders and changes
-// no decision — but it is the only record that preserves WHICH of two levels
-// price reached first, which is what any (SL, TP) pair actually asks. One run
-// with this on yields the whole expectancy surface offline, including targets
-// the EA never traded. Off by default: it writes a row per opportunity and
-// costs a few comparisons per tick.
-input bool InpExcursionLog   = false; // Log first-touch grid per entry opportunity (offline SL/TP surface)
-input int  InpExcursionBars  = 240;   // Horizon tracked after the limit is touched (M1 bars)
-input int  InpExcursionArmBars = 60;  // How long an untouched limit stays armed (M1 bars)
-// Arms a STOP-entry ladder alongside the traded limit on every zone: same edge,
-// opposite direction of fill, plus 0.25/0.50/1.00 ATR of demanded proof. Costs
-// four extra observation records per zone and places no orders. This is the one
-// entry axis run #5 could not rank, because only the limit was ever observed.
-input bool InpStopEntryProbe = false; // Also observe stop-entry variants (measurement only)
-// Arms a REJECT-entry ladder at the same edge and the same four offsets as the
-// stop ladder. The difference is timing, not price: STOP fires on the first
-// tick that crosses the threshold, mid-bar, with no requirement on how price
-// got there. REJECT only fires when the LTF bar that just closed settled past
-// it — a wick that stabs through and snaps back before the bar closes does not
-// count. Same thresholds, different confirmation rule; that is the whole
-// comparison. Requires InpExcursionLog=true. Places no orders.
-input bool InpRejectEntryProbe = false; // Also observe rejection-entry variants (measurement only)
-// Forward-drift probe: at zone confirmation, does price move in the
-// predicted direction over fixed horizons (5m/15m/1h/4h/1d) — no entry, no
-// SL/TP, just price at t0 vs t0+h. A random-time baseline is recorded
-// through the identical mechanism so the zone population is checkable
-// against a null, not asserted against it. See AjipSnD_Drift.mqh.
-input bool   InpDriftLog          = false; // Log forward-drift probe (zone confirm vs random baseline)
-input double InpDriftBaselineProb = 0.03;  // Per-bar draw probability for the random baseline (0=baseline off)
-// Trend probe. Run #9 found the only real directional effect in the data was
-// the market's own trend, which is the opposite stance to the zone logic. This
-// arms a record on every closed bar of its own timeframe, pointing the way
-// price sits relative to a moving average. Requires InpDriftLog=true; places no
-// orders. The timeframe is separate from InpHtfTimeframe on purpose — the point
-// is to measure a horizon the EA does not currently trade.
-input bool            InpDriftTrendProbe    = false;      // Also observe an MA-trend probe (measurement only)
-input ENUM_TIMEFRAMES InpDriftTrendTf       = PERIOD_H1;  // Timeframe for the trend probe
-input int             InpDriftTrendMaPeriod = 50;         // MA period on that timeframe
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -214,8 +171,6 @@ input string InpHeartbeatFile  = "AjipSnD_Heartbeat.csv"; // "I'm alive" signal,
 // INCLUDES
 //==================================================================
 #include "AjipSnD_Globals.mqh"
-#include "AjipSnD_Excursion.mqh"
-#include "AjipSnD_Drift.mqh"
 #include "AjipSnD_Zone.mqh"
 #include "AjipSnD_News.mqh"
 #include "AjipSnD_Trade.mqh"
@@ -234,21 +189,12 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | lot=%.2f lossBEpts=%.0f partialPts=%.0f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | lot=%.2f lossBEpts=%.0f partialPts=%.0f | %s %s",
                EA_BUILD,
                InpFixedLot,
                InpLossPointsSetTpBe,
                InpPartialClosePoints,
-               InpExcursionLog ? "ON" : "off",
-               InpExcursionBars, InpExcursionArmBars,
-               InpStopEntryProbe ? "ON" : "off",
-               InpRejectEntryProbe ? "ON" : "off",
-               InpDriftLog ? "ON" : "off",
-               InpDriftBaselineProb,
                _Symbol, EnumToString((ENUM_TIMEFRAMES)InpTimeframe));
-   PrintFormat("AjipSnD trendProbe=%s tf=%s ma=%d",
-               InpDriftTrendProbe ? "ON" : "off",
-               EnumToString(InpDriftTrendTf), InpDriftTrendMaPeriod);
 
    // Cache symbol info
    g_digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -290,16 +236,6 @@ int OnInit()
                      EnumToString(InpHtfTimeframe), InpHtfMaPeriod);
      }
 
-   // Trend probe MA — its own handle on its own timeframe
-   if(InpDriftLog && InpDriftTrendProbe)
-     {
-      g_driftTrendMa = iMA(_Symbol, InpDriftTrendTf, InpDriftTrendMaPeriod,
-                           0, MODE_SMA, PRICE_CLOSE);
-      if(g_driftTrendMa == INVALID_HANDLE)
-         PrintFormat("AjipSnD: trend probe MA handle FAILED on %s — probe will record nothing",
-                     EnumToString(InpDriftTrendTf));
-     }
-
    // Recover tracking for positions from earlier EA run
    RebuildTrackedPositions();
 
@@ -336,13 +272,6 @@ void OnTick()
 
    // 1. Update MFE/MAE
    UpdateMfeMae();
-
-   // 1a. First-touch grid (diagnostic only — observes, never decides)
-   UpdateExcursions();
-
-   // 1a2. Trend probe — arms on its own timeframe's bar close, so it is checked
-   // per tick and self-gates. Observation only; places no orders.
-   DriftArmTrend();
 
    // 1b. Loss-side TP->BE, profit-side partial close -> SL to BE, then
    // trailing stop on runners that already partial-closed. Must run before
@@ -415,22 +344,9 @@ void OnTick()
 //==================================================================
 void OnDeinit(const int reason)
   {
-   // Flush zone quality tracker rows that never reached an outcome
-   if(InpZoneQualityLog)
-      FlushUnresolvedZoneOutcomes();
-
-   // Excursion records still inside their horizon — the tail of the run is
-   // otherwise lost, and on a backtest that tail is the final trading day.
-   FlushExcursions();
-
-   // Drift probe: same reasoning — partial stamps for in-flight records are
-   // still useful rows, not lost data.
-   FlushDriftRecords();
-
    // Release ATR handles
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
    if(g_atrHtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrHtfHandle);
-   if(g_driftTrendMa != INVALID_HANDLE) IndicatorRelease(g_driftTrendMa);
    if(g_htfMaHandle  != INVALID_HANDLE) IndicatorRelease(g_htfMaHandle);
 
    ObjectsDeleteAll(0, g_objPrefix);

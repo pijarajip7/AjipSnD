@@ -41,6 +41,7 @@
 | Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
 | Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
 | Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
+| No CSV / diagnostic logging | Trade CSV, zone-quality CSV + its live tracker, the first-touch-grid excursion probe, and the forward-drift probe are all removed — the only files this EA writes now are the orchestrator's handoff/heartbeat signals (`InpHandoffFile`/`InpHeartbeatFile`, plain signal files despite the `.csv` extension, not analysis data) |
 
 ---
 
@@ -64,13 +65,11 @@
 |------|-----------|
 | `AjipSnD.mq5` | EA MQL5 main file — inputs, OnInit, OnTick, OnDeinit |
 | `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, EntryFillInfo, PendingOrderTracker, LtfValidatedZone, SavedLtfZone), globals, helpers |
-| `AjipSnD_Zone.mqh` | SnD detection, zone lifecycle + invalidation, LTF validation history, drawing, zone-quality CSV |
+| `AjipSnD_Zone.mqh` | SnD detection, zone lifecycle + invalidation, LTF validation history, drawing |
 | `AjipSnD_Entry.mqh` | Entry gate (`EntryGateBlocked`), restart recovery (`RebuildTrackedPositions`) |
-| `AjipSnD_Trade.mqh` | Points-based exit (`CheckLossRecoveryTp`, `CheckPartialClose`, `UpdateTrailingStop`), close-all, per-trade CSV, heartbeat/handoff |
+| `AjipSnD_Trade.mqh` | Points-based exit (`CheckLossRecoveryTp`, `CheckPartialClose`, `UpdateTrailingStop`), close-all (`CloseAllAndUntrack`), heartbeat/handoff |
 | `AjipSnD_PendingEntry.mqh` | Pending-limit entry (`PlacePendingOrderForZone`), fill detection + zone-watch cancellation (`ManagePendingOrders`, `ZoneStillWatched`) |
 | `AjipSnD_News.mqh` | News blackout filter |
-| `AjipSnD_Excursion.mqh` | First-touch grid diagnostic (currently dormant — see docs/architecture.md) |
-| `AjipSnD_Drift.mqh` | Forward-drift probe diagnostic — does zone confirmation predict anything? |
 | `AjipSnD_Core.mqh` | `ReplayInitialStructure`, `UpdateLTF`/`UpdateHTF`, `SaveLtfZonesForHtfBias`, `CheckPendingZoneTouches`, `DrawPanel` |
 | `docs/concept.md` | Konsep & strategi |
 | `docs/architecture.md` | EA architecture & parameters |
