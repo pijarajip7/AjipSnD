@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.4-martingale"
+#define EA_BUILD "5.5-directiontarget"
 
 #include <Trade\Trade.mqh>
 
@@ -93,6 +93,18 @@ input double InpMartingaleStepPoints = 5000;  // Points past the extreme open po
 input int    InpMartingaleMaxLevels = 5;  // Cap on how many times the lot can double (0=uncapped)
 // Counts open positions in the direction.
 input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
+
+input group "Direction-Wide Profit Target"
+// Sum of floating (unrealized) P&L across ALL open positions in ONE
+// direction — independent of the points-based per-position exit below,
+// and independent of the other direction's own total. Reaching this
+// closes every open position in that direction AND cancels every resting
+// pending order in that direction too — otherwise a resting BuyLimit
+// (likely a bigger martingale lot than what just closed) would just
+// reopen exposure on the same side right after the group closed for a
+// win. Checked every tick, gated by news same as the account-level
+// targets below. 0 = disabled.
+input double InpDirectionUnrealizedTarget = 0;  // Unrealized P&L ($) per direction that closes that whole direction (0=disabled)
 
 input group "Exit Management (Points-Based)"
 // No SL/TP exists at placement (see AjipSnD_PendingEntry.mqh) — every exit
@@ -336,6 +348,12 @@ void OnTick()
    // the target/loss close-all checks below so their PnL gates see the
    // just-updated position state.
    ManagePartialCloseAndTrailing();
+
+   // 1c. Direction-wide unrealized profit target — finer-grained than the
+   // account-level targets below, so checked first; gated by news, same
+   // convention as other profit-taking closes.
+   if(!InNewsBlackout())
+      CheckDirectionUnrealizedTarget();
 
    // 2. Final target check (blocked during news blackout)
    if(!InNewsBlackout())

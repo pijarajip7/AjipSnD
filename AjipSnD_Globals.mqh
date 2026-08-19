@@ -385,9 +385,13 @@ double ExtremeOpenEntryPrice(int dir)
 //---- Float getters (forward-declared, implemented in Trade.mqh) ----
 double GetDailyPnL();
 double GetFloatingPnL();
+double GetFloatingPnLByDirection(int dir);
 double GetPeriodPnL(datetime from, datetime to);
-void   CloseAllAndLogTrades(string reason);
+void   CloseAllAndLogTrades(string reason, int dirFilter = 0);
 double ComputeRealizedPnl(int idx);
+
+//---- Forward-declared, implemented in AjipSnD_PendingEntry.mqh ----
+void   CancelPendingOrdersForDirection(int dir);
 
 //---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
 double GetHtfMaValue()

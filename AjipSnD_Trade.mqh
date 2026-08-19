@@ -63,6 +63,25 @@ double GetFloatingPnL()
   }
 
 //==================================================================
+// GET FLOATING PNL BY DIRECTION — same as above, restricted to one
+// direction. Used by CheckDirectionUnrealizedTarget for the per-direction
+// profit target — deliberately the same POSITION_PROFIT-only accounting
+// as GetFloatingPnL (no swap), not ComputeRealizedPnl's fuller one, since
+// this is read every tick against still-open positions.
+//==================================================================
+double GetFloatingPnLByDirection(int dir)
+  {
+   double total = 0.0;
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+     {
+      if(g_entries[i].dir != dir) continue;
+      if(PositionSelectByTicket(g_entries[i].ticket))
+         total += PositionGetDouble(POSITION_PROFIT);
+     }
+   return(total);
+  }
+
+//==================================================================
 // PENDING ORDER — BUY LIMIT / SELL LIMIT
 //==================================================================
 
@@ -598,9 +617,11 @@ void CheckEntryCleanup()
   }
 
 //==================================================================
-// CLOSE ALL POSITIONS (this symbol + magic)
+// CLOSE ALL POSITIONS (this symbol + magic). dirFilter=0 (default) closes
+// every direction, unchanged from before; dirFilter=1/-1 restricts to
+// BUY/SELL only — used by the direction-wide profit target below.
 //==================================================================
-void CloseAllPositions()
+void CloseAllPositions(int dirFilter = 0)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -608,6 +629,11 @@ void CloseAllPositions()
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(dirFilter != 0)
+        {
+         int posDir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+         if(posDir != dirFilter) continue;
+        }
 
       if(!trade.PositionClose(ticket))
          PrintFormat("AjipSnD: Close %I64u failed retcode=%d", ticket, trade.ResultRetcode());
@@ -615,12 +641,17 @@ void CloseAllPositions()
   }
 
 //==================================================================
-// CLOSE ALL AND LOG TRADES.
+// CLOSE ALL AND LOG TRADES. dirFilter=0 (default) is the original
+// every-direction close-all every existing caller still uses unchanged;
+// dirFilter=1/-1 scopes the whole operation — snapshot, close, log,
+// "incomplete" retry count — to just that direction, leaving the other
+// direction's positions (and g_entries rows) completely untouched.
+//
 // Snapshot POSITION_PROFIT BEFORE closing to avoid the history-timing gap
 // where the deal hasn't settled yet, but only log a position once the
 // close has actually removed it.
 //==================================================================
-void CloseAllAndLogTrades(string reason)
+void CloseAllAndLogTrades(string reason, int dirFilter = 0)
   {
    int n = ArraySize(g_entries);
 
@@ -635,12 +666,13 @@ void CloseAllAndLogTrades(string reason)
    for(int i = 0; i < n; i++)
      {
       net[i] = 0.0;
+      if(dirFilter != 0 && g_entries[i].dir != dirFilter) continue;   // out of scope for this close — never read below either
       if(PositionSelectByTicket(g_entries[i].ticket))
          net[i] = PositionGetDouble(POSITION_PROFIT)
                 + PositionGetDouble(POSITION_SWAP);  // commission is on the deal, not the position
      }
 
-   CloseAllPositions();
+   CloseAllPositions(dirFilter);
 
    // ---- Log ONLY what actually closed ----
    // A close can be rejected — market closed over a holiday, trade context
@@ -653,6 +685,8 @@ void CloseAllAndLogTrades(string reason)
    // the snapshot's own indices carry a P&L figure anyway.
    for(int i = MathMin(ArraySize(g_entries), n) - 1; i >= 0; i--)
      {
+      if(dirFilter != 0 && g_entries[i].dir != dirFilter) continue;   // wasn't in scope, wasn't touched — leave tracked
+
       if(PositionSelectByTicket(g_entries[i].ticket))
          continue;                      // still open — retry on the next tick
 
@@ -660,9 +694,40 @@ void CloseAllAndLogTrades(string reason)
       RemoveEntry(i);
      }
 
-   int remaining = ArraySize(g_entries);
+   int remaining = 0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+      if(dirFilter == 0 || g_entries[i].dir == dirFilter) remaining++;
    if(remaining > 0)
       PrintFormat("AjipSnD: %s close incomplete — %d position(s) still open, retrying", reason, remaining);
+  }
+
+//==================================================================
+// CHECK DIRECTION-WIDE UNREALIZED PROFIT TARGET (gated by news, same
+// convention as the account-level profit targets below). Independent per
+// direction and independent of the points-based per-position exit —
+// this can fire and close a whole direction's basket regardless of
+// whether any individual leg has partial-closed or armed TP->BE yet.
+// Also cancels every resting pending order in that direction: leaving one
+// alive would just reopen exposure on the same side right after the
+// group closed for a win, likely at a bigger martingale lot than what
+// just closed.
+//==================================================================
+void CheckDirectionUnrealizedTarget()
+  {
+   if(InpDirectionUnrealizedTarget <= 0) return;
+
+   for(int d = 1; d >= -1; d -= 2)   // 1 = BUY, -1 = SELL
+     {
+      double floating = GetFloatingPnLByDirection(d);
+      if(floating < InpDirectionUnrealizedTarget) continue;
+
+      string reason = (d == 1) ? "BUY_DIRECTION_TARGET" : "SELL_DIRECTION_TARGET";
+      PrintFormat("AjipSnD: %s DIRECTION TARGET HIT (%.2f >= %.2f) — closing all %s + cancelling its pending orders",
+                  d == 1 ? "BUY" : "SELL", floating, InpDirectionUnrealizedTarget, d == 1 ? "BUY" : "SELL");
+      WriteHandoffSignal(reason, floating);
+      CloseAllAndLogTrades(reason, d);
+      CancelPendingOrdersForDirection(d);
+     }
   }
 
 //==================================================================
