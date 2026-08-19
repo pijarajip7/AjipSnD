@@ -37,9 +37,11 @@
 | Zone-watch cancellation | A resting order is cancelled once its own zone leaves the watch list (touched, or superseded) — no fixed-bar expiry |
 | No SL/TP at placement | Orders are placed bare; there is no per-position protective stop until the points-based exit logic below sets one |
 | Points-based exit | Loss-side: past `InpLossPointsSetTpBe` points against, a TP is set at breakeven (does not cap the loss). Profit-side: past `InpPartialClosePoints` points in favor, partial-close + SL to breakeven, then an HTF-ATR trailing stop on the remainder |
-| Direction-wide profit target | `InpDirectionUnrealizedTarget` — independent of the per-position exit above: once a direction's TOTAL floating P&L (all open positions in that direction summed) reaches it, closes every position in that direction and cancels every resting pending order for it too |
+| Direction-wide profit target | `InpDirectionUnrealizedTarget` — once a direction's TOTAL floating P&L reaches it, closes every position in that direction. Leaves that direction's pending orders resting — this is a take-profit-and-reset for the basket, not a stop-trading signal |
+| Pending-order cancellation on account-level close-all | Daily/final target and max-loss, and session-end profit close (below), all cancel every resting pending order outright, on top of closing every open position — nothing left that could reopen exposure after the EA just tried to stop |
+| Session-end profit close | Once the session ends, checked every tick while outside it: if unrealized P&L across the whole account is positive, close everything + cancel all pending orders. Flat or negative at session end does nothing — positions/orders are left running |
 | Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
-| Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
+| Session + News | Session filter blocks new entries outside hours (and now closes profitably at session end, see above); news blackout blocks entries + profit-taking closes (max-loss never gated) |
 | Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
 | No CSV / diagnostic logging | Trade CSV, zone-quality CSV + its live tracker, the first-touch-grid excursion probe, and the forward-drift probe are all removed — the only files this EA writes now are the orchestrator's handoff/heartbeat signals (`InpHandoffFile`/`InpHeartbeatFile`, plain signal files despite the `.csv` extension, not analysis data) |
 

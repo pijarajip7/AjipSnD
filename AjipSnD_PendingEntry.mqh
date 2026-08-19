@@ -213,24 +213,20 @@ void ManagePendingOrders()
      }
   }
 
-//---- Cancel every resting pending order in this direction outright,
-// regardless of its zone's watch state — used by
-// CheckDirectionUnrealizedTarget (AjipSnD_Trade.mqh) when a direction-wide
-// profit target closes the whole group: a resting order left alive would
-// just reopen exposure on the same side right after the close, likely at
-// a bigger martingale lot than what just closed. ----
-void CancelPendingOrdersForDirection(int dir)
+//---- Cancel every resting pending order outright, regardless of direction
+// or its zone's watch state — used by the account-level daily/final
+// target/max-loss circuit breakers (AjipSnD_Trade.mqh) and the session-end
+// profit close: all of those close every open position, and a resting
+// order left alive would just reopen exposure right after. ----
+void CancelAllPendingOrders()
   {
    for(int i = ArraySize(g_pendingOrders) - 1; i >= 0; i--)
      {
-      if(g_pendingOrders[i].dir != dir) continue;
-
       ulong ticket = g_pendingOrders[i].ticket;
       if(trade.OrderDelete(ticket))
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: Pending order %I64u cancelled — %s direction target hit",
-                        ticket, dir == 1 ? "BUY" : "SELL");
+            PrintFormat("AjipSnD: Pending order %I64u cancelled — account-level close-all", ticket);
         }
       else if(InpEnableLog)
          PrintFormat("AjipSnD: Pending order %I64u cancel FAILED, error=%d", ticket, GetLastError());

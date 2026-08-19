@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "6.1-nohedgegate"
+#define EA_BUILD "6.2-sessionendclose"
 
 #include <Trade\Trade.mqh>
 
@@ -143,7 +143,7 @@ input double InpDailyMaxLoss   = 0.0;  // Daily max loss — close all + block e
 input group "Session Filter"
 input double InpTimezoneOffset = 7.0;       // UTC offset in hours for daily/weekly boundaries (e.g., -4=EST, +2=CEST)
 input string InpSessionStart   = "06:00";   // Session start HH:MM (local time) — start==end = no filter
-input string InpSessionEnd     = "00:00";   // Session end HH:MM — outside: no entries; if PnL>0 → close all
+input string InpSessionEnd     = "00:00";   // Session end HH:MM — outside: no entries; if unrealized PnL>0, close all + cancel pending
 
 input group "News Filter"
 input bool                           InpNewsFilterEnabled = true;                    // Block entries + profit exits around high-impact news
@@ -301,6 +301,10 @@ void OnTick()
    if(!InNewsBlackout())
       CheckDailyTargetCloseAll();
    CheckDailyMaxLossCloseAll();
+
+   // 3b. Session ended in profit -> close all + cancel pending (gated by news)
+   if(!InNewsBlackout())
+      CheckSessionEndProfitClose();
 
    //══════════════════════════════════════════════════════════════
    // HTF update (separate bar detection)

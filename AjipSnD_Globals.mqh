@@ -367,7 +367,7 @@ void   CloseAllAndUntrack(string reason, int dirFilter = 0);
 double ComputeRealizedPnl(int idx);
 
 //---- Forward-declared, implemented in AjipSnD_PendingEntry.mqh ----
-void   CancelPendingOrdersForDirection(int dir);
+void   CancelAllPendingOrders();
 
 //---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
 double GetHtfMaValue()

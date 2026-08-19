@@ -540,10 +540,11 @@ void CloseAllAndUntrack(string reason, int dirFilter = 0)
 // direction and independent of the points-based per-position exit —
 // this can fire and close a whole direction's basket regardless of
 // whether any individual leg has partial-closed or armed TP->BE yet.
-// Also cancels every resting pending order in that direction: leaving one
-// alive would just reopen exposure on the same side right after the
-// group closed for a win, likely at a bigger martingale lot than what
-// just closed.
+// Deliberately leaves that direction's resting pending orders alone —
+// this is a take-profit-and-reset for the current basket, not a stop-
+// trading-this-direction signal, so the zone-watch pending-order pipeline
+// keeps running exactly as it would otherwise. Only the account-level
+// daily/final target/max-loss below cancel pending orders outright.
 //==================================================================
 void CheckDirectionUnrealizedTarget()
   {
@@ -555,12 +556,35 @@ void CheckDirectionUnrealizedTarget()
       if(floating < InpDirectionUnrealizedTarget) continue;
 
       string reason = (d == 1) ? "BUY_DIRECTION_TARGET" : "SELL_DIRECTION_TARGET";
-      PrintFormat("AjipSnD: %s DIRECTION TARGET HIT (%.2f >= %.2f) — closing all %s + cancelling its pending orders",
+      PrintFormat("AjipSnD: %s DIRECTION TARGET HIT (%.2f >= %.2f) — closing all %s",
                   d == 1 ? "BUY" : "SELL", floating, InpDirectionUnrealizedTarget, d == 1 ? "BUY" : "SELL");
       WriteHandoffSignal(reason, floating);
       CloseAllAndUntrack(reason, d);
-      CancelPendingOrdersForDirection(d);
      }
+  }
+
+//==================================================================
+// CHECK SESSION-END PROFIT CLOSE (gated by news, same convention as the
+// other profit-taking closes). Not edge-triggered on the in-session ->
+// out-of-session transition — it just checks every tick while outside the
+// session, which is safe because closing/cancelling an already-empty
+// g_entries/g_pendingOrders is a no-op. That also means if the account is
+// flat or negative right when the session ends, nothing happens yet, but
+// it still closes the moment floating P&L turns positive later, for as
+// long as the session stays closed.
+//==================================================================
+void CheckSessionEndProfitClose()
+  {
+   if(!g_sessionFilterEnabled) return;
+   if(InSession()) return;
+
+   double floating = GetFloatingPnL();
+   if(floating <= 0) return;
+
+   PrintFormat("AjipSnD: SESSION ENDED IN PROFIT (%.2f) — closing all + cancelling pending orders", floating);
+   WriteHandoffSignal("SESSION_END_PROFIT", floating);
+   CloseAllAndUntrack("SESSION_END_PROFIT");
+   CancelAllPendingOrders();
   }
 
 //==================================================================
@@ -572,9 +596,10 @@ void CheckDailyTargetCloseAll()
    double total = GetDailyPnL() + GetFloatingPnL();
    if(total >= InpDailyMaxProfit)
      {
-      PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all", total, InpDailyMaxProfit);
+      PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all + cancelling pending orders", total, InpDailyMaxProfit);
       WriteHandoffSignal("DAILY_TARGET", total);
       CloseAllAndUntrack("DAILY_TARGET");
+      CancelAllPendingOrders();
      }
   }
 
@@ -587,9 +612,10 @@ void CheckDailyMaxLossCloseAll()
    double total = GetDailyPnL() + GetFloatingPnL();
    if(total <= -InpDailyMaxLoss)
      {
-      PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
+      PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all + cancelling pending orders", total, -InpDailyMaxLoss);
       WriteHandoffSignal("DAILY_MAX_LOSS", total);
       CloseAllAndUntrack("DAILY_MAX_LOSS");
+      CancelAllPendingOrders();
      }
   }
 
@@ -640,8 +666,9 @@ void CheckFinalTargetCloseAll()
    if(InpFinalProfitTarget <= 0) return;
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) >= InpFinalProfitTarget)
      {
-      PrintFormat("AjipSnD: FINAL TARGET REACHED — closing all PERMANENTLY");
+      PrintFormat("AjipSnD: FINAL TARGET REACHED — closing all + cancelling pending orders PERMANENTLY");
       CloseAllAndUntrack("FINAL_TARGET");
+      CancelAllPendingOrders();
      }
   }
 
@@ -653,8 +680,9 @@ void CheckFinalMaxLossCloseAll()
    if(InpFinalMaxLoss <= 0) return;
    if((AccountInfoDouble(ACCOUNT_BALANCE) - g_startingBalance + GetFloatingPnL()) <= -InpFinalMaxLoss)
      {
-      PrintFormat("AjipSnD: FINAL MAX LOSS REACHED — closing all PERMANENTLY");
+      PrintFormat("AjipSnD: FINAL MAX LOSS REACHED — closing all + cancelling pending orders PERMANENTLY");
       CloseAllAndUntrack("FINAL_MAX_LOSS");
+      CancelAllPendingOrders();
      }
   }
 
