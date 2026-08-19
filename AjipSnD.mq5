@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "6.2-sessionendclose"
+#define EA_BUILD "6.3-weeklysession"
 
 #include <Trade\Trade.mqh>
 
@@ -29,9 +29,9 @@
 //==================================================================
 input group "Strategy"
 input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M5;   // LTF — entry timeframe
-input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_H1;  // HTF — retest zones timeframe
-input int              InpCandlesInit    = 50;          // Lookback candles for initial trend
-input int              InpMaxZones       = 10;           // Max active zones per type (demand/supply)
+input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_M15;  // HTF — retest zones timeframe
+input int              InpCandlesInit    = 100;          // Lookback candles for initial trend
+input int              InpMaxZones       = 50;           // Max active zones per type (demand/supply)
 input bool             InpRequireZoneValidation = true; // Require HTF zone follow-through before active (LTF always on)
 input double           InpMaxZoneWidthAtr = 0;      // Max HTF zone width / ATR to allow entry (0=disabled)
 input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
@@ -40,7 +40,7 @@ input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body /
 // five windows and matched or beat period=50/100/200 in four of five —
 // the one exception (2025-2026) trails period=50 by a hair. Also cuts max
 // drawdown well below filter-off in every window tested.
-input bool             InpHtfMaFilter    = true;        // Enable HTF MA direction filter (BUY only above MA, SELL only below)
+input bool             InpHtfMaFilter    = false;        // Enable HTF MA direction filter (BUY only above MA, SELL only below)
 input int              InpHtfMaPeriod    = 20;           // HTF MA period (only if InpHtfMaFilter=true)
 input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
 
@@ -64,7 +64,7 @@ input ENUM_DIRECTION_MODE InpTradeMode = DIRECTION_BUY_ONLY;  // Which direction
 // metric (return, profit factor, max DD, expectancy) with no tradeoff, and
 // are tied with each other — this system's trade cadence rarely produces a
 // re-entry inside 30 minutes anyway, so 15 alone captures the effect.
-input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
+input int    InpCooldownMinutes = 0;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 // No risk-based sizing — there is no SL at placement to size a stop
 // distance against (see "Exit Management" below), so the FIRST entry in a
 // direction always uses this lot regardless of price or zone width
@@ -86,13 +86,13 @@ input double InpFixedLot = 0.01;   // Base lot size — the first entry in a dir
 // Resets naturally once a direction has no open positions left — the next
 // entry there is a fresh "first" one, back at InpFixedLot. Unvalidated —
 // starting values from the spec, not measured ones.
-input double InpMartingaleStepPoints = 5000;  // Points past the extreme open position that doubles the next entry's lot (0=disabled)
+input double InpMartingaleStepPoints = 1000.0;  // Points past the extreme open position that doubles the next entry's lot (0=disabled)
 // Uncapped, this compounds fast — level 10 is already 1024x InpFixedLot —
 // and every one of those lots carries no SL. 0 = uncapped, which is a real
 // risk, not a placeholder for "no limit needed."
-input int    InpMartingaleMaxLevels = 5;  // Cap on how many times the lot can double (0=uncapped)
+input int    InpMartingaleMaxLevels = 10;  // Cap on how many times the lot can double (0=uncapped)
 // Counts open positions in the direction.
-input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
+input int    InpMaxPositionsPerDir = 500;    // Max positions per direction (0=disabled)
 
 input group "Direction-Wide Profit Target"
 // Sum of floating (unrealized) P&L across ALL open positions in ONE
@@ -104,7 +104,7 @@ input group "Direction-Wide Profit Target"
 // reopen exposure on the same side right after the group closed for a
 // win. Checked every tick, gated by news same as the account-level
 // targets below. 0 = disabled.
-input double InpDirectionUnrealizedTarget = 0;  // Unrealized P&L ($) per direction that closes that whole direction (0=disabled)
+input double InpDirectionUnrealizedTarget = 500.0;  // Unrealized P&L ($) per direction that closes that whole direction (0=disabled)
 
 input group "Exit Management (Points-Based)"
 // No SL/TP exists at placement (see AjipSnD_PendingEntry.mqh) — every exit
@@ -118,16 +118,16 @@ input group "Exit Management (Points-Based)"
 // Does NOT cap the loss — there is still no SL. 0 = disabled, in which case
 // a losing position has no exit at all besides the account-level
 // daily/final max-loss close-all below (both off by default).
-input double InpLossPointsSetTpBe = 300;  // Loss (points) that arms a TP at breakeven (0=disabled)
+input double InpLossPointsSetTpBe = 0;  // Loss (points) that arms a TP at breakeven (0=disabled)
 // Profit side: once floating profit reaches this many points, close a
 // slice and move the remainder's SL to breakeven.
-input bool   InpPartialCloseEnabled   = true;   // Enable partial close at profit target + SL->breakeven
-input double InpPartialClosePoints    = 300;    // Profit (points) that triggers partial close + SL->breakeven
+input bool   InpPartialCloseEnabled   = false;   // Enable partial close at profit target + SL->breakeven
+input double InpPartialClosePoints    = 2000.0;    // Profit (points) that triggers partial close + SL->breakeven
 input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the profit target
 input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop/TP (0=exact entry)
 // Trailing only ever arms AFTER the partial close above has fired on that
 // position — the remainder is the "runner." Distance/step are in HTF ATR.
-input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
+input bool   InpTrailingStopEnabled   = false;   // Enable trailing stop on partial-closed remainders
 input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in HTF ATR
 input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (HTF ATR) before re-modifying the broker
 
@@ -137,16 +137,21 @@ input double InpFinalMaxLoss      = 0.0;  // Overall max loss — close all + st
 input double InpStartingBalance   = 0.0;  // Baseline for final target (0=auto-capture on first run)
 
 input group "Risk Management — Daily"
-input double InpDailyMaxProfit = 0.0;   // Daily target — close all + block entries rest of day (0=disabled)
+input double InpDailyMaxProfit = 2000.0;   // Daily target — close all + block entries rest of day (0=disabled)
 input double InpDailyMaxLoss   = 0.0;  // Daily max loss — close all + block entries rest of day (0=disabled)
 
 input group "Session Filter"
-input double InpTimezoneOffset = 7.0;       // UTC offset in hours for daily/weekly boundaries (e.g., -4=EST, +2=CEST)
-input string InpSessionStart   = "06:00";   // Session start HH:MM (local time) — start==end = no filter
-input string InpSessionEnd     = "00:00";   // Session end HH:MM — outside: no entries; if unrealized PnL>0, close all + cancel pending
+// One session = one week. Outside [start day+time, end day+time]: no new
+// entries; if unrealized PnL>0 when the week ends, close all + cancel
+// pending (see CheckSessionEndProfitClose). Same day+time on both = no filter.
+input double           InpTimezoneOffset   = 7.0;      // UTC offset in hours for the weekly session boundary (e.g., -4=EST, +2=CEST)
+input ENUM_DAY_OF_WEEK InpSessionStartDay  = MONDAY;    // Session start day (local time)
+input string           InpSessionStartTime = "00:00";  // Session start time HH:MM (local time)
+input ENUM_DAY_OF_WEEK InpSessionEndDay    = FRIDAY;    // Session end day (local time)
+input string           InpSessionEndTime   = "23:00";  // Session end time HH:MM (local time)
 
 input group "News Filter"
-input bool                           InpNewsFilterEnabled = true;                    // Block entries + profit exits around high-impact news
+input bool                           InpNewsFilterEnabled = false;                    // Block entries + profit exits around high-impact news
 input ENUM_CALENDAR_EVENT_IMPORTANCE InpNewsMinImportance = CALENDAR_IMPORTANCE_HIGH; // Minimum event importance
 input int                            InpNewsMinutesBefore = 30;                       // Minutes before event to start blocking
 input int                            InpNewsMinutesAfter  = 30;                       // Minutes after event to keep blocking
@@ -159,7 +164,7 @@ input int              InpPanelX      = 20;                 // Panel X offset
 input int              InpPanelY      = 50;                 // Panel Y offset
 
 input group "Diagnostics"
-input bool InpEnableLog = true;  // Enable Print/PrintFormat output
+input bool InpEnableLog = false;  // Enable Print/PrintFormat output
 
 input group "Multi-Account Orchestrator"
 input bool   InpHandoffEnabled = false;                   // Write handoff signal when daily target/max-loss hit
@@ -207,11 +212,17 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetExpertMagicNumber(InpMagicNumber);
 
-   // Parse session
-   g_sessionStartMin = ParseMinutesFromMidnight(InpSessionStart);
-   g_sessionEndMin   = ParseMinutesFromMidnight(InpSessionEnd);
-   g_sessionFilterEnabled = (g_sessionStartMin >= 0 && g_sessionEndMin >= 0
-                             && g_sessionStartMin != g_sessionEndMin);
+   // Parse session — weekly window, expressed as minutes since Monday 00:00
+   // (see InSession() in AjipSnD_Globals.mqh)
+   int sessionStartTimeMin = ParseMinutesFromMidnight(InpSessionStartTime);
+   int sessionEndTimeMin   = ParseMinutesFromMidnight(InpSessionEndTime);
+   g_sessionFilterEnabled = false;
+   if(sessionStartTimeMin >= 0 && sessionEndTimeMin >= 0)
+     {
+      g_sessionStartWeekMin = MondayRelativeDay(InpSessionStartDay) * 1440 + sessionStartTimeMin;
+      g_sessionEndWeekMin   = MondayRelativeDay(InpSessionEndDay)   * 1440 + sessionEndTimeMin;
+      g_sessionFilterEnabled = (g_sessionStartWeekMin != g_sessionEndWeekMin);
+     }
 
    // Timezone offset
    g_timezoneOffsetSeconds = (int)(InpTimezoneOffset * 3600);
@@ -248,9 +259,10 @@ int OnInit()
    PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, FixedLot=%.2f",
                EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
                InpMaxZones, InpFixedLot);
-   PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
-               InpSessionStart, InpSessionEnd,
-               g_sessionFilterEnabled ? "ENABLED" : "ALL DAY",
+   PrintFormat("  Session: %s %s - %s %s (%s), Timezone UTC%+.0f",
+               EnumToString(InpSessionStartDay), InpSessionStartTime,
+               EnumToString(InpSessionEndDay), InpSessionEndTime,
+               g_sessionFilterEnabled ? "ENABLED" : "ALL WEEK",
                InpTimezoneOffset);
    Print("══════════════════════════════════════");
 

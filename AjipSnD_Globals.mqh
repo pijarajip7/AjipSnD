@@ -171,9 +171,13 @@ double         g_maLineLastValue = 0.0;
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
 
-// ---- Trading session ----
-int            g_sessionStartMin      = 0;
-int            g_sessionEndMin        = 0;
+// ---- Trading session — now a WEEKLY window (e.g. Monday 00:00 through
+// Friday 23:00), not a daily one. Both boundaries are stored as minutes
+// since Monday 00:00 (0..10079) so InSession() is one wraparound check
+// across the whole week instead of juggling day-of-week and time-of-day
+// separately. ----
+int            g_sessionStartWeekMin  = 0;
+int            g_sessionEndWeekMin    = 0;
 bool           g_sessionFilterEnabled = false;
 
 // ---- Timezone offset for daily/weekly boundaries ----
@@ -281,7 +285,19 @@ int ParseMinutesFromMidnight(string timeStr)
    return(h * 60 + m);
   }
 
-//---- Are we inside the trading session? ----
+//---- Day-of-week (0=Sunday..6=Saturday, same numbering as ENUM_DAY_OF_WEEK
+// and MqlDateTime.day_of_week) rebased so the week starts at Monday=0 —
+// lets a "day + time" moment collapse into one minutes-since-Monday value ----
+int MondayRelativeDay(int dayOfWeek)
+  {
+   return((dayOfWeek + 6) % 7);
+  }
+
+//---- Are we inside the trading session? The session is a WEEKLY window —
+// e.g. Monday 00:00 through Friday 23:00 — so both "now" and the two
+// boundaries are expressed as minutes since Monday 00:00 (0..10079) and
+// compared with the same wraparound shape the old daily version used, just
+// on a 7-day modulus instead of a 1-day one. ----
 bool InSession()
   {
    if(!g_sessionFilterEnabled)
@@ -290,12 +306,12 @@ bool InSession()
    datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
    MqlDateTime local;
    TimeToStruct(localNow, local);
-   int nowMin = local.hour * 60 + local.min;
-   
-   if(g_sessionStartMin <= g_sessionEndMin)
-      return(nowMin >= g_sessionStartMin && nowMin < g_sessionEndMin);
+   int nowWeekMin = MondayRelativeDay(local.day_of_week) * 1440 + local.hour * 60 + local.min;
+
+   if(g_sessionStartWeekMin <= g_sessionEndWeekMin)
+      return(nowWeekMin >= g_sessionStartWeekMin && nowWeekMin < g_sessionEndWeekMin);
    else
-      return(nowMin >= g_sessionStartMin || nowMin < g_sessionEndMin);
+      return(nowWeekMin >= g_sessionStartWeekMin || nowWeekMin < g_sessionEndWeekMin);
   }
 
 //---- Check if daily limit reached (realized only, gate entry) ----

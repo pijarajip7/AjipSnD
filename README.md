@@ -41,7 +41,7 @@
 | Pending-order cancellation on account-level close-all | Daily/final target and max-loss, and session-end profit close (below), all cancel every resting pending order outright, on top of closing every open position — nothing left that could reopen exposure after the EA just tried to stop |
 | Session-end profit close | Once the session ends, checked every tick while outside it: if unrealized P&L across the whole account is positive, close everything + cancel all pending orders. Flat or negative at session end does nothing — positions/orders are left running |
 | Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
-| Session + News | Session filter blocks new entries outside hours (and now closes profitably at session end, see above); news blackout blocks entries + profit-taking closes (max-loss never gated) |
+| Session + News | Weekly session filter — `InpSessionStartDay`/`Time` (e.g. Monday 00:00) through `InpSessionEndDay`/`Time` (e.g. Friday 23:00) — blocks new entries outside that window and closes profitably once the week ends (see session-end profit close above); news blackout blocks entries + profit-taking closes (max-loss never gated) |
 | Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
 | No CSV / diagnostic logging | Trade CSV, zone-quality CSV + its live tracker, the first-touch-grid excursion probe, and the forward-drift probe are all removed — the only files this EA writes now are the orchestrator's handoff/heartbeat signals (`InpHandoffFile`/`InpHeartbeatFile`, plain signal files despite the `.csv` extension, not analysis data) |
 

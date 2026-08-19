@@ -473,7 +473,7 @@ color LimitCol(string s)
 
 string SessionTxt()
   {
-   if(!g_sessionFilterEnabled) return("all day");
+   if(!g_sessionFilterEnabled) return("always");
    return(InSession() ? "OPEN" : "CLOSED");
   }
 color SessionCol()
