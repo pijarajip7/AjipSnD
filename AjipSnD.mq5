@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.5-directiontarget"
+#define EA_BUILD "5.6-directionmodeonly"
 
 #include <Trade\Trade.mqh>
 
@@ -48,18 +48,19 @@ input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
 // project's other enums in AjipSnD_Globals.mqh because that include happens
 // AFTER all inputs — an enum used as an input's type must already be
 // declared by the time that input line compiles.
+// No "both" option — this EA only ever runs one direction at a time now.
+// Deliberate, no neutral default: pick one.
 enum ENUM_DIRECTION_MODE
   {
-   DIRECTION_BOTH      = 0,   // Trade both directions
-   DIRECTION_BUY_ONLY  = 1,   // BUY only
-   DIRECTION_SELL_ONLY = 2    // SELL only
+   DIRECTION_BUY_ONLY  = 0,   // BUY only
+   DIRECTION_SELL_ONLY = 1    // SELL only
   };
 
 input group "Entry & Trade Sizing"
 input bool   InpAllowHedging = false;   // Allow BUY & SELL open simultaneously (false=block opposite)
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
-input ENUM_DIRECTION_MODE InpTradeMode = DIRECTION_BOTH;  // Restrict pending orders to one direction, or both
+input ENUM_DIRECTION_MODE InpTradeMode = DIRECTION_BUY_ONLY;  // Which direction this EA trades — no "both" mode
 // Backtested 2025.08-2026.08 (XAUUSD+ M5): 15 and 30 both beat 0 on every
 // metric (return, profit factor, max DD, expectancy) with no tradeoff, and
 // are tied with each other — this system's trade cadence rarely produces a
