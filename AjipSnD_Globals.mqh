@@ -320,19 +320,6 @@ bool CooldownBlocked()
    return(TimeCurrent() - g_lastTradeCloseTime < InpCooldownMinutes * 60);
   }
 
-//---- Check hedge blocked ----
-bool HedgeBlocked(int dir)
-  {
-   if(InpAllowHedging)
-      return(false);
-   for(int i = 0; i < ArraySize(g_entries); i++)
-     {
-      if(g_entries[i].dir == -dir)  // opposite side open
-         return(true);
-     }
-   return(false);
-  }
-
 //---- Open positions in a direction ----
 int DirectionalExposureCount(int dir)
   {

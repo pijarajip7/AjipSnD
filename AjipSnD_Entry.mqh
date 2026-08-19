@@ -88,12 +88,6 @@ bool EntryGateBlocked(int dir)
                                    InpMaxPositionsPerDir, dir == 1 ? "BUY" : "SELL");
       return(true);
      }
-   if(HedgeBlocked(dir))
-     {
-      if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — Hedging disabled, opposite side open for %s",
-                                   dir == 1 ? "BUY" : "SELL");
-      return(true);
-     }
    if(CooldownBlocked())
      {
       if(InpEnableLog)

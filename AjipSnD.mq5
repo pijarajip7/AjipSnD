@@ -20,7 +20,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "6.0-nocsv"
+#define EA_BUILD "6.1-nohedgegate"
 
 #include <Trade\Trade.mqh>
 
@@ -57,7 +57,6 @@ enum ENUM_DIRECTION_MODE
   };
 
 input group "Entry & Trade Sizing"
-input bool   InpAllowHedging = false;   // Allow BUY & SELL open simultaneously (false=block opposite)
 input ulong  InpDeviation    = 10;     // Slippage (points)
 input long   InpMagicNumber  = 99002;  // Magic number
 input ENUM_DIRECTION_MODE InpTradeMode = DIRECTION_BUY_ONLY;  // Which direction this EA trades — no "both" mode
