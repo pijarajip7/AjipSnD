@@ -35,7 +35,8 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    double slDistance = (slPrice > 0.0) ? ((dir == 1) ? (price - slPrice) : (slPrice - price)) : 0.0;
    if(slDistance <= 0.0)
      {
-      Print("AjipSnD: Rejection entry skipped — non-positive SL distance");
+      PrintFormat("AjipSnD: %s entry skipped — non-positive SL distance",
+                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION");
       return(0);
      }
 
@@ -44,7 +45,8 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    if(lot <= 0.0) return(0);
    if(lot < g_volMin || lot > g_volMax)
      {
-      PrintFormat("AjipSnD: Rejection entry skip — lot %.2f outside broker range", lot);
+      PrintFormat("AjipSnD: %s entry skip — lot %.2f outside broker range",
+                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION", lot);
       return(0);
      }
 
@@ -58,14 +60,16 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
 
    if(!ok)
      {
-      PrintFormat("AjipSnD: Rejection entry failed. retcode=%d", trade.ResultRetcode());
+      PrintFormat("AjipSnD: %s entry failed. retcode=%d",
+                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION", trade.ResultRetcode());
       return(0);
      }
 
    ulong ticket = trade.ResultOrder();
    double fillPrice = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_PRICE_OPEN) : price;
-   PrintFormat("AjipSnD: %s market-filled (rejection). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
-               dir == 1 ? "BUY" : "SELL", ticket, lot, fillPrice, slPrice, tpPrice);
+   PrintFormat("AjipSnD: %s market-filled (%s). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
+               dir == 1 ? "BUY" : "SELL", InpAggressiveEntry ? "aggressive" : "rejection",
+               ticket, lot, fillPrice, slPrice, tpPrice);
 
    EntryFillInfo po;
    ZeroMemory(po);
