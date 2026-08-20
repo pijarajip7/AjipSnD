@@ -185,6 +185,13 @@ SavedLtfZone g_savedLtfZones[];
 // SavedLtfZone itself so the trading struct stays exactly what it was
 // before this existed. ----
 datetime g_ltfZoneDrawEnd[];
+// true once a zone's rectangle has been (re)drawn with its FINAL frozen end
+// time — DrawSavedLtfZones skips these entirely on every later call, since a
+// resolved zone's rectangle never changes again. A still-live zone (never
+// set true here) keeps getting redrawn every call so its right edge can
+// keep extending. Without this, redraw cost would grow with every zone ever
+// confirmed, not just the ones still being watched. ----
+bool     g_ltfZoneDrawFrozen[];
 
 //==================================================================
 // HELPER FUNCTIONS

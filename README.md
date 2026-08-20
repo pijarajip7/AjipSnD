@@ -26,7 +26,7 @@
 | Rejection watch | Every zone that confirms and validates is saved and watched immediately, both directions — no bias gate, no wait for a second timeframe |
 | Rejection entry | Wick back into a saved zone, closed back out, body/ATR above threshold → market order |
 | Zone invalidation | Saved zones leave the watch list on a body CLOSE past the far edge (sweep-aware) — the rectangle itself stays on chart, frozen (see Persistent zone drawing below) |
-| Persistent zone drawing | A zone's rectangle is never deleted once drawn. While still watched, its right edge keeps extending to "now"; once resolved (rejected+traded, structurally broken, or superseded by a fresher same-direction zone) it freezes at the bar that resolved it |
+| Persistent zone drawing | A zone's rectangle is never deleted once drawn. While still watched, its right edge keeps extending to "now"; once resolved (rejected+traded, structurally broken, or superseded by a fresher same-direction zone) it freezes at the bar that resolved it, is redrawn once in that final form, then skipped on every later call — redraw cost tracks the live watch list, not the ever-growing total of every zone ever confirmed |
 | Structural SL/TP | SL anchored to the rejection bar's own extreme + ATR buffer; TP a multiple of the actual SL distance |
 | Risk-based sizing | Lot derived from `InpRiskPerTrade` and the real stop distance, capped by `InpMaxRiskOvershoot` |
 | Init replay | OnInit replays LTF bars chronologically, so the EA starts with its real zone structure and watch list instead of an empty one |

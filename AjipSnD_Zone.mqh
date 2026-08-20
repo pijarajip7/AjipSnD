@@ -347,26 +347,35 @@ void DrawZoneRect(string name, datetime time, datetime endTime, double price1, d
 // drawn: a still-watched zone's right edge keeps extending to "now" every
 // call, and a resolved one (g_ltfZoneDrawEnd[i] != 0 — touched+rejected,
 // structurally broken, or superseded) freezes at the bar it resolved on,
-// instead of vanishing or continuing to extend. ----
+// instead of vanishing or continuing to extend.
+//
+// A zone already drawn in that final frozen form (g_ltfZoneDrawFrozen[i])
+// is skipped outright — its rectangle never changes again, so there is
+// nothing left to update. Only still-live zones, plus whichever zone just
+// resolved THIS call, actually touch the object manager — redraw cost
+// tracks the (small, bounded) watch list, not the ever-growing total of
+// every zone this EA has ever confirmed. ----
 void DrawSavedLtfZones()
   {
    if(!InpDrawLines) return;
 
    string prefix = g_objPrefix + "LTF_";
-   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
-     {
-      string objName = ObjectName(0, i);
-      if(StringFind(objName, prefix) == 0)
-         ObjectDelete(0, objName);
-     }
-
    int n = ArraySize(g_savedLtfZones);
    for(int i = 0; i < n; i++)
      {
-      color clr = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
-      datetime endTime = (g_ltfZoneDrawEnd[i] > 0) ? g_ltfZoneDrawEnd[i] : TimeCurrent();
-      DrawZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time, endTime,
+      if(g_ltfZoneDrawFrozen[i]) continue;
+
+      bool resolved = (g_ltfZoneDrawEnd[i] > 0);
+      datetime endTime = resolved ? g_ltfZoneDrawEnd[i] : TimeCurrent();
+      color    clr     = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
+
+      string name = prefix + IntegerToString(i);
+      ObjectDelete(0, name);   // no-op if this zone hasn't been drawn yet
+      DrawZoneRect(name, g_savedLtfZones[i].time, endTime,
                    g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
+
+      if(resolved)
+         g_ltfZoneDrawFrozen[i] = true;   // final form — never touched again
      }
   }
 

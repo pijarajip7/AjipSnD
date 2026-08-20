@@ -25,6 +25,8 @@ void SaveLtfZoneForWatch(const SnDZone &zone)
 
    ArrayResize(g_ltfZoneDrawEnd, sz + 1);
    g_ltfZoneDrawEnd[sz] = 0;
+   ArrayResize(g_ltfZoneDrawFrozen, sz + 1);
+   g_ltfZoneDrawFrozen[sz] = false;
 
    if(InpEnableLog)
       PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
