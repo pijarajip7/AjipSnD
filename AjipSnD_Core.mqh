@@ -51,31 +51,35 @@ void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
      }
   }
 
-//---- Check every saved zone against this closed bar: break, or rejection ----
+//---- Check every saved zone against this closed bar: break, rejection, or
+// (InpAggressiveEntry) the first touch itself ----
 // A saved zone stays watchable through any number of weak/shallow touches —
 // it is NOT one-shot on first contact. It only resolves two ways:
 //   1. Structural break — a body CLOSE beyond the zone's far edge (or its
 //      sweep level, if it had one at confirmation). Price didn't just
 //      retest and fail, it went straight through — the thesis is gone.
-//   2. Rejection — wick re-enters the zone's range AND this bar's own body
-//      is large relative to LTF ATR in the favourable direction AND the
-//      close ends back outside the zone. All three together, not just the
-//      close-back-out alone (which InpRejectEntryProbe already showed is
-//      close to the weakest possible bar of the "wick vs close" definitions
-//      this project has tried) — the body requirement is what separates a
-//      genuine rejection from a wick that grazed the level and drifted back
-//      on no momentum.
-// A touch that is neither a break nor a qualifying rejection resolves
-// nothing on its own — the zone is still intact and still worth waiting
-// on — but it is recorded (SavedLtfZone.touched) so
-// MarkLtfValidationContext can retire it later if a fresher same-direction
-// zone validates first.
+//   2. Entry trigger — normally a REJECTION: wick re-enters the zone's
+//      range AND this bar's own body is large relative to LTF ATR in the
+//      favourable direction AND the close ends back outside the zone. All
+//      three together, not just the close-back-out alone (which
+//      InpRejectEntryProbe already showed is close to the weakest possible
+//      bar of the "wick vs close" definitions this project has tried) — the
+//      body requirement is what separates a genuine rejection from a wick
+//      that grazed the level and drifted back on no momentum. With
+//      InpAggressiveEntry on, the trigger is just the FIRST wick into the
+//      zone, full stop — no body/close-back-out requirement at all.
+// A touch that is neither a break nor a qualifying trigger resolves nothing
+// on its own — the zone is still intact and still worth waiting on — but
+// it is recorded (SavedLtfZone.touched) so MarkLtfValidationContext can
+// retire it later if a fresher same-direction zone validates first. (Moot
+// under InpAggressiveEntry: the first touch always triggers immediately,
+// so a zone is never left "touched but still watching" there.)
 //
 // isReplay (OnInit historical replay) still resolves a zone's fate exactly
-// as live does — used=true on a break or a confirmed rejection — but never
+// as live does — used=true on a break or a confirmed trigger — but never
 // calls OpenMarketWithStructuralStops: by the time OnInit runs, price has
-// already moved on from wherever a historical rejection bar closed, so
-// there is no legitimate fill left to send at today's market price.
+// already moved on from wherever a historical trigger bar closed, so there
+// is no legitimate fill left to send at today's market price.
 void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
   {
    int n = ArraySize(g_savedLtfZones);
@@ -112,6 +116,8 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       bool wickedIn = isDemand ? (bar.low <= zHigh) : (bar.high >= zLow);
       if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
 
+      bool firstTouch = !g_savedLtfZones[i].touched;
+
       // Recorded even if this particular touch doesn't resolve anything —
       // MarkLtfValidationContext reads this to retire the zone the moment a
       // fresher same-direction one validates, instead of it lingering
@@ -121,17 +127,20 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       bool closedOut  = isDemand ? (bar.close > zHigh) : (bar.close < zLow);
       bool rightColor = isDemand ? IsBullBar(bar) : IsBearBar(bar);
       bool rejected   = closedOut && rightColor && (bodyAtr >= InpRejectionBodyAtr);
-      if(!rejected) continue;   // touched but no clean rejection yet — still watching
+      bool triggered  = InpAggressiveEntry ? firstTouch : rejected;
+      if(!triggered) continue;   // touched but no trigger yet — still watching
 
       g_savedLtfZones[i].used = true;
       g_ltfZoneDrawEnd[i]     = bar.time;
 
       int    dir    = isDemand ? 1 : -1;
       double buffer = InpZoneSlBufferAtr * atrLtf;
-      // Anchored to the rejection bar's own extreme, not the zone's static
-      // boundary — the wick that just got rejected is the actual proof the
-      // level held, and can sit shallower or deeper than the zone's edge
-      // (wickedIn only requires touching the range, not stopping at zLow/zHigh).
+      // Anchored to the entry bar's own extreme, not the zone's static
+      // boundary — the wick that just triggered is the actual proof of
+      // where the level held (or, under InpAggressiveEntry, simply the
+      // furthest adverse point reached so far), and can sit shallower or
+      // deeper than the zone's edge (wickedIn only requires touching the
+      // range, not stopping at zLow/zHigh).
       double slPrice = isDemand
                        ? NormalizeDouble(bar.low  - buffer, g_digits)
                        : NormalizeDouble(bar.high + buffer, g_digits);
@@ -139,13 +148,15 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       if(isReplay)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: REJECTION confirmed (init replay) on %s zone [%.5f, %.5f] bodyAtr=%.2f — resolved, no live order",
+            PrintFormat("AjipSnD: %s confirmed (init replay) on %s zone [%.5f, %.5f] bodyAtr=%.2f — resolved, no live order",
+                        InpAggressiveEntry ? "AGGRESSIVE ENTRY" : "REJECTION",
                         isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr);
          continue;
         }
 
       if(InpEnableLog)
-         PrintFormat("AjipSnD: REJECTION confirmed on %s zone [%.5f, %.5f] bodyAtr=%.2f — entering %s market",
+         PrintFormat("AjipSnD: %s confirmed on %s zone [%.5f, %.5f] bodyAtr=%.2f — entering %s market",
+                     InpAggressiveEntry ? "AGGRESSIVE ENTRY" : "REJECTION",
                      isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr, dir == 1 ? "BUY" : "SELL");
 
       if(!EntryGateBlocked(dir))

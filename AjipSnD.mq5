@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "3.7-favbeforetouch"
+#define EA_BUILD "3.8-aggressiveentry"
 
 #include <Trade\Trade.mqh>
 
@@ -41,12 +41,19 @@ input long   InpMagicNumber  = 99002;  // Magic number
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 
 input group "Stop Loss & Take Profit"
-input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the rejection bar's own extreme, in LTF ATR
+// Aggressive: enter the instant a wick first touches a saved zone — no
+// rejection pattern required at all. InpRejectionBodyAtr is ignored while
+// this is on, since there is no rejection bar left to measure the body of.
+// Trades every touch a normal run would still be waiting through, for
+// better or worse — unvalidated, not measured against the default.
+input bool   InpAggressiveEntry   = false; // Enter on first touch, skip waiting for rejection confirmation
+input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the entry bar's own extreme, in LTF ATR
 // How strong the rejection bar's body must be, relative to LTF ATR, in the
 // favourable direction, to count as a real rejection rather than a wick that
 // grazed the zone and drifted back. No prior measurement for this specific
-// threshold exists — starting value, not a validated one.
-input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the favourable direction
+// threshold exists — starting value, not a validated one. Ignored when
+// InpAggressiveEntry is on.
+input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the favourable direction (ignored if aggressive)
 // Risk per trade in account currency; lot is derived from it and the stop
 // distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
 // figure because the broker's minimum lot puts a floor under achievable risk:

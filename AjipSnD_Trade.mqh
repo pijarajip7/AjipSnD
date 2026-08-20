@@ -4,11 +4,11 @@
 //==================================================================
 // OPEN MARKET WITH STRUCTURAL STOPS — the EA's only entry path.
 // Fills immediately at the current market price rather than resting at a
-// limit: the rejection has already happened by the time this is called (the
-// bar that confirmed it just closed), so there is no edge left to wait at —
-// price is already moving off the zone.
+// limit: the trigger bar (rejection, or first touch under
+// InpAggressiveEntry) has already closed by the time this is called, so
+// there is no edge left to wait at — price is already moving off the zone.
 //
-// slPrice is the caller's stop, anchored to the rejection bar's own extreme;
+// slPrice is the caller's stop, anchored to the trigger bar's own extreme;
 // TP is derived here from the SAME price this order actually transacts at,
 // so the realised reward:risk is enforced against the real fill rather than
 // an independent figure.
@@ -48,7 +48,8 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
       return(0);
      }
 
-   string comment = StringFormat("AjipSnD %s REJECT", dir == 1 ? "BUY" : "SELL");
+   string comment = StringFormat("AjipSnD %s %s", dir == 1 ? "BUY" : "SELL",
+                                 InpAggressiveEntry ? "AGGR" : "REJECT");
    bool ok;
    if(dir == 1)
       ok = trade.Buy(lot, _Symbol, price, slPrice, tpPrice, comment);

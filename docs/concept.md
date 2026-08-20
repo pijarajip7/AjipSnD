@@ -145,21 +145,27 @@ rate-nya 56-58% di horizon 5m/15m, vs 75%+ untuk zona yang validasi bersih
 (belum pernah tersentuh) — lihat RESULT block di `MarkLtfValidationContext`
 (`AjipSnD_Zone.mqh`) untuk detail pengukurannya.
 
-### 2. Tunggu retest → REJECTED, baru entry
+### 2. Tunggu retest → REJECTED (atau, agresif, wick pertama), baru entry
 
 Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
 (`CheckRejectionRetests`):
 
 1. **Structural break** — body CLOSE tembus far edge (atau sweep level kalau
    ada) → zona invalid, `used=true`, tidak ada entry.
-2. **Rejection** — SEMUA tiga syarat: wick masuk ke range zona, body bar/ATR
-   >= `InpRejectionBodyAtr` searah favorable, DAN close berakhir di luar
-   zona lagi → `used=true`, **market order** (`OpenMarketWithStructuralStops`).
-3. Sentuhan yang bukan break maupun rejection bersih → zona tetap aktif,
-   cuma dicatat `touched=true`, terus ditunggu. **Bukan one-shot** — zona
-   bisa disentuh berkali-kali sebelum akhirnya break atau reject.
+2. **Trigger entry** — default-nya **Rejection**: SEMUA tiga syarat: wick
+   masuk ke range zona, body bar/ATR >= `InpRejectionBodyAtr` searah
+   favorable, DAN close berakhir di luar zona lagi → `used=true`,
+   **market order** (`OpenMarketWithStructuralStops`). Dengan
+   `InpAggressiveEntry=true`, trigger-nya jadi WICK PERTAMA yang masuk ke
+   zona, titik — tidak ada syarat body/close-back-out sama sekali. Belum
+   divalidasi/diukur, murni sesuai spek.
+3. Sentuhan yang bukan break maupun trigger valid → zona tetap aktif, cuma
+   dicatat `touched=true`, terus ditunggu. **Bukan one-shot** — zona bisa
+   disentuh berkali-kali sebelum akhirnya break atau trigger (kecuali mode
+   agresif: begitu wick pertama masuk, langsung trigger, jadi zona di mode
+   ini praktis selalu one-shot).
 
-Order pakai market (bukan limit) karena begitu bar rejection sudah closed,
+Order pakai market (bukan limit) karena begitu bar trigger sudah closed,
 harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
 ditunggu dengan limit order.
 
@@ -231,12 +237,15 @@ satu close-all di atas.
 
 ## Structural SL/TP, Risk-Based Lot
 
-- SL = titik ekstrem bar rejection itu sendiri (`bar.low` untuk demand,
+- SL = titik ekstrem bar trigger itu sendiri (`bar.low` untuk demand,
   `bar.high` untuk supply — bukan batas statis zona) ± `InpZoneSlBufferAtr`
-  x LTF ATR. Wick yang barusan di-reject itu bukti nyata di mana level
-  bertahan, dan bisa lebih dangkal atau lebih dalam dari `zLow`/`zHigh`
-  zona (`wickedIn` cuma butuh wick masuk ke range, tidak harus berhenti
-  tepat di edge)
+  x LTF ATR. Normalnya bar trigger adalah bar rejection, wick yang barusan
+  di-reject itu bukti nyata di mana level bertahan; dengan
+  `InpAggressiveEntry=true`, bar trigger-nya adalah bar wick pertama —
+  belum tentu terbukti bertahan, sekadar titik terjauh yang tercapai
+  sejauh ini. Bisa lebih dangkal atau lebih dalam dari `zLow`/`zHigh` zona
+  (`wickedIn` cuma butuh wick masuk ke range, tidak harus berhenti tepat
+  di edge)
 - TP = `InpTakeProfitRR` x jarak SL aktual dari harga fill (0 = tanpa TP)
 - Lot dihitung `LotForRisk()`: `InpRiskPerTrade` / (jarak SL x nilai per
   poin), dibulatkan KE BAWAH ke volume step broker

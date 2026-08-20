@@ -46,8 +46,9 @@ no longer describes what a risk-sized trade actually opens.
 
 **Stop Loss & Take Profit**
 ```
-InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the rejection bar's own extreme, in LTF ATR
-InpRejectionBodyAtr = 0.5   — Min rejection-bar body/ATR in the favourable direction
+InpAggressiveEntry  = false — Enter on first touch, skip waiting for rejection confirmation
+InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the entry-trigger bar's own extreme, in LTF ATR
+InpRejectionBodyAtr = 0.5   — Min rejection-bar body/ATR in the favourable direction (ignored if aggressive)
 InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
 InpTakeProfitRR     = 4.0   — TP = this many multiples of the actual SL distance (0=no TP)
 InpMaxPositionsPerDir = 1   — Max positions per direction (0=disabled)
@@ -260,13 +261,18 @@ confirmed over the EA's whole runtime.
 ## Structural SL/TP & Risk Sizing
 
 Every entry is a market order (`OpenMarketWithStructuralStops`) with SL and
-TP attached at the same moment — there is no separate mode or toggle;
-this is simply how the EA sizes and stops every trade.
+TP attached at the same moment, regardless of which trigger fired it
+(rejection, or first touch under `InpAggressiveEntry`) — this is simply how
+the EA sizes and stops every trade, with no separate sizing mode or toggle
+of its own.
 
-**SL** = the rejection bar's own extreme (`bar.low` for demand, `bar.high`
-for supply — not the zone's static boundary) ± `InpZoneSlBufferAtr` x LTF
-ATR. The wick that just got rejected is the actual proof the level held,
-and can sit shallower or deeper than the zone's own `zLow`/`zHigh`
+**SL** = the entry-trigger bar's own extreme (`bar.low` for demand,
+`bar.high` for supply — not the zone's static boundary) ± `InpZoneSlBufferAtr`
+x LTF ATR. Normally the trigger bar is the rejection bar, and the wick that
+just got rejected is the actual proof the level held; under
+`InpAggressiveEntry`, the trigger bar is the first-touch bar instead — not
+proven to hold, just the furthest adverse point reached so far. Either way
+it can sit shallower or deeper than the zone's own `zLow`/`zHigh`
 (`wickedIn` only requires the wick to enter the zone's range, not stop
 exactly at its edge). An earlier build had an HTF-zone-edge anchor as a
 toggle; this build has no HTF reference left to anchor to at all.
