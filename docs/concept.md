@@ -237,15 +237,21 @@ satu close-all di atas.
 
 ## Structural SL/TP, Risk-Based Lot
 
-- SL = titik ekstrem bar trigger itu sendiri (`bar.low` untuk demand,
-  `bar.high` untuk supply — bukan batas statis zona) ± `InpZoneSlBufferAtr`
-  x LTF ATR. Normalnya bar trigger adalah bar rejection, wick yang barusan
-  di-reject itu bukti nyata di mana level bertahan; dengan
-  `InpAggressiveEntry=true`, bar trigger-nya adalah bar wick pertama —
-  belum tentu terbukti bertahan, sekadar titik terjauh yang tercapai
-  sejauh ini. Bisa lebih dangkal atau lebih dalam dari `zLow`/`zHigh` zona
-  (`wickedIn` cuma butuh wick masuk ke range, tidak harus berhenti tepat
-  di edge)
+- SL beda anchor per mode entry:
+  - **Rejection** (default): titik ekstrem bar rejection itu sendiri
+    (`bar.low` untuk demand, `bar.high` untuk supply — bukan batas statis
+    zona) ± `InpZoneSlBufferAtr` x LTF ATR. Wick yang barusan di-reject itu
+    bukti nyata di mana level bertahan, bisa lebih dangkal atau lebih
+    dalam dari `zLow`/`zHigh` zona (`wickedIn` cuma butuh wick masuk ke
+    range, tidak harus berhenti tepat di edge).
+  - **Aggressive** (`InpAggressiveEntry=true`): bar yang trigger entry (wick
+    pertama) bisa closed DI MANA SAJA, termasuk di dalam zona — wick-nya
+    sendiri bukan referensi stop yang bisa diandalkan (bisa terlalu dekat
+    ke harga entry, bahkan lebih dekat dari lebar zona-nya sendiri). Jadi
+    SL di-anchor ke `breakLevel` — level sweep-aware yang sama yang
+    menentukan zona BROKEN — ± `InpZoneSlBufferAtr` x LTF ATR. Ini titik di
+    mana thesis zona itu sendiri sudah pasti gagal, bukan sekadar titik
+    yang kebetulan tercapai bar itu.
 - TP = `InpTakeProfitRR` x jarak SL aktual dari harga fill (0 = tanpa TP)
 - Lot dihitung `LotForRisk()`: `InpRiskPerTrade` / (jarak SL x nilai per
   poin), dibulatkan KE BAWAH ke volume step broker

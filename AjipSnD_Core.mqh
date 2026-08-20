@@ -135,15 +135,31 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
 
       int    dir    = isDemand ? 1 : -1;
       double buffer = InpZoneSlBufferAtr * atrLtf;
-      // Anchored to the entry bar's own extreme, not the zone's static
-      // boundary — the wick that just triggered is the actual proof of
-      // where the level held (or, under InpAggressiveEntry, simply the
-      // furthest adverse point reached so far), and can sit shallower or
-      // deeper than the zone's edge (wickedIn only requires touching the
-      // range, not stopping at zLow/zHigh).
-      double slPrice = isDemand
-                       ? NormalizeDouble(bar.low  - buffer, g_digits)
-                       : NormalizeDouble(bar.high + buffer, g_digits);
+      double slPrice;
+      if(InpAggressiveEntry)
+        {
+         // No rejection bar to anchor to — the touching bar can close
+         // anywhere, including deep inside the zone, so its own wick is not
+         // a reliable stop reference here. Anchored to the zone's own
+         // structural edge instead: breakLevel, the same sweep-aware level
+         // that decides BROKEN above — the point at which this zone's own
+         // thesis is invalidated, not just wherever this one bar happened
+         // to reach.
+         slPrice = isDemand
+                   ? NormalizeDouble(breakLevel - buffer, g_digits)
+                   : NormalizeDouble(breakLevel + buffer, g_digits);
+        }
+      else
+        {
+         // Anchored to the rejection bar's own extreme, not the zone's
+         // static boundary — the wick that just got rejected is the actual
+         // proof of where the level held, and can sit shallower or deeper
+         // than the zone's edge (wickedIn only requires touching the range,
+         // not stopping at zLow/zHigh).
+         slPrice = isDemand
+                   ? NormalizeDouble(bar.low  - buffer, g_digits)
+                   : NormalizeDouble(bar.high + buffer, g_digits);
+        }
 
       if(isReplay)
         {

@@ -266,16 +266,25 @@ TP attached at the same moment, regardless of which trigger fired it
 the EA sizes and stops every trade, with no separate sizing mode or toggle
 of its own.
 
-**SL** = the entry-trigger bar's own extreme (`bar.low` for demand,
-`bar.high` for supply — not the zone's static boundary) ± `InpZoneSlBufferAtr`
-x LTF ATR. Normally the trigger bar is the rejection bar, and the wick that
-just got rejected is the actual proof the level held; under
-`InpAggressiveEntry`, the trigger bar is the first-touch bar instead — not
-proven to hold, just the furthest adverse point reached so far. Either way
-it can sit shallower or deeper than the zone's own `zLow`/`zHigh`
-(`wickedIn` only requires the wick to enter the zone's range, not stop
-exactly at its edge). An earlier build had an HTF-zone-edge anchor as a
-toggle; this build has no HTF reference left to anchor to at all.
+**SL** anchor depends on which mode triggered the entry:
+
+- **Rejection** (default): the rejection bar's own extreme (`bar.low` for
+  demand, `bar.high` for supply — not the zone's static boundary) ±
+  `InpZoneSlBufferAtr` x LTF ATR. The wick that just got rejected is the
+  actual proof the level held, and can sit shallower or deeper than the
+  zone's own `zLow`/`zHigh` (`wickedIn` only requires the wick to enter the
+  zone's range, not stop exactly at its edge).
+- **Aggressive** (`InpAggressiveEntry=true`): the trigger bar (first touch)
+  can close anywhere, including deep inside the zone, so its own wick is
+  not a reliable stop reference — it could end up closer to the entry price
+  than the zone is wide. SL anchors to `breakLevel` instead — the same
+  sweep-aware level `CheckRejectionRetests` already uses to decide BROKEN —
+  ± `InpZoneSlBufferAtr` x LTF ATR. That is the point at which the zone's
+  own thesis is actually invalidated, not just wherever one bar happened to
+  reach.
+
+An earlier build had an HTF-zone-edge anchor as a toggle; this build has no
+HTF reference left to anchor to at all.
 
 **TP** = `InpTakeProfitRR` x the ACTUAL SL distance from the real fill
 price, not an independent target — so the realised reward:risk is enforced
