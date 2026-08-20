@@ -1,11 +1,11 @@
 # AjipSnD — Supply & Demand Zone Trading EA
 
-> Multi-timeframe Supply & Demand strategy for MT5. HTF zone validation sets
-> a directional bias only — not a price range to sit inside. Matching LTF
-> zones are saved and watched; entry fires once that LTF zone's own retest
-> is REJECTED (wick back in, closed back out, real-bodied bar), as a market
-> order with structural SL/TP (rejection-bar-anchored stop, RR-derived target).
-> Risk-based lot sizing. Exit via broker SL/TP or daily/final close-all.
+> Single-timeframe Supply & Demand strategy for MT5. Every zone that confirms
+> and validates is saved and watched, both directions, no bias gate; entry
+> fires once that zone's own retest is REJECTED (wick back in, closed back
+> out, real-bodied bar), as a market order with structural SL/TP
+> (rejection-bar-anchored stop, RR-derived target). Risk-based lot sizing.
+> Exit via broker SL/TP or daily/final close-all.
 
 ---
 
@@ -23,13 +23,12 @@
 | Fitur | Deskripsi |
 |-------|-----------|
 | SnD Detection | Raw candle bear/bull + body-break confirm, lowest-low / highest-high candidate |
-| HTF = bias, not a zone | HTF validation sets a directional bias (demand/supply); never geometrically checked as a containment box |
-| Rejection watch | Matching LTF zones since the HTF bias's own origin bar are saved and watched, not traded immediately |
+| Rejection watch | Every zone that confirms and validates is saved and watched immediately, both directions — no bias gate, no wait for a second timeframe |
 | Rejection entry | Wick back into a saved zone, closed back out, body/ATR above threshold → market order |
-| Zone invalidation | Saved zones (and HTF structure) drop on a body CLOSE past the far edge (sweep-aware) — the same rule on both timeframes |
+| Zone invalidation | Saved zones drop on a body CLOSE past the far edge (sweep-aware) |
 | Structural SL/TP | SL anchored to the rejection bar's own extreme + ATR buffer; TP a multiple of the actual SL distance |
 | Risk-based sizing | Lot derived from `InpRiskPerTrade` and the real stop distance, capped by `InpMaxRiskOvershoot` |
-| Init replay | OnInit replays HTF+LTF bars together, chronologically, so the EA starts with a real bias and watch list instead of an empty one |
+| Init replay | OnInit replays LTF bars chronologically, so the EA starts with its real zone structure and watch list instead of an empty one |
 | Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
 | Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
 
@@ -41,7 +40,7 @@
 
 | Section | Lines |
 |---------|-------|
-| Structure | Title, LTF/HTF trend + timeframe, Demands/Supplies/Entries count |
+| Structure | Title, trend + timeframe, Demands/Supplies/Entries count |
 | PnL | Today/Week/Month PnL (realized + floating), colored green/red |
 | Limits | Final/Daily limit status (TARGET/MAX LOSS/active/disabled) |
 | Session/News | Session status, news blackout status |
@@ -54,13 +53,13 @@
 | File | Deskripsi |
 |------|-----------|
 | `AjipSnD.mq5` | EA MQL5 main file — inputs, OnInit, OnTick, OnDeinit |
-| `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, EntryFillInfo, LtfValidatedZone, SavedLtfZone), globals, helpers |
-| `AjipSnD_Zone.mqh` | SnD detection, zone lifecycle + invalidation, LTF validation history, drawing, zone-quality CSV |
+| `AjipSnD_Globals.mqh` | Structs (SnDZone, EntryTracker, EntryFillInfo, SavedLtfZone), globals, helpers |
+| `AjipSnD_Zone.mqh` | SnD detection, zone lifecycle + invalidation, drawing, zone-quality CSV |
 | `AjipSnD_Entry.mqh` | Entry gate (`EntryGateBlocked`), restart recovery (`RebuildTrackedPositions`) |
 | `AjipSnD_Trade.mqh` | Market-order entry (`OpenMarketWithStructuralStops`), risk sizing, close-all, per-trade CSV, heartbeat/handoff |
 | `AjipSnD_News.mqh` | News blackout filter |
 | `AjipSnD_Excursion.mqh` | First-touch grid diagnostic (currently dormant — see docs/architecture.md) |
 | `AjipSnD_Drift.mqh` | Forward-drift probe diagnostic — does zone confirmation predict anything? |
-| `AjipSnD_Core.mqh` | `ReplayInitialStructure`, `UpdateLTF`/`UpdateHTF`, `SaveLtfZonesForHtfBias`, `CheckRejectionRetests`, `DrawPanel` |
+| `AjipSnD_Core.mqh` | `ReplayInitialStructure`, `UpdateLTF`, `SaveLtfZoneForWatch`, `CheckRejectionRetests`, `DrawPanel` |
 | `docs/concept.md` | Konsep & strategi |
 | `docs/architecture.md` | EA architecture & parameters |

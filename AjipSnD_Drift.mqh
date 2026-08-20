@@ -119,8 +119,9 @@ datetime DriftBarCloseTime(const datetime barOpen, ENUM_TIMEFRAMES tf)
   }
 
 // Trend probe state — its own MA handle and its own new-bar clock, because the
-// probe's timeframe is deliberately independent of InpHtfTimeframe. The whole
-// point is to test a horizon the EA does not currently trade.
+// probe's timeframe is deliberately independent of the EA's own entry
+// timeframe. The whole point is to test a horizon the EA does not currently
+// trade.
 int      g_driftTrendMa      = INVALID_HANDLE;
 datetime g_driftTrendLastBar = 0;
 
@@ -161,7 +162,7 @@ void DriftArmBaseline(const MqlRates &bar)
    if(!InpDriftLog || InpDriftBaselineProb <= 0.0) return;
    if(MathRand() / 32767.0 >= InpDriftBaselineProb) return;
 
-   double atr = GetAtrValue(false);
+   double atr = GetAtrValue();
    if(atr <= 0) return;
 
    int sz = ArraySize(g_drift);
@@ -217,7 +218,7 @@ void DriftArmTrend()
    if(CopyBuffer(g_driftTrendMa, 0, 1, 1, ma) != 1) return;
    if(ma[0] <= 0) return;
 
-   double atr = GetAtrValue(false);
+   double atr = GetAtrValue();
    if(atr <= 0) return;
 
    // Exactly on the MA carries no direction — skip rather than coin-flip it.

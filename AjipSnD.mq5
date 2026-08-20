@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                      AjipSnD.mq5 |
-//|  Supply & Demand EA — zone-based trading on MT5.                 |
-//|  HTF zone validation sets a directional bias, not a price range.  |
-//|  Matching LTF zones are saved and watched; entry fires only once  |
-//|  that LTF zone's own retest is REJECTED (wick back in, closed     |
-//|  back out, real-bodied bar) — a market order with structural      |
-//|  SL/TP. Exit via broker SL/TP or daily/final/session close-all.   |
+//|  Supply & Demand EA — single-timeframe zone-based trading on MT5. |
+//|  Every LTF zone that confirms and validates is saved and watched, |
+//|  both directions, no bias gate. Entry fires only once that zone's |
+//|  own retest is REJECTED (wick back in, closed back out,           |
+//|  real-bodied bar) — a market order with structural SL/TP. Exit    |
+//|  via broker SL/TP or daily/final/session close-all.               |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "2.5-handoffpertrade"
+#define EA_BUILD "3.0-ltfonly"
 
 #include <Trade\Trade.mqh>
 
@@ -24,21 +24,11 @@
 // INPUTS
 //==================================================================
 input group "Strategy"
-input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M5;   // LTF — entry timeframe
-input ENUM_TIMEFRAMES InpHtfTimeframe    = PERIOD_H1;  // HTF — retest zones timeframe
+input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M5;   // Entry timeframe — the only one this EA detects zones on
 input int              InpCandlesInit    = 50;          // Lookback candles for initial trend
 input int              InpMaxZones       = 10;           // Max active zones per type (demand/supply)
-input bool             InpRequireZoneValidation = true; // Require HTF zone follow-through before active (LTF always on)
-input double           InpMaxZoneWidthAtr = 0;      // Max HTF zone width / ATR to allow entry (0=disabled)
+input double           InpMaxZoneWidthAtr = 0;      // Max zone width / ATR to allow entry (0=disabled)
 input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
-// Backtested across five 2-year windows spanning 2017-2026 (XAUUSD+ M5):
-// with the filter on, period=20 beat filter-off on profit factor in all
-// five windows and matched or beat period=50/100/200 in four of five —
-// the one exception (2025-2026) trails period=50 by a hair. Also cuts max
-// drawdown well below filter-off in every window tested.
-input bool             InpHtfMaFilter    = true;        // Enable HTF MA direction filter (BUY only above MA, SELL only below)
-input int              InpHtfMaPeriod    = 20;           // HTF MA period (only if InpHtfMaFilter=true)
-input ENUM_MA_METHOD   InpHtfMaMethod    = MODE_SMA;    // HTF MA method
 
 input group "Entry & Trade Sizing"
 input bool   InpAllowHedging = false;   // Allow BUY & SELL open simultaneously (false=block opposite)
@@ -65,11 +55,11 @@ input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the
 // anyway. At $15 only 19% are floored and the realised average matches the
 // target.
 input double InpRiskPerTrade      = 50.0;  // Risk per trade ($; 0=disable sizing, no trades)
-// TP as a multiple of the ACTUAL stop distance just computed (HTF far edge +
-// buffer), not an independent ATR figure — the two used to be sized from
-// unrelated bases, so the realised reward:risk floated wherever they happened
-// to land instead of being enforced. Default 2.0 is this project's own stated
-// floor (0=no TP).
+// TP as a multiple of the ACTUAL stop distance just computed (rejection
+// bar's own extreme + buffer), not an independent ATR figure — the two used
+// to be sized from unrelated bases, so the realised reward:risk floated
+// wherever they happened to land instead of being enforced. Default 2.0 is
+// this project's own stated floor (0=no TP).
 input double InpTakeProfitRR      = 4.0;   // TP = this many multiples of the actual SL distance (0=no TP)
 // Counts open positions in the direction.
 input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=disabled)
@@ -167,8 +157,9 @@ input double InpDriftBaselineProb = 0.03;  // Per-bar draw probability for the r
 // the market's own trend, which is the opposite stance to the zone logic. This
 // arms a record on every closed bar of its own timeframe, pointing the way
 // price sits relative to a moving average. Requires InpDriftLog=true; places no
-// orders. The timeframe is separate from InpHtfTimeframe on purpose — the point
-// is to measure a horizon the EA does not currently trade.
+// orders. The timeframe is deliberately its own input, independent of
+// InpTimeframe — the point is to measure a horizon the EA does not
+// currently trade.
 input bool            InpDriftTrendProbe    = false;      // Also observe an MA-trend probe (measurement only)
 input ENUM_TIMEFRAMES InpDriftTrendTf       = PERIOD_H1;  // Timeframe for the trend probe
 input int             InpDriftTrendMaPeriod = 50;         // MA period on that timeframe
@@ -241,9 +232,8 @@ int OnInit()
    // Capture starting balance
    CaptureStartingBalance();
 
-   // ATR handles for zone quality metrics
+   // ATR handle for zone quality metrics
    g_atrLtfHandle = iATR(_Symbol, InpTimeframe, 14);
-   g_atrHtfHandle = iATR(_Symbol, InpHtfTimeframe, 14);
 
    // Trend probe MA — its own handle on its own timeframe
    if(InpDriftLog && InpDriftTrendProbe)
@@ -258,15 +248,15 @@ int OnInit()
    // Recover tracking for positions from earlier EA run
    RebuildTrackedPositions();
 
-   // Init LTF & HTF, and replay them together chronologically so the EA
-   // starts with a real bias / saved LTF zones instead of waiting for the
-   // first live HTF validation.
+   // Replay LTF history chronologically so the EA starts with its real zone
+   // structure / saved watch list instead of waiting for the first live
+   // validation.
    ReplayInitialStructure();
 
    Print("══════════════════════════════════════");
    Print("AjipSnD initialized successfully");
-   PrintFormat("  LTF=%s, HTF=%s, MaxZones=%d, RiskPerTrade=%.2f",
-               EnumToString(InpTimeframe), EnumToString(InpHtfTimeframe),
+   PrintFormat("  LTF=%s, MaxZones=%d, RiskPerTrade=%.2f",
+               EnumToString(InpTimeframe),
                InpMaxZones, InpRiskPerTrade);
    PrintFormat("  Session: %s-%s (%s), Timezone UTC%+.0f",
                InpSessionStart, InpSessionEnd,
@@ -323,19 +313,6 @@ void OnTick()
    CheckDailyMaxLossCloseAll();
 
    //══════════════════════════════════════════════════════════════
-   // HTF update (separate bar detection)
-   //══════════════════════════════════════════════════════════════
-   {
-      MqlRates htfRates[];
-      int htfCopied = CopyRates(_Symbol, InpHtfTimeframe, 0, 3, htfRates);
-      if(htfCopied >= 2)
-        {
-         ArraySetAsSeries(htfRates, true);
-         UpdateHTF(htfRates[1]);
-        }
-   }
-
-   //══════════════════════════════════════════════════════════════
    // LTF update (new closed bar)
    //══════════════════════════════════════════════════════════════
    MqlRates ltfRates[];
@@ -375,9 +352,8 @@ void OnDeinit(const int reason)
    // still useful rows, not lost data.
    FlushDriftRecords();
 
-   // Release ATR handles
+   // Release ATR handle
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
-   if(g_atrHtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrHtfHandle);
    if(g_driftTrendMa != INVALID_HANDLE) IndicatorRelease(g_driftTrendMa);
 
    ObjectsDeleteAll(0, g_objPrefix);

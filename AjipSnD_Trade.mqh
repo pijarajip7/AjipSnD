@@ -76,7 +76,7 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    po.tpPrice  = tpPrice;
    po.lot      = lot;
    po.riskUsd  = actualRisk;
-   po.atrLtf   = GetAtrValue(false);
+   po.atrLtf   = GetAtrValue();
    AddEntry(ticket, dir, fillPrice, po);
 
    return(ticket);
@@ -100,7 +100,6 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].entryTime    = TimeCurrent();
    g_entries[sz].mfe          = 0.0;
    g_entries[sz].mae          = 0.0;
-   g_entries[sz].atrAtEntry   = GetAtrValue(true);
 
    g_entries[sz].initialVolume   = PositionSelectByTicket(ticket)
                                    ? PositionGetDouble(POSITION_VOLUME)
@@ -426,7 +425,7 @@ void UpdateTrailingStop(int idx)
    if(!PositionSelectByTicket(ticket)) return;
 
    int    dir      = g_entries[idx].dir;
-   double atrLtf    = GetAtrValue(false);
+   double atrLtf    = GetAtrValue();
    double trailDist = InpTrailingStopAtr * atrLtf;
    if(trailDist <= 0.0) return;
 
@@ -619,7 +618,7 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
                 "sl_price", "tp_price", "sl_dist_pts", "sl_dist_atr",
                 "lot", "risk_usd", "exit_reason", "pnl_usd", "pnl_r",
                 "mfe_usd", "mae_usd", "mfe_r", "mae_r",
-                "atr_ltf", "atr_htf", "structural", "ltf_zone_time");
+                "atr_ltf", "structural", "ltf_zone_time");
    else
       FileSeek(h, 0, SEEK_END);
 
@@ -644,7 +643,6 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
              DoubleToString(risk > 0 ? g_entries[idx].mfe / risk : 0.0, 3),
              DoubleToString(risk > 0 ? g_entries[idx].mae / risk : 0.0, 3),
              DoubleToString(g_entries[idx].atrLtfAtEntry, g_digits),
-             DoubleToString(g_entries[idx].atrAtEntry, g_digits),
              g_entries[idx].hasStructuralSl ? "1" : "0",
              TimeToString(g_entries[idx].zoneTime, TIME_DATE | TIME_SECONDS));
 

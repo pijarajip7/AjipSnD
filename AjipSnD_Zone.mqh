@@ -37,14 +37,7 @@ void ComputeZoneMetrics(SnDZone &zone, bool htf, const MqlRates &confirmBar)
   {
    zone.isHtf        = htf;
    zone.confirmClose = confirmBar.close;
-   zone.atrAtConfirm = GetAtrValue(htf);
-
-   // HTF trend at this moment. On an LTF zone this is the cross-timeframe
-   // alignment attribute; trendAtConfirm cannot carry it, because a demand
-   // zone only ever confirms out of a DOWN trend on its own timeframe and a
-   // supply zone only out of an UP trend, making that field a restatement of
-   // isDemand rather than information.
-   zone.htfTrendAtConfirm = (int)g_htfTrend;
+   zone.atrAtConfirm = GetAtrValue();
 
    double width = zone.high - zone.low;
    double body  = MathAbs(confirmBar.close - confirmBar.open);
@@ -280,41 +273,6 @@ void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
      }
   }
 
-//---- Index of the TRADEABLE zone containing price, or -1 ----
-// Zones failing the quality gate stay in the array — they keep taking part in
-// replacement, expiry and invalidation exactly as before, so zone lifecycle and
-// the CSV log are unchanged — but they are not offered here.
-// Used by MarkLtfValidationContext() for the htfContextValidated diagnostic.
-//
-// When several zones contain the price, the one whose FAR edge sits furthest
-// away wins. That only matters to callers wanting the zone itself: a
-// structural stop is placed beyond the far edge, so picking the furthest is
-// the conservative choice — it never yields a stop tighter than some other
-// equally valid zone would have justified.
-int FindContainingZoneIdx(double price, const SnDZone &zones[], bool isDemand)
-  {
-   int    best     = -1;
-   double bestEdge = 0.0;
-
-   for(int i = 0; i < ArraySize(zones); i++)
-     {
-      if(!zones[i].qualityPass) continue;
-      if(price < zones[i].low || price > zones[i].high) continue;
-
-      // Demand: stop goes below, so the lowest low is furthest.
-      // Supply: stop goes above, so the highest high is furthest.
-      double farEdge = isDemand ? zones[i].low : zones[i].high;
-      if(best < 0
-         || (isDemand  && farEdge < bestEdge)
-         || (!isDemand && farEdge > bestEdge))
-        {
-         best     = i;
-         bestEdge = farEdge;
-        }
-     }
-   return(best);
-  }
-
 //---- Count zones that passed the quality gate (panel display) ----
 int CountTradeableZones(const SnDZone &zones[])
   {
@@ -373,63 +331,8 @@ void ReplayZoneBars(const MqlRates &rates[], int startIdx, int count,
      }
   }
 
-//---- Invalidate HTF zones on new closed bar ----
-// Returns true if any zone was removed (caller should redraw).
-bool InvalidateHtfZones(const MqlRates &bar)
-  {
-   bool anyChange = false;
-
-   // Check demand zones — invalid if support broken (close < sweepLow if swept, else close < low)
-   for(int i = ArraySize(g_htfDemandZones) - 1; i >= 0; i--)
-     {
-      double breakLevel = (g_htfDemandZones[i].sweepLow > 0)
-                          ? g_htfDemandZones[i].sweepLow
-                          : g_htfDemandZones[i].low;
-      if(bar.close < breakLevel)
-        {
-         if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF DEMAND zone INVALID [%.5f, %.5f] sweepLow=%.5f bar.close=%.5f",
-                        g_htfDemandZones[i].low, g_htfDemandZones[i].high,
-                        g_htfDemandZones[i].sweepLow, bar.close);
-         LogZoneOutcome("INVALIDATED", true, g_htfDemandZones[i].isDemand, g_htfDemandZones[i].time);
-         ArrayRemove(g_htfDemandZones, i, 1);
-         anyChange = true;
-        }
-      // Live touch tracking — wick re-entry after the zone's own confirm bar.
-      // .touched on g_zoneTracker[] is a separate copy updated elsewhere; this
-      // is the only writer for the live HTF arrays, and it feeds the
-      // touched+superseded invalidation in AddDemandZone/AddSupplyZone below.
-      else if(!g_htfDemandZones[i].touched && bar.time > g_htfDemandZones[i].time
-              && bar.low <= g_htfDemandZones[i].high)
-         g_htfDemandZones[i].touched = true;
-     }
-
-   // Check supply zones — invalid if resistance broken (close > sweepHigh if swept, else close > high)
-   for(int i = ArraySize(g_htfSupplyZones) - 1; i >= 0; i--)
-     {
-      double breakLevel = (g_htfSupplyZones[i].sweepHigh > 0)
-                          ? g_htfSupplyZones[i].sweepHigh
-                          : g_htfSupplyZones[i].high;
-      if(bar.close > breakLevel)
-        {
-         if(InpEnableLog)
-            PrintFormat("AjipSnD: HTF SUPPLY zone INVALID [%.5f, %.5f] sweepHigh=%.5f bar.close=%.5f",
-                        g_htfSupplyZones[i].low, g_htfSupplyZones[i].high,
-                        g_htfSupplyZones[i].sweepHigh, bar.close);
-         LogZoneOutcome("INVALIDATED", true, g_htfSupplyZones[i].isDemand, g_htfSupplyZones[i].time);
-         ArrayRemove(g_htfSupplyZones, i, 1);
-         anyChange = true;
-        }
-      else if(!g_htfSupplyZones[i].touched && bar.time > g_htfSupplyZones[i].time
-              && bar.high >= g_htfSupplyZones[i].low)
-         g_htfSupplyZones[i].touched = true;
-     }
-
-   return(anyChange);
-  }
-
-//---- Draw a single HTF zone rectangle ----
-void DrawHtfZoneRect(string name, datetime time, double price1, double price2, color clr)
+//---- Draw a single zone rectangle ----
+void DrawZoneRect(string name, datetime time, double price1, double price2, color clr)
   {
    if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, TimeCurrent(), price2))
       return;
@@ -441,10 +344,8 @@ void DrawHtfZoneRect(string name, datetime time, double price1, double price2, c
   }
 
 //---- Draw saved (awaiting-rejection) LTF zones — the only chart objects ----
-// HTF is a directional bias, not a price range to draw — the LTF zone is the
-// thing actually worth watching move to move. Zones already used (rejection
-// resolved, order attempted) are dropped rather than kept drawn — a used
-// zone has nothing left pending.
+// Zones already used (rejection resolved, order attempted) are dropped
+// rather than kept drawn — a used zone has nothing left pending.
 void DrawSavedLtfZones()
   {
    if(!InpDrawLines) return;
@@ -462,8 +363,8 @@ void DrawSavedLtfZones()
      {
       if(g_savedLtfZones[i].used) continue;
       color clr = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
-      DrawHtfZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time,
-                      g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
+      DrawZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time,
+                   g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
      }
   }
 
@@ -511,7 +412,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
          "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
-         "htf_trend", "touched_at_validation", "htf_context_validated");
+         "touched_at_validation");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -543,9 +444,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.maxAdvPts, 1),
       DoubleToString(zone.favAfterTouchPts, 1),
       zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
-      zone.htfTrendAtConfirm == (int)TREND_UP ? "UP" : "DOWN",
-      zone.touchedAtValidation ? "1" : "0",
-      zone.htfContextValidated ? "1" : "0");
+      zone.touchedAtValidation ? "1" : "0");
 
    FileClose(handle);
   }
@@ -554,7 +453,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
 // Metrics must already be filled by ComputeZoneMetrics().
 void TrackZone(SnDZone &zone, bool htf)
   {
-   zone.trendAtConfirm = htf ? g_htfTrend : g_ltfTrend;
+   zone.trendAtConfirm = g_ltfTrend;
    zone.validated      = false;
    zone.entryPlaced    = false;
    zone.trackingActive = true;
@@ -566,7 +465,6 @@ void TrackZone(SnDZone &zone, bool htf)
    zone.maxAdvPts         = 0.0;
    zone.favAfterTouchPts  = 0.0;
    zone.touchedAtValidation = false;
-   zone.htfContextValidated = false;
 
    int sz = ArraySize(g_zoneTracker);
    ArrayResize(g_zoneTracker, sz + 1);
@@ -671,90 +569,48 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
    if(i >= 0) g_zoneTracker[i].validated = true;
   }
 
-//---- LTF-only: snapshot touch/HTF-context state at the exact validation instant
+//---- LTF-only: snapshot touch state at the exact validation instant, and
+// retire any stale same-direction watch-list entry.
 // Must be called right after MarkZoneValidated(false, ...) at the same call
 // site, while 'confirmed' is still the pending zone that just passed.
-// htfContextValidated is diagnostic-only now (see the RESULT block below) —
-// FindContainingZoneIdx against the ACTIVE, already-validated HTF arrays (an
-// HTF zone only enters g_htfDemandZones/g_htfSupplyZones once it has itself
-// validated), recorded standalone in the zone CSV rather than feeding any
-// live decision.
 //------------------------------------------------------------------
-// RESULT — period A, XAUUSD M1/M15, 21,372 validated LTF zones
-//------------------------------------------------------------------
-// Tested: does a zone that validates before ever being touched, inside an
-// already-validated HTF zone, predict direction? Four cells (touched-at-
-// validation x htf-context), direction-adjusted hit rate:
-//
-//                              5m     15m      1h      4h      1d
-//   no-touch + HTF (proposal) 75.77  62.96  56.63  53.74  48.00
-//   no-touch + no-HTF         75.92  62.55  54.88  52.15  52.02
-//   touched  + HTF            57.60  60.57  55.65  54.36  50.25
-//   touched  + no-HTF         56.48  61.37  54.97  52.06  51.00
-//
-// HTF context adds nothing: the two no-touch rows track each other within a
-// point at every horizon, and so do the two touched rows. The touch-timing
-// split shows a real gap at 5m/15m (75%+ vs ~57%) that decays through 1h/4h
-// and, at 1d, REVERSES — the proposal cell finishes lowest of the four
-// (48.00%, the only one below 50). That shape is the signature of the same
-// circularity already found in the plain 'validated' flag: a zone that
-// reaches confirmLevel without dipping back did so via a sharp, immediate
-// move, so a snapshot minutes later is still measuring THAT move, not
-// predicting a new one. Demand/supply near-balanced in all four cells
-// (46-54%), so this is not the H1 trend probe's imbalance artifact repeating.
-//
-// CONSEQUENCE: no real information here either. touchedAtValidation and
-// htfContextValidated stay in the tracker as reusable, real-time-honest
-// primitives — the mistake worth avoiding next time is deriving either from
-// touched's whole-lifetime state instead of snapshotting at the decision
-// moment, not the existence of the fields.
+// touchedAtValidation formerly had a paired htfContextValidated diagnostic —
+// dropped along with the rest of the HTF mechanism, but the finding that
+// justified dropping it is worth keeping: period A, XAUUSD M1/M15, 21,372
+// validated LTF zones. Tested whether a zone that validates before ever
+// being touched, inside an already-validated HTF zone, predicts direction.
+// Four cells (touched-at-validation x htf-context), direction-adjusted hit
+// rate at 5m/15m/1h/4h/1d — HTF context added nothing: the no-touch rows
+// tracked each other within a point at every horizon, and so did the
+// touched rows. The touch-timing split alone showed a real gap at 5m/15m
+// (75%+ vs ~57%) that decayed through 1h/4h and reversed at 1d — the
+// signature of the same circularity already found in the plain 'validated'
+// flag (a sharp confirming move measured again minutes later, not a fresh
+// prediction). touchedAtValidation stays as a reusable, real-time-honest
+// primitive; htfContextValidated added nothing and had nothing left to
+// compute against once g_htfDemandZones/g_htfSupplyZones were removed.
 //------------------------------------------------------------------
 // touchedAtValidation is passed in rather than read from g_zoneTracker: that
 // tracker only exists when InpZoneQualityLog is on (TrackZone is what
 // creates the slot FindTrackedZone below looks up), so deriving it from
-// there made the ENTIRE rejection-entry mechanism below — superseded-marking
-// and the g_ltfValidatedHistory append, not just the CSV diagnostic fields —
-// silently stop working the moment quality logging was switched off. The
-// caller (UpdateLTF) now tracks g_ltfPendingTouched independently for
-// exactly this reason, and the same value feeds the OnInit historical
+// there made the superseded-marking below — not just the CSV diagnostic
+// field — silently stop working the moment quality logging was switched
+// off. The caller (UpdateLTF) now tracks g_ltfPendingTouched independently
+// for exactly this reason, and the same value feeds the OnInit historical
 // replay, which never runs TrackZone at all.
 void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation)
   {
-   // CSV-diagnostic fields — safe no-op when this zone isn't being tracked
-   // (InpZoneQualityLog=false, or the OnInit replay). Everything below this
-   // block is core state and must run regardless.
+   // CSV-diagnostic field — safe no-op when this zone isn't being tracked
+   // (InpZoneQualityLog=false, or the OnInit replay). The loop below is core
+   // state and must run regardless.
    int i = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
    if(i >= 0)
-     {
       g_zoneTracker[i].touchedAtValidation = touchedAtValidation;
 
-      double limitPrice = confirmed.isDemand ? confirmed.high : confirmed.low;
-      int htfIdx = confirmed.isDemand
-                   ? FindContainingZoneIdx(limitPrice, g_htfDemandZones, true)
-                   : FindContainingZoneIdx(limitPrice, g_htfSupplyZones, false);
-      g_zoneTracker[i].htfContextValidated = (htfIdx >= 0);
-     }
-
-   // A same-direction zone already touched by now is stale the moment this
-   // new one validates — same TOUCHED_SUPERSEDED rule AddDemandZone/
-   // AddSupplyZone already apply to HTF zones, needed here too. This is the
-   // earliest possible trigger point (any LTF zone validating, not just the
-   // next HTF validation), so it is where both places this rule matters get
-   // cleaned up in one pass:
-   //   - g_ltfValidatedHistory: flagged (not removed — it is a permanent
-   //     record by design), so SaveLtfZonesForHtfBias's backward replay
-   //     never offers up a zone the market has already moved past just
-   //     because it is still sitting in the history.
-   //   - g_savedLtfZones: marked used, so a zone already on the chart/watch
-   //     list is retired here rather than waiting for the next HTF
-   //     validation to notice.
-   for(int j = 0; j < ArraySize(g_ltfValidatedHistory); j++)
-     {
-      if(g_ltfValidatedHistory[j].isDemand != confirmed.isDemand) continue;
-      if(g_ltfValidatedHistory[j].superseded) continue;
-      if(g_ltfValidatedHistory[j].touchedEver)
-         g_ltfValidatedHistory[j].superseded = true;
-     }
+   // A same-direction watch-list entry already touched by now is stale the
+   // moment this fresher zone validates — the earliest possible trigger
+   // point (any LTF zone validating), so it is retired here rather than
+   // lingering until its own break/rejection eventually resolves it.
    for(int j = 0; j < ArraySize(g_savedLtfZones); j++)
      {
       if(g_savedLtfZones[j].used) continue;
@@ -767,50 +623,6 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
                         g_savedLtfZones[j].isDemand ? "DEMAND" : "SUPPLY",
                         g_savedLtfZones[j].low, g_savedLtfZones[j].high);
         }
-     }
-
-   // Every validated LTF zone joins the searchable history unconditionally —
-   // the HTF bias needs zones that validated before it existed to look back
-   // on (SaveLtfZonesForHtfBias's backward replay).
-   int hsz = ArraySize(g_ltfValidatedHistory);
-   ArrayResize(g_ltfValidatedHistory, hsz + 1);
-   g_ltfValidatedHistory[hsz].high      = confirmed.high;
-   g_ltfValidatedHistory[hsz].low       = confirmed.low;
-   g_ltfValidatedHistory[hsz].sweepHigh = confirmed.sweepHigh;
-   g_ltfValidatedHistory[hsz].sweepLow  = confirmed.sweepLow;
-   g_ltfValidatedHistory[hsz].time      = confirmed.time;
-   g_ltfValidatedHistory[hsz].isDemand  = confirmed.isDemand;
-   g_ltfValidatedHistory[hsz].touchedAtValidation = touchedAtValidation;
-   // touchedEver starts from the SAME instant, not from false: the zone's
-   // confirm-to-validate window already happened, so anything already true in
-   // touchedAtValidation is already true here too — starting this at false
-   // would let a zone that WAS touched before validation quietly count as
-   // untouched the instant it joins the history.
-   g_ltfValidatedHistory[hsz].touchedEver = touchedAtValidation;
-   g_ltfValidatedHistory[hsz].superseded  = false;
-  }
-
-//---- Keep touchedEver current for every zone in the persistent history ----
-// Called once per closed LTF bar. g_zoneTracker's own 'touched' stops updating
-// the moment a zone is REPLACED/EXPIRED and evicted, but g_ltfValidatedHistory
-// entries outlive that by design — a zone the HTF trigger searches for next
-// month must still have an accurate answer to "touched since?", long after its
-// tracker slot is gone. Skips entries already true (nothing left to detect)
-// entirely, and match's own confirm bar (the definition 'touched' already
-// uses everywhere else in this file: re-entry AFTER confirmation, not on it).
-void UpdateLtfValidatedHistoryTouch(const MqlRates &bar)
-  {
-   int n = ArraySize(g_ltfValidatedHistory);
-   for(int i = 0; i < n; i++)
-     {
-      if(g_ltfValidatedHistory[i].touchedEver) continue;
-      if(bar.time <= g_ltfValidatedHistory[i].time) continue;
-
-      bool touched = g_ltfValidatedHistory[i].isDemand
-                     ? (bar.low <= g_ltfValidatedHistory[i].high)
-                     : (bar.high >= g_ltfValidatedHistory[i].low);
-      if(touched)
-         g_ltfValidatedHistory[i].touchedEver = true;
      }
   }
 

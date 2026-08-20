@@ -39,8 +39,7 @@ void RebuildTrackedPositions()
 
       // ATR at the original entry is not recoverable on restart — use the
       // current reading.
-      g_entries[idx].atrAtEntry     = GetAtrValue(true);
-      g_entries[idx].atrLtfAtEntry  = GetAtrValue(false);
+      g_entries[idx].atrLtfAtEntry  = GetAtrValue();
 
       // An SL already on the position came from the zone that justified it —
       // treated as structural since a recovered position's original placement
@@ -65,9 +64,9 @@ void RebuildTrackedPositions()
          g_entries[idx].riskUsd = 0.0;
 
       // Whether this position already partial-closed in an earlier run is not
-      // recoverable either — same limitation as atrAtEntry/zoneTime above.
-      // Worst case a restarted position gets one more partial-close shot than
-      // it should; trailing simply won't arm until that fires.
+      // recoverable either — same limitation as zoneTime above. Worst case a
+      // restarted position gets one more partial-close shot than it should;
+      // trailing simply won't arm until that fires.
       g_entries[idx].partialClosed       = false;
       g_entries[idx].partialCloseSkipped = false;
 
@@ -80,7 +79,7 @@ void RebuildTrackedPositions()
   }
 
 //==================================================================
-// ENTRY LOGIC — LTF zone confirmed + price inside HTF zone
+// ENTRY LOGIC — LTF zone confirmed, then rejected on its own retest
 //==================================================================
 
 //---- Gate entry for bar-close path ----
@@ -130,16 +129,6 @@ bool EntryGateBlocked(int dir)
    if(InpNewsFilterEnabled && InNewsBlackout())
      {
       if(InpEnableLog) Print("AjipSnD: Entry blocked — News blackout");
-      return(true);
-     }
-   if(dir == 1 && HtfMaBlocksBuy())
-     {
-      if(InpEnableLog) Print("AjipSnD: Entry blocked — HTF close below MA (BUY only above MA)");
-      return(true);
-     }
-   if(dir == -1 && HtfMaBlocksSell())
-     {
-      if(InpEnableLog) Print("AjipSnD: Entry blocked — HTF close above MA (SELL only below MA)");
       return(true);
      }
    return(false);

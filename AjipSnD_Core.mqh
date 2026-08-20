@@ -5,74 +5,34 @@
 // CORE — InitStructure, UpdateStructure, OnTick dispatch
 //==================================================================
 
-//---- Save every matching LTF zone since the HTF zone's own origin bar ----
-// Triggered by HTF VALIDATION, not by the LTF zone's own validation instant
-// — an on-tick save (checking bias only at the moment the LTF zone itself
-// validates) misses every LTF zone that validated before the HTF bias
-// caught up to it, which is the common case, not the edge case: an HTF zone
-// on a higher timeframe routinely takes many LTF bars to confirm, and LTF
-// zones keep validating throughout that wait. Replays g_ltfValidatedHistory[] —
-// already populated unconditionally for every validated LTF zone — back to
-// the HTF zone's own origin bar. The dedup check guards a case that
-// shouldn't arise given HTF zones strictly alternate direction at
-// confirmation (so two same-direction validations can't share overlapping
-// origins) — cheap insurance, not a known bug.
-void SaveLtfZonesForHtfBias(const SnDZone &htfZone)
+//---- Save a just-validated LTF zone directly onto the rejection watch list —
+// no bias gate: every zone that validates, either direction, gets watched.
+// Called once, right at the zone's own validation instant (see UpdateLTF) —
+// unlike the HTF-bias-gated version this replaces, there is no delay to
+// backfill for, so this is a plain append, not a backward search.
+void SaveLtfZoneForWatch(const SnDZone &zone)
   {
-   int n = ArraySize(g_ltfValidatedHistory);
-   int candidates = 0;   // matched direction + postdates the HTF zone's origin
-   int matches    = 0;   // of those, newly saved (not already saved)
-   for(int i = 0; i < n; i++)
-     {
-      if(g_ltfValidatedHistory[i].isDemand != htfZone.isDemand) continue;
-      if(g_ltfValidatedHistory[i].time < htfZone.time) continue;
-      // Already touched by the time a newer same-direction zone validated —
-      // stale, the market has moved on. See MarkLtfValidationContext.
-      if(g_ltfValidatedHistory[i].superseded) continue;
-      candidates++;
-
-      bool already = false;
-      for(int j = 0; j < ArraySize(g_savedLtfZones); j++)
-        {
-         if(g_savedLtfZones[j].time == g_ltfValidatedHistory[i].time
-            && g_savedLtfZones[j].isDemand == g_ltfValidatedHistory[i].isDemand)
-           {
-            already = true;
-            break;
-           }
-        }
-      if(already) continue;
-
-      // Retiring touched-then-superseded g_savedLtfZones entries now happens
-      // in MarkLtfValidationContext instead — at LTF validation, the moment
-      // this rule's trigger condition is actually met, rather than deferred
-      // to whenever the next HTF validation happens to call this function.
-
-      int sz = ArraySize(g_savedLtfZones);
-      ArrayResize(g_savedLtfZones, sz + 1);
-      g_savedLtfZones[sz].high      = g_ltfValidatedHistory[i].high;
-      g_savedLtfZones[sz].low       = g_ltfValidatedHistory[i].low;
-      g_savedLtfZones[sz].sweepHigh = g_ltfValidatedHistory[i].sweepHigh;
-      g_savedLtfZones[sz].sweepLow  = g_ltfValidatedHistory[i].sweepLow;
-      g_savedLtfZones[sz].time      = g_ltfValidatedHistory[i].time;
-      g_savedLtfZones[sz].isDemand  = g_ltfValidatedHistory[i].isDemand;
-      g_savedLtfZones[sz].touched   = false;
-      g_savedLtfZones[sz].used      = false;
-      matches++;
-     }
+   int sz = ArraySize(g_savedLtfZones);
+   ArrayResize(g_savedLtfZones, sz + 1);
+   g_savedLtfZones[sz].high      = zone.high;
+   g_savedLtfZones[sz].low       = zone.low;
+   g_savedLtfZones[sz].sweepHigh = zone.sweepHigh;
+   g_savedLtfZones[sz].sweepLow  = zone.sweepLow;
+   g_savedLtfZones[sz].time      = zone.time;
+   g_savedLtfZones[sz].isDemand  = zone.isDemand;
+   g_savedLtfZones[sz].touched   = false;
+   g_savedLtfZones[sz].used      = false;
 
    if(InpEnableLog)
-      PrintFormat("AjipSnD: HTF bias -> %s — %d LTF zone(s) matched since %s, saved %d for rejection watch",
-                  htfZone.isDemand ? "DEMAND" : "SUPPLY", candidates,
-                  TimeToString(htfZone.time, TIME_DATE | TIME_MINUTES), matches);
+      PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
+                  zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
   }
 
 //---- Check every saved zone against this closed bar: break, or rejection ----
 // A saved zone stays watchable through any number of weak/shallow touches —
 // it is NOT one-shot on first contact. It only resolves two ways:
 //   1. Structural break — a body CLOSE beyond the zone's far edge (or its
-//      sweep level, if it had one at confirmation), exactly the rule
-//      InvalidateHtfZones already uses for HTF zones. Price didn't just
+//      sweep level, if it had one at confirmation). Price didn't just
 //      retest and fail, it went straight through — the thesis is gone.
 //   2. Rejection — wick re-enters the zone's range AND this bar's own body
 //      is large relative to LTF ATR in the favourable direction AND the
@@ -84,8 +44,9 @@ void SaveLtfZonesForHtfBias(const SnDZone &htfZone)
 //      on no momentum.
 // A touch that is neither a break nor a qualifying rejection resolves
 // nothing on its own — the zone is still intact and still worth waiting
-// on — but it is recorded (SavedLtfZone.touched) so SaveLtfZonesForHtfBias
-// can retire it later if a fresher same-direction zone shows up first.
+// on — but it is recorded (SavedLtfZone.touched) so
+// MarkLtfValidationContext can retire it later if a fresher same-direction
+// zone validates first.
 //
 // isReplay (OnInit historical replay) still resolves a zone's fate exactly
 // as live does — used=true on a break or a confirmed rejection — but never
@@ -97,7 +58,7 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
    int n = ArraySize(g_savedLtfZones);
    if(n == 0) return;
 
-   double atrLtf = GetAtrValue(false);
+   double atrLtf = GetAtrValue();
    if(atrLtf <= 0) return;
 
    double bodyAtr = MathAbs(bar.close - bar.open) / atrLtf;
@@ -128,9 +89,9 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
 
       // Recorded even if this particular touch doesn't resolve anything —
-      // SaveLtfZonesForHtfBias reads this to retire the zone the moment a
-      // fresher same-direction one is saved, instead of it lingering touched
-      // but never explicitly resolved.
+      // MarkLtfValidationContext reads this to retire the zone the moment a
+      // fresher same-direction one validates, instead of it lingering
+      // touched but never explicitly resolved.
       g_savedLtfZones[i].touched = true;
 
       bool closedOut  = isDemand ? (bar.close > zHigh) : (bar.close < zLow);
@@ -187,12 +148,6 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
    if(InpZoneQualityLog && !isReplay)
       UpdateZoneTracking(bar, false);
 
-   // Keep touch status current, independent of InpZoneQualityLog — the
-   // history it updates is what SaveLtfZonesForHtfBias's backward replay reads
-   // and what MarkLtfValidationContext's own touched+superseded check reads,
-   // not the CSV.
-   UpdateLtfValidatedHistoryTouch(bar);
-
    if(!isReplay)
      {
       // Rejection-entry confirmation: the one check that must run on a closed
@@ -227,12 +182,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched);
-         // Nothing trades here: an LTF zone validating does not by itself earn
-         // an order. Saving for the rejection watch is triggered by HTF
-         // validation instead (SaveLtfZonesForHtfBias in UpdateHTF), replaying
-         // g_ltfValidatedHistory back to the HTF zone's own origin, so an LTF
-         // zone that validates before the matching HTF bias exists is still
-         // caught rather than missed.
+         SaveLtfZoneForWatch(g_ltfPendingZone);
          g_ltfAwaitingValidation = false;
         }
      }
@@ -302,214 +252,45 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       DrawSavedLtfZones();
   }
 
-//---- Update HTF on new closed bar ----
-// isReplay=true is the OnInit historical replay — see UpdateLTF's matching
-// comment for what that does and doesn't skip.
-void UpdateHTF(const MqlRates &bar, bool isReplay = false)
-  {
-   if(bar.time == g_htfLastBarTime)
-      return;
-
-   g_htfLastBarTime = bar.time;
-
-   // Quality tracker per-bar stats BEFORE invalidation, so the
-   // invalidating bar's excursion is captured in the OUTCOME row
-   if(InpZoneQualityLog && !isReplay)
-      UpdateZoneTracking(bar, true);
-
-   // Invalidate active zones broken by price action
-   InvalidateHtfZones(bar);
-
-   //---- Follow-through validation (HTF gated by input) ----
-   if(InpRequireZoneValidation && g_htfAwaitingValidation)
-     {
-      bool passed = g_htfPendingZone.isDemand
-                    ? (bar.close > g_htfPendingZone.confirmLevel)
-                    : (bar.close < g_htfPendingZone.confirmLevel);
-      if(passed)
-        {
-         MarkZoneValidated(true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
-         if(g_htfPendingZone.isDemand)
-           {
-            AddDemandZone(g_htfDemandZones, g_htfPendingZone);
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: HTF DEMAND zone VALIDATED [%.5f, %.5f]",
-                           g_htfPendingZone.low, g_htfPendingZone.high);
-           }
-         else
-           {
-            AddSupplyZone(g_htfSupplyZones, g_htfPendingZone);
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: HTF SUPPLY zone VALIDATED [%.5f, %.5f]",
-                           g_htfPendingZone.low, g_htfPendingZone.high);
-           }
-         g_htfAwaitingValidation = false;
-
-         // HTF validation sets a pure directional bias, not a price range to
-         // sit inside, then immediately replays LTF history for zones already
-         // validated since this HTF zone's own origin bar
-         // (SaveLtfZonesForHtfBias logs the bias change and the replay result
-         // together).
-         g_htfBiasDir = g_htfPendingZone.isDemand ? 1 : -1;
-         SaveLtfZonesForHtfBias(g_htfPendingZone);
-        }
-     }
-
-   //---- Process this bar for zone confirmation ----
-   SnDZone confirmed;
-   ZeroMemory(confirmed);
-   if(ProcessZoneBar(bar, g_htfTrend, g_htfCandidate, confirmed))
-     {
-      confirmed.confirmLevel = confirmed.isDemand ? bar.high : bar.low;
-
-      // Metrics + quality gate — also sets isHtf, the tracker key for outcome
-      // logging. Must run before the zone is held as pending or activated.
-      ComputeZoneMetrics(confirmed, true, bar);
-
-      if(InpRequireZoneValidation)
-        {
-         // Opposite zone formed before validation → pending zone fails
-         if(g_htfAwaitingValidation && confirmed.isDemand != g_htfPendingZone.isDemand)
-           {
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: HTF %s zone validation FAILED — opposite zone formed first",
-                           g_htfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
-            LogZoneOutcome("FAILED_OPPOSITE", true, g_htfPendingZone.isDemand, g_htfPendingZone.time);
-            g_htfAwaitingValidation = false;
-           }
-
-         // Hold for validation (unvalidated → drawn in pending color)
-         g_htfPendingZone = confirmed;
-         g_htfAwaitingValidation = true;
-        }
-      else
-        {
-         // Validation disabled → activate immediately
-         if(confirmed.isDemand)
-           {
-            AddDemandZone(g_htfDemandZones, confirmed);
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: HTF DEMAND zone confirmed! [%.5f, %.5f]",
-                           confirmed.low, confirmed.high);
-           }
-         else
-           {
-            AddSupplyZone(g_htfSupplyZones, confirmed);
-            if(InpEnableLog)
-               PrintFormat("AjipSnD: HTF SUPPLY zone confirmed! [%.5f, %.5f]",
-                           confirmed.low, confirmed.high);
-           }
-        }
-
-      // Quality tracking: metrics + CONFIRM row
-      if(InpZoneQualityLog && !isReplay)
-        {
-         SnDZone tracked = confirmed;
-         TrackZone(tracked, true);
-         ZoneCsvWrite("CONFIRM", tracked, "");
-        }
-     }
-
-   // Nothing drawn here — HTF is a directional bias, not a chart object.
-   // DrawSavedLtfZones (called from UpdateLTF) is what actually matters on
-   // screen.
-  }
-
-//---- Replay LTF + HTF bars together, chronologically, to seed the EA's
-// initial structure AND the rejection-entry bias/history/save state — so it
-// starts with the same g_htfBiasDir/g_savedLtfZones it would have accumulated
-// running continuously through the lookback window, instead of sitting with
-// no bias until the first LIVE HTF validation.
+//---- Replay LTF bars to seed the EA's initial structure AND the
+// rejection-entry watch list — so it starts with the same g_savedLtfZones it
+// would have accumulated running continuously through the lookback window,
+// instead of sitting with an empty watch list until the first live LTF
+// validation.
 //
-// Reuses UpdateHTF/UpdateLTF (isReplay=true) rather than a parallel replay
-// path, so there is exactly one definition of what a validated HTF/LTF zone
-// is — see their own comments for what isReplay skips (CSV/diagnostic writes,
-// per-bar chart redraws) and what it never skips (zone detection, follow-
-// through validation, touch/superseded bookkeeping, the rejection watch
-// list). It never places a real order: CheckRejectionRetests still resolves
-// every saved zone's fate against the historical bars that follow it, but
+// Reuses UpdateLTF (isReplay=true) rather than a parallel replay path, so
+// there is exactly one definition of what a validated LTF zone is — see its
+// own comment for what isReplay skips (CSV/diagnostic writes, per-bar chart
+// redraws) and what it never skips (zone detection, follow-through
+// validation, touch/superseded bookkeeping, the rejection watch list). It
+// never places a real order: CheckRejectionRetests still resolves every
+// saved zone's fate against the historical bars that follow it, but
 // isReplay suppresses the actual market fill, since by the time this runs
 // price has already moved on from wherever a historical rejection closed.
-//
-// Interleaving the two streams by close time, not replaying LTF then HTF (or
-// vice versa) in two separate passes, is required for correctness, not just
-// tidiness: SaveLtfZonesForHtfBias's backward search and
-// MarkLtfValidationContext's superseded-marking both depend on
-// g_ltfValidatedHistory reflecting only what had already validated as of
-// that same real-time moment — a two-pass replay would let an HTF bias see
-// LTF zones that, chronologically, validated after it did.
 void ReplayInitialStructure()
   {
-   // ---- HTF bars first: they set how far back the whole replay reaches ----
-   // start_pos=1 skips the current, still-forming HTF bar — replaying a
+   // start_pos=1 skips the current, still-forming bar — replaying a
    // not-yet-closed bar as if it were final could confirm or invalidate a
    // zone on incomplete data.
-   MqlRates htfRates[];
-   int htfCount = CopyRates(_Symbol, InpHtfTimeframe, 1, InpCandlesInit, htfRates);
-   if(htfCount < 10)
-     {
-      PrintFormat("AjipSnD: Init replay — only %d HTF bars copied (need >=10) — skipped, no initial bias", htfCount);
-      return;
-     }
-   ArraySetAsSeries(htfRates, true);           // index 0 = newest, for trend determination
-   g_htfTrend = DetermineInitialTrend(htfRates, htfCount);
-   ZeroMemory(g_htfCandidate);
-   ArraySetAsSeries(htfRates, false);          // index 0 = oldest, for the forward walk
-   datetime windowStart = htfRates[0].time;
-
-   // ---- LTF bars covering the SAME calendar span, not just InpCandlesInit ----
-   // A fixed LTF bar count would badly under-cover the HTF window whenever
-   // InpTimeframe is much finer than InpHtfTimeframe (e.g. M5 LTF under an H1
-   // HTF: InpCandlesInit=50 gives ~50 hours of HTF but only ~4 hours of LTF).
-   // SaveLtfZonesForHtfBias's backward search needs LTF history reaching back
-   // to the OLDEST HTF zone's own origin bar, so the LTF fetch is keyed off
-   // that same start time instead of a bar count.
    MqlRates ltfRates[];
-   int ltfCount = CopyRates(_Symbol, InpTimeframe, windowStart, TimeCurrent(), ltfRates);
+   int ltfCount = CopyRates(_Symbol, InpTimeframe, 1, InpCandlesInit, ltfRates);
    if(ltfCount < 10)
      {
-      PrintFormat("AjipSnD: Init replay — only %d LTF bars copied since %s — skipped, no initial bias",
-                  ltfCount, TimeToString(windowStart, TIME_DATE | TIME_MINUTES));
+      PrintFormat("AjipSnD: Init replay — only %d LTF bars copied (need >=10) — skipped, no initial structure", ltfCount);
       return;
      }
-   ArraySetAsSeries(ltfRates, true);
-   // Drop the newest LTF bar if it hasn't closed yet — an open-ended
-   // stop_time (TimeCurrent()) can return the bar still forming right now.
-   if(ltfRates[0].time + PeriodSeconds(InpTimeframe) > TimeCurrent())
-     {
-      ArrayRemove(ltfRates, 0, 1);
-      ltfCount--;
-     }
-   int ltfTrendCount = MathMin(ltfCount, InpCandlesInit);
-   g_ltfTrend = DetermineInitialTrend(ltfRates, ltfTrendCount);  // same short recent-window convention as before
+   ArraySetAsSeries(ltfRates, true);           // index 0 = newest, for trend determination
+   g_ltfTrend = DetermineInitialTrend(ltfRates, ltfCount);
    ZeroMemory(g_ltfCandidate);
-   ArraySetAsSeries(ltfRates, false);          // oldest first
+   ArraySetAsSeries(ltfRates, false);          // index 0 = oldest, for the forward walk
 
-   PrintFormat("AjipSnD: Init replay — %d HTF bars since %s, %d LTF bars, HTF trend=%s LTF trend=%s",
-               htfCount, TimeToString(windowStart, TIME_DATE | TIME_MINUTES), ltfCount,
-               g_htfTrend == TREND_DOWN ? "DOWN" : "UP",
-               g_ltfTrend == TREND_DOWN ? "DOWN" : "UP");
+   PrintFormat("AjipSnD: Init replay — %d LTF bars, LTF trend=%s",
+               ltfCount, g_ltfTrend == TREND_DOWN ? "DOWN" : "UP");
 
-   // ---- Merge-walk both streams in true close-time order ----
-   int hi = 0, li = 0;
-   while(hi < htfCount || li < ltfCount)
-     {
-      bool takeHtf;
-      if(hi >= htfCount)      takeHtf = false;
-      else if(li >= ltfCount) takeHtf = true;
-      else
-        {
-         datetime htfClose = htfRates[hi].time + PeriodSeconds(InpHtfTimeframe);
-         datetime ltfClose = ltfRates[li].time + PeriodSeconds(InpTimeframe);
-         takeHtf = (htfClose <= ltfClose);
-        }
+   for(int i = 0; i < ltfCount; i++)
+      UpdateLTF(ltfRates[i], true);
 
-      if(takeHtf) { UpdateHTF(htfRates[hi], true); hi++; }
-      else        { UpdateLTF(ltfRates[li], true); li++; }
-     }
-
-   PrintFormat("AjipSnD: Init replay complete — bias=%s, %d LTF zone(s) saved and watching",
-               g_htfBiasDir == 1 ? "DEMAND" : (g_htfBiasDir == -1 ? "SUPPLY" : "none"),
+   PrintFormat("AjipSnD: Init replay complete — %d LTF zone(s) saved and watching",
                ArraySize(g_savedLtfZones));
 
    if(InpDrawLines)
@@ -575,8 +356,7 @@ void DrawPanel()
    string prefix = g_objPrefix + "Panel_";
    
    string trendStr = g_ltfTrend == TREND_UP ? "UP" : (g_ltfTrend == TREND_DOWN ? "DOWN" : "NONE");
-   string htfTrendStr = g_htfTrend == TREND_UP ? "UP" : (g_htfTrend == TREND_DOWN ? "DOWN" : "NONE");
-   
+
    const int lineH = 16;
    int y = 0;
    
@@ -605,7 +385,7 @@ void DrawPanel()
       ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
      }
-   const int totalLines = 20;
+   const int totalLines = 19;
    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, (int)InpPanelX - 6);
    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, (int)InpPanelY - 6);
    ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 185);
@@ -643,11 +423,8 @@ void DrawPanel()
    PANEL_LABEL("AjipSnD v1.0", clrWhite);
    PANEL_LABEL("", clrWhite);
    PANEL_LABEL(StringFormat("LTF Trend: %s (%s)", trendStr, ShortTF(InpTimeframe)), clrWhite);
-   PANEL_LABEL(StringFormat("HTF Trend: %s (%s)", htfTrendStr, ShortTF(InpHtfTimeframe)), clrWhite);
    // "tradeable/total" — zones failing the quality gate still exist as
-   // structure but are not offered as entry areas. LTF, not HTF: HTF is a
-   // directional bias only now, never geometrically meaningful, while LTF
-   // zones are what actually gets watched and traded.
+   // structure but are not offered as entry areas.
    int demTradeable = CountTradeableZones(g_ltfDemandZones);
    int supTradeable = CountTradeableZones(g_ltfSupplyZones);
    PANEL_LABEL(StringFormat("Demands:   %d/%d", demTradeable, ArraySize(g_ltfDemandZones)), clrWhite);

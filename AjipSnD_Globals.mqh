@@ -31,8 +31,8 @@ struct SnDZone
    //--- Quality gate (entry filter) ---
    bool     qualityPass;      // zone width + displacement passed the entry filter
    //--- Quality tracking (CSV backtest analysis) ---
-   bool     isHtf;            // tracker key: which timeframe this zone belongs to
-   int      htfTrendAtConfirm;// HTF trend when this zone confirmed (LTF: cross-TF alignment)
+   bool     isHtf;            // tracker key: always false now (single-timeframe EA) —
+                               // kept for CSV schema stability, see entryPlaced below
    bool     validated;        // follow-through validation passed
    int      trendAtConfirm;   // trend of this TF at confirmation (1=UP, -1=DOWN)
    // Bars the candidate stayed alive before confirming. Floor is 2, not 1: the
@@ -56,10 +56,6 @@ struct SnDZone
    // zone's whole tracking lifetime, which needs knowing the future to
    // compute and cannot be known in real time. See MarkLtfValidationContext().
    bool     touchedAtValidation;  // was 'touched' already true at that instant?
-   bool     htfContextValidated;  // diagnostic only — was this LTF edge inside
-                                   // an ACTIVE, VALIDATED HTF zone at that
-                                   // instant? See MarkLtfValidationContext's
-                                   // RESULT block in AjipSnD_Zone.mqh.
    int      barsSinceConfirm; // closed bars since confirmation
    int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
    double   touchDepthPts;    // penetration depth of first touch (points)
@@ -77,7 +73,6 @@ struct EntryTracker
    datetime entryTime;
    double   mfe;            // best POSITION_PROFIT seen ($)
    double   mae;            // worst POSITION_PROFIT seen ($)
-   double   atrAtEntry;     // HTF ATR frozen at entry
    double   initialVolume;   // volume at entry (lot sizing, CSV logging)
    bool     hasStructuralSl; // SL came from the zone at placement
    double   slPrice;         // structural SL price (0=none)
@@ -111,22 +106,14 @@ CTrade         trade;
 string         g_objPrefix    = "AjipSnD_";
 
 // ---- Zone tracking ----
-// HTF (retest zones)
-SnDZone        g_htfDemandZones[];    // active demand zones on HTF
-SnDZone        g_htfSupplyZones[];    // active supply zones on HTF
-ENUM_TREND     g_htfTrend          = TREND_DOWN;  // current HTF trend for zone detection
-SnDZone        g_htfCandidate;                  // unconfirmed zone candidate on HTF
-datetime       g_htfLastBarTime    = 0;          // new-bar detection for HTF
-
-// LTF (entry zones)
+// LTF (entry zones) — the only timeframe this EA detects zones on
 SnDZone        g_ltfDemandZones[];
 SnDZone        g_ltfSupplyZones[];
 ENUM_TREND     g_ltfTrend          = TREND_DOWN;
 SnDZone        g_ltfCandidate;
 datetime       g_ltfLastBarTime    = 0;
 
-// ---- Zone follow-through validation ----
-// LTF: always-on. HTF: gated by InpRequireZoneValidation.
+// ---- Zone follow-through validation (always-on) ----
 SnDZone        g_ltfPendingZone;              // LTF zone awaiting follow-through validation
 bool           g_ltfAwaitingValidation = false;
 // Wick re-entry into g_ltfPendingZone's own range since it started waiting,
@@ -134,8 +121,6 @@ bool           g_ltfAwaitingValidation = false;
 // MarkLtfValidationContext gets an accurate touchedAtValidation even when
 // quality tracking is off, or during the OnInit historical replay.
 bool           g_ltfPendingTouched = false;
-SnDZone        g_htfPendingZone;              // HTF zone awaiting follow-through validation
-bool           g_htfAwaitingValidation = false;
 
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
@@ -145,9 +130,8 @@ int            g_digits;
 double         g_point;
 double         g_volMin, g_volMax, g_volStep;
 
-// ---- ATR handles for zone quality metrics ----
+// ---- ATR handle for zone quality metrics ----
 int            g_atrLtfHandle = INVALID_HANDLE;
-int            g_atrHtfHandle = INVALID_HANDLE;
 
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
@@ -172,40 +156,18 @@ datetime       g_lastTradeCloseTime = 0;
 // ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
 SnDZone        g_zoneTracker[];
 
-// ---- LTF validation history, searched backward on every HTF bias change ----
-// Every LTF zone that ever validates gets appended here and stays forever —
-// unlike g_ltfDemandZones/g_ltfSupplyZones, which are capped at InpMaxZones
-// and evict old entries, this is a plain history SaveLtfZonesForHtfBias
-// searches BACKWARD through, so an LTF zone must still be findable long
-// after it would have been evicted from the active array.
-struct LtfValidatedZone
-  {
-   double   high;
-   double   low;
-   double   sweepHigh;   // carried from the zone's own SnDZone at validation (0=no sweep)
-   double   sweepLow;    // same
-   datetime time;
-   bool     isDemand;
-   bool     touchedAtValidation;  // frozen snapshot: touched by ITS OWN validation instant
-   bool     touchedEver;          // live, updated every LTF bar: touched by NOW, whenever "now" is
-   bool     superseded;           // was already touched when a newer same-direction zone validated
-  };
-LtfValidatedZone g_ltfValidatedHistory[];
-
 // ---- Rejection-entry mode — the EA's only entry mechanism ----
-// HTF here is a pure directional bias, not a price range to sit inside: an
-// HTF zone validating sets g_htfBiasDir, and only LTF zones matching that
-// direction get saved. A saved zone waits for ITS OWN retest + rejection
-// (wick back in, closed back out, with real momentum) before anything is
-// traded — no zone is ever traded straight off its own validation. Unproven
-// — written directly to spec, not measured first.
-int g_htfBiasDir = 0;   // 0=none yet, 1=demand/bullish bias, -1=supply/bearish bias
-
+// Every LTF zone that validates is saved directly onto the watch list, both
+// directions, no bias gate — see SaveLtfZoneForWatch() in AjipSnD_Core.mqh.
+// A saved zone then waits for ITS OWN retest + rejection (wick back in,
+// closed back out, with real momentum) before anything is traded — no zone
+// is ever traded straight off its own validation. Unproven — written
+// directly to spec, not measured first.
 struct SavedLtfZone
   {
    double   high;
    double   low;
-   double   sweepHigh;   // 0=no sweep — see LtfValidatedZone
+   double   sweepHigh;   // carried from the zone's own SnDZone at validation (0=no sweep)
    double   sweepLow;    // same
    datetime time;
    bool     isDemand;
@@ -219,12 +181,11 @@ SavedLtfZone g_savedLtfZones[];
 //==================================================================
 
 //---- Get ATR value (last closed bar) for zone quality metrics ----
-double GetAtrValue(bool htf)
+double GetAtrValue()
   {
-   int handle = htf ? g_atrHtfHandle : g_atrLtfHandle;
-   if(handle == INVALID_HANDLE) return(0.0);
+   if(g_atrLtfHandle == INVALID_HANDLE) return(0.0);
    double buf[1];
-   if(CopyBuffer(handle, 0, 1, 1, buf) != 1) return(0.0);
+   if(CopyBuffer(g_atrLtfHandle, 0, 1, 1, buf) != 1) return(0.0);
    return(buf[0]);
   }
 
@@ -328,60 +289,5 @@ double GetFloatingPnL();
 double GetPeriodPnL(datetime from, datetime to);
 void   CloseAllAndLogTrades(string reason);
 double ComputeRealizedPnl(int idx);
-
-//---- Get HTF MA value (cached per bar, recalculated on new HTF close) ----
-double GetHtfMaValue()
-  {
-   if(!InpHtfMaFilter || InpHtfMaPeriod <= 0)
-      return(0.0);
-
-   static datetime lastCalcTime = 0;
-   static double   lastMaValue  = 0.0;
-   static int      maHandle     = INVALID_HANDLE;
-
-   if(maHandle == INVALID_HANDLE)
-      maHandle = iMA(_Symbol, InpHtfTimeframe, InpHtfMaPeriod, 0, InpHtfMaMethod, PRICE_CLOSE);
-
-   // Only recalculate on new HTF bar close
-   MqlRates rates[1];
-   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) != 1)
-      return(lastMaValue);
-
-   datetime currentBarTime = rates[0].time;
-   if(currentBarTime != lastCalcTime)
-     {
-      lastCalcTime = currentBarTime;
-      double ma[1];
-      if(CopyBuffer(maHandle, 0, 0, 1, ma) > 0)
-         lastMaValue = ma[0];
-     }
-
-   return(lastMaValue);
-  }
-
-//---- HTF MA direction gate for entry ----
-bool HtfMaBlocksBuy()
-  {
-   if(!InpHtfMaFilter) return(false);
-   double ma = GetHtfMaValue();
-   if(ma <= 0) return(false);
-
-   MqlRates rates[1];
-   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) == 1)
-      return(rates[0].close <= ma);  // block BUY if HTF below/at MA
-   return(false);
-  }
-
-bool HtfMaBlocksSell()
-  {
-   if(!InpHtfMaFilter) return(false);
-   double ma = GetHtfMaValue();
-   if(ma <= 0) return(false);
-
-   MqlRates rates[1];
-   if(CopyRates(_Symbol, InpHtfTimeframe, 0, 1, rates) == 1)
-      return(rates[0].close >= ma);  // block SELL if HTF above/at MA
-   return(false);
-  }
 
 #endif // AJIPSND_GLOBALS_MQH
