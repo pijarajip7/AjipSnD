@@ -435,7 +435,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "swept_low", "swept_high", "sweep_low_count", "sweep_high_count",
          "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
-         "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
+         "max_fav_pts", "max_adv_pts", "fav_before_touch_pts", "fav_before_touch_width_ratio",
+         "fav_after_touch_pts", "trend_at_confirm",
          "touched_at_validation", "bars_to_validate", "validate_sweep_count");
      }
    else
@@ -468,6 +469,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.touchDepthPts, 1),
       DoubleToString(zone.maxFavPts, 1),
       DoubleToString(zone.maxAdvPts, 1),
+      DoubleToString(zone.favBeforeTouchPts, 1),
+      DoubleToString(zone.favBeforeTouchWidthRatio, 3),
       DoubleToString(zone.favAfterTouchPts, 1),
       zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
       zone.touchedAtValidation ? "1" : "0",
@@ -491,6 +494,8 @@ void TrackZone(SnDZone &zone, bool htf)
    zone.touchDepthPts     = 0.0;
    zone.maxFavPts         = 0.0;
    zone.maxAdvPts         = 0.0;
+   zone.favBeforeTouchPts         = 0.0;
+   zone.favBeforeTouchWidthRatio  = 0.0;
    zone.favAfterTouchPts  = 0.0;
    zone.touchedAtValidation = false;
    zone.barsToValidate      = 0;   // not yet known — filled in by MarkLtfValidationContext
@@ -530,6 +535,14 @@ void UpdateZoneTracking(const MqlRates &bar, bool htf)
             double depth = (g_zoneTracker[i].high - bar.low) / g_point;
             if(depth < 0) depth = 0;
             g_zoneTracker[i].touchDepthPts = depth;
+
+            // How far price ran favorably before coming back, vs the zone's
+            // own width — maxFavPts is already updated for this same bar
+            // above, so this is "as of the bar that touched."
+            g_zoneTracker[i].favBeforeTouchPts = g_zoneTracker[i].maxFavPts;
+            double widthPts = (g_zoneTracker[i].high - g_zoneTracker[i].low) / g_point;
+            g_zoneTracker[i].favBeforeTouchWidthRatio =
+               (widthPts > 0) ? (g_zoneTracker[i].favBeforeTouchPts / widthPts) : 0.0;
            }
          if(g_zoneTracker[i].touched)
            {
@@ -554,6 +567,14 @@ void UpdateZoneTracking(const MqlRates &bar, bool htf)
             double depth = (bar.high - g_zoneTracker[i].low) / g_point;
             if(depth < 0) depth = 0;
             g_zoneTracker[i].touchDepthPts = depth;
+
+            // How far price ran favorably before coming back, vs the zone's
+            // own width — maxFavPts is already updated for this same bar
+            // above, so this is "as of the bar that touched."
+            g_zoneTracker[i].favBeforeTouchPts = g_zoneTracker[i].maxFavPts;
+            double widthPts = (g_zoneTracker[i].high - g_zoneTracker[i].low) / g_point;
+            g_zoneTracker[i].favBeforeTouchWidthRatio =
+               (widthPts > 0) ? (g_zoneTracker[i].favBeforeTouchPts / widthPts) : 0.0;
            }
          if(g_zoneTracker[i].touched)
            {

@@ -264,7 +264,14 @@ kualitas — `InpZoneQualityLog` (default true).
 - **OUTCOME row**: nasib zona — `FAILED_OPPOSITE`, `TOUCHED_SUPERSEDED`,
   `REPLACED`, `EXPIRED`, `UNRESOLVED` (masih `trackingActive` saat EA
   shutdown) — plus statistik perilaku sejak konfirmasi (excursion, first
-  touch, `fav_after_touch_pts`). Validasi sendiri bukan outcome — itu kolom
+  touch, `fav_after_touch_pts`). Excursion sebelum touch dipecah dua:
+  `fav_before_touch_pts` (snapshot `max_fav_pts` persis di bar yang
+  akhirnya touch — seberapa jauh harga sempat menjauh sebelum balik ke
+  zona) dan `fav_before_touch_width_ratio` (jarak itu dibagi lebar zona
+  `high-low`, bukan ATR — 500pt di zona lebar 100pt beda cerita dari 500pt
+  di zona lebar 2000pt). Keduanya `0` kalau zona belum pernah tersentuh
+  (sama aturan dengan `touch_depth_pts`/`bars_to_touch`). Validasi sendiri
+  bukan outcome — itu kolom
   boolean terpisah (`validated`) di baris yang sama. `bars_to_validate`
   (bar dari CONFIRMED ke VALIDATED, floor 1 bar) dan `validate_sweep_count`
   (sama konsep sweep di atas, tapi terhadap `confirm_level` selama menunggu

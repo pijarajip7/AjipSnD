@@ -84,6 +84,16 @@ struct SnDZone
    double   touchDepthPts;    // penetration depth of first touch (points)
    double   maxFavPts;        // max favorable excursion from confirmClose (points)
    double   maxAdvPts;        // max adverse excursion from confirmClose (points)
+   // Snapshotted from maxFavPts at the exact moment of first touch — how far
+   // price ran in the favorable direction before it ever came back to the
+   // zone. widthRatio expresses the same distance as a multiple of the
+   // zone's own width (high-low), since a 500pt excursion means something
+   // different on a 100pt-wide zone than a 2000pt-wide one; 0 if width is 0
+   // (ATR was unavailable at confirmation — see ComputeZoneMetrics). Both
+   // stay 0 for a zone never touched (touched stays false, same convention
+   // as touchDepthPts/barsToTouch).
+   double   favBeforeTouchPts;         // max favorable excursion before first touch (points)
+   double   favBeforeTouchWidthRatio;  // favBeforeTouchPts / zone width, in the same units
    double   favAfterTouchPts; // best favorable excursion after first touch (points)
   };
 
