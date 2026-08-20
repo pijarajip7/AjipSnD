@@ -252,13 +252,19 @@ Setiap zona yang dikonfirmasi live dicatat ke CSV untuk analisis
 kualitas — `InpZoneQualityLog` (default true).
 
 - **CONFIRM row**: atribut kualitas saat zona terbentuk — displacement
-  (`disp_body_atr`, `disp_range_atr`), lebar zona (`width_atr`), `base_bars`,
-  sweep flag, trend saat konfirmasi.
+  (`disp_body_atr`, `disp_range_atr`), lebar zona (`width_atr`), `base_bars`
+  (bar yang dibutuhkan CANDIDATE untuk jadi zona CONFIRMED — lihat komentar
+  di `ProcessZoneBar`/`SnDZone.baseBars`, floor 2 bar), sweep flag, trend
+  saat konfirmasi. `bars_to_validate` masih `0` di baris ini — belum
+  tervalidasi saat CONFIRM ditulis, lihat OUTCOME row.
 - **OUTCOME row**: nasib zona — `FAILED_OPPOSITE`, `TOUCHED_SUPERSEDED`,
   `REPLACED`, `EXPIRED`, `UNRESOLVED` (masih `trackingActive` saat EA
   shutdown) — plus statistik perilaku sejak konfirmasi (excursion, first
   touch, `fav_after_touch_pts`). Validasi sendiri bukan outcome — itu kolom
-  boolean terpisah (`validated`) di baris yang sama.
+  boolean terpisah (`validated`) di baris yang sama. `bars_to_validate`
+  (bar dari CONFIRMED ke VALIDATED, floor 1 bar) baru terisi di sini kalau
+  zona sempat tervalidasi sebelum outcome ditulis — tetap `0` kalau zona
+  gagal (`FAILED_OPPOSITE` dll.) sebelum sempat tervalidasi.
 
 Tujuan: kumpulkan data dulu, lalu analisis korelasi atribut → outcome, dan
 jadikan atribut yang terbukti sebagai filter entry.

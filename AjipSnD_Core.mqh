@@ -185,6 +185,12 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       UpdateDriftRecords(bar);
      }
 
+   // Bars g_ltfPendingZone has spent awaiting validation, incremented every
+   // bar it stays pending — feeds SnDZone.barsToValidate below. Runs before
+   // the validation check so a zone that validates THIS bar still counts it.
+   if(g_ltfAwaitingValidation)
+      g_ltfPendingBars++;
+
    // Wick re-entry into the currently-pending zone, tracked independently of
    // g_zoneTracker so MarkLtfValidationContext gets an accurate
    // touchedAtValidation whether or not CSV tracking is on. Runs before the
@@ -206,7 +212,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       if(passed)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
-         MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched);
+         MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched, g_ltfPendingBars);
          SaveLtfZoneForWatch(g_ltfPendingZone, g_ltfPendingTouched, bar.time);
          g_ltfAwaitingValidation = false;
         }
@@ -267,6 +273,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       g_ltfPendingZone = confirmed;
       g_ltfAwaitingValidation = true;
       g_ltfPendingTouched = false;
+      g_ltfPendingBars = 0;
      }
 
    // Check every saved zone against this closed bar. Redraw is skipped during

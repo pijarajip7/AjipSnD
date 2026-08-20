@@ -423,7 +423,7 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
          "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
-         "touched_at_validation");
+         "touched_at_validation", "bars_to_validate");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -455,7 +455,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.maxAdvPts, 1),
       DoubleToString(zone.favAfterTouchPts, 1),
       zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
-      zone.touchedAtValidation ? "1" : "0");
+      zone.touchedAtValidation ? "1" : "0",
+      IntegerToString(zone.barsToValidate));
 
    FileClose(handle);
   }
@@ -476,6 +477,7 @@ void TrackZone(SnDZone &zone, bool htf)
    zone.maxAdvPts         = 0.0;
    zone.favAfterTouchPts  = 0.0;
    zone.touchedAtValidation = false;
+   zone.barsToValidate      = 0;   // not yet known — filled in by MarkLtfValidationContext
 
    int sz = ArraySize(g_zoneTracker);
    ArrayResize(g_zoneTracker, sz + 1);
@@ -608,15 +610,20 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
 // field — silently stop working the moment quality logging was switched
 // off. The caller (UpdateLTF) now tracks g_ltfPendingTouched independently
 // for exactly this reason, and the same value feeds the OnInit historical
-// replay, which never runs TrackZone at all.
-void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation)
+// replay, which never runs TrackZone at all. barsToValidate has no bearing
+// on the supersede-marking below (CSV-diagnostic only), but is threaded the
+// same way for consistency, sourced from the caller's own g_ltfPendingBars.
+void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation, int barsToValidate)
   {
-   // CSV-diagnostic field — safe no-op when this zone isn't being tracked
+   // CSV-diagnostic fields — safe no-op when this zone isn't being tracked
    // (InpZoneQualityLog=false, or the OnInit replay). The loop below is core
    // state and must run regardless.
    int i = FindTrackedZone(false, confirmed.isDemand, confirmed.time);
    if(i >= 0)
+     {
       g_zoneTracker[i].touchedAtValidation = touchedAtValidation;
+      g_zoneTracker[i].barsToValidate      = barsToValidate;
+     }
 
    // A same-direction watch-list entry already touched by now is stale the
    // moment this fresher zone validates — the earliest possible trigger

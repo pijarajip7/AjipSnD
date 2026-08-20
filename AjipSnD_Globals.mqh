@@ -56,6 +56,14 @@ struct SnDZone
    // zone's whole tracking lifetime, which needs knowing the future to
    // compute and cannot be known in real time. See MarkLtfValidationContext().
    bool     touchedAtValidation;  // was 'touched' already true at that instant?
+   // Bars from the CONFIRM bar to the bar validation actually passed on.
+   // Floor is 1, not 0: the confirm bar's own follow-through check already
+   // ran (and found nothing pending yet) before this same bar's own
+   // confirmation happens, so the earliest possible validation is the very
+   // next bar. Counted with an independent incrementing counter
+   // (g_ltfPendingBars), not a time delta — a weekend gap between the
+   // confirm and validate bars would otherwise inflate the count.
+   int      barsToValidate;      // bars from confirmation to validation (1=fastest)
    int      barsSinceConfirm; // closed bars since confirmation
    int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
    double   touchDepthPts;    // penetration depth of first touch (points)
@@ -121,6 +129,10 @@ bool           g_ltfAwaitingValidation = false;
 // MarkLtfValidationContext gets an accurate touchedAtValidation even when
 // quality tracking is off, or during the OnInit historical replay.
 bool           g_ltfPendingTouched = false;
+// Bars g_ltfPendingZone has been awaiting validation — feeds
+// SnDZone.barsToValidate at the moment validation passes. See that field's
+// comment for why this is a counter, not a time delta.
+int            g_ltfPendingBars = 0;
 
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
