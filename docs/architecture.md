@@ -208,10 +208,13 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
      SaveLtfZoneForWatch(zone, g_ltfPendingTouched, bar.time) — appends
      directly to g_savedLtfZones[], both directions, no gate, EXCEPT: if
      g_ltfPendingTouched is true (zone already wicked into during its own
-     confirm-to-validate window), it's saved already used=true — a record
-     stays for visibility but it never enters active rejection watch. Zone
-     confirmation and clean validation still never earn an order on their
-     own; only a later rejection on retest does.
+     confirm-to-validate window), it's saved already used=true AND
+     g_ltfZoneDrawFrozen=true — a record stays in g_savedLtfZones[] (CSV
+     join key etc.) but it never enters active rejection watch and is never
+     drawn on chart at all, since it was never really a watch candidate
+     (see Zone Drawing below). Zone confirmation and clean validation still
+     never earn an order on their own; only a later rejection on retest
+     does.
 5. ProcessZoneBar(bar) → check if zone confirmed
 6. If zone CONFIRMED:
    a. Opposite formed first → pending zone fails (discarded, no entry)
@@ -230,19 +233,26 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
 ## Zone Drawing
 
 ```
-Every saved zone: OBJ_RECTANGLE via DrawZoneRect, dotted, filled, background
+Every DRAWN zone: OBJ_RECTANGLE via DrawZoneRect, dotted, filled, background
   Demand → clrDodgerBlue, Supply → clrOrangeRed
 
-Never deleted once drawn. Two states, tracked per zone (index-aligned with
-g_savedLtfZones[]):
-  - Still live (g_ltfZoneDrawEnd[i] == 0): redrawn every DrawSavedLtfZones
-    call, right edge extended to TimeCurrent()
-  - Resolved (g_ltfZoneDrawEnd[i] != 0 — break, rejection-traded, or
-    superseded): redrawn ONE more time with the right edge frozen at that
-    stamp, then g_ltfZoneDrawFrozen[i] set true and skipped on every later
-    call — its rectangle never changes again, so there is nothing left to
-    update. Redraw cost tracks the live watch list, not the total number of
-    zones ever confirmed over the EA's whole runtime.
+Never deleted once drawn. Three states, tracked per zone (index-aligned
+with g_savedLtfZones[]) via g_ltfZoneDrawFrozen[]/g_ltfZoneDrawEnd[]:
+  - Still live (g_ltfZoneDrawFrozen[i] == false, g_ltfZoneDrawEnd[i] == 0):
+    redrawn every DrawSavedLtfZones call, right edge extended to
+    TimeCurrent()
+  - Resolved after being watched (g_ltfZoneDrawFrozen[i] == false,
+    g_ltfZoneDrawEnd[i] != 0 — break, rejection-traded, or superseded):
+    redrawn ONE more time with the right edge frozen at that stamp, then
+    g_ltfZoneDrawFrozen[i] set true and skipped on every later call — its
+    rectangle never changes again, so there is nothing left to update.
+  - Never watched at all (g_ltfZoneDrawFrozen[i] == true from the moment
+    SaveLtfZoneForWatch created the entry — the pre-touch filter above):
+    never drawn even once. It was never a real watch candidate, so there is
+    nothing on chart to represent.
+
+Redraw cost tracks the live watch list, not the total number of zones ever
+confirmed over the EA's whole runtime.
 ```
 
 ---

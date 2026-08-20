@@ -132,13 +132,18 @@ mulai diawasi untuk retest."
 
 **Kecuali** kalau zona itu sudah pernah tersentuh SEBELUM validasinya
 selesai (`g_ltfPendingTouched` — wick masuk ke range zona di antara bar
-konfirmasi dan bar validasi). Zona begini tetap disimpan (buat jejak di
-chart/CSV) TAPI langsung `used=true` — tidak pernah masuk watch-list aktif,
-tidak pernah dapat kesempatan rejection-entry. Ini backtested: zona yang
-sudah tersentuh saat validasi hit rate-nya 56-58% di horizon 5m/15m, vs 75%+
-untuk zona yang validasi bersih (belum pernah tersentuh) — lihat RESULT
-block di `MarkLtfValidationContext` (`AjipSnD_Zone.mqh`) untuk detail
-pengukurannya.
+konfirmasi dan bar validasi). Zona begini tetap disimpan di
+`g_savedLtfZones[]` (buat jejak/join-key CSV) TAPI langsung `used=true` —
+tidak pernah masuk watch-list aktif, tidak pernah dapat kesempatan
+rejection-entry, DAN tidak pernah digambar di chart sama sekali
+(`g_ltfZoneDrawFrozen=true` sejak awal) — zona ini tidak pernah jadi
+kandidat yang benar-benar diawasi, jadi tidak ada apapun yang perlu
+ditampilkan, beda dengan zona yang SEMPAT diawasi lalu resolve (lihat
+[Rectangle chart: dibekukan, bukan dihapus](#rectangle-chart-dibekukan-bukan-dihapus)
+di bawah). Ini backtested: zona yang sudah tersentuh saat validasi hit
+rate-nya 56-58% di horizon 5m/15m, vs 75%+ untuk zona yang validasi bersih
+(belum pernah tersentuh) — lihat RESULT block di `MarkLtfValidationContext`
+(`AjipSnD_Zone.mqh`) untuk detail pengukurannya.
 
 ### 2. Tunggu retest → REJECTED, baru entry
 
@@ -180,6 +185,13 @@ pernah disentuh lagi — rectangle-nya **tetap ada di chart selamanya**, tidak
 pernah dihapus, tapi juga tidak pernah diproses ulang setelah beku (jaga
 biaya redraw supaya tidak ikut membengkak seiring total zona sepanjang umur
 EA).
+
+Pengecualian: zona yang kena [filter pre-touch](#1-validasi--langsung-masuk-watch-list-bukan-trigger-entry)
+(sudah tersentuh sebelum validasi) langsung `g_ltfZoneDrawFrozen=true` dari
+awal, TANPA pernah melalui fase live sama sekali — jadi tidak pernah digambar
+walau sekali. Berbeda dari zona yang sempat diawasi dulu baru resolve: zona
+pre-touch tidak pernah benar-benar jadi kandidat watch, jadi tidak ada
+apapun yang perlu direpresentasikan di chart.
 
 ---
 

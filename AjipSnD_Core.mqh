@@ -16,10 +16,12 @@
 // formed, but touched before ever finishing validation. Backtested (see the
 // RESULT block on MarkLtfValidationContext in AjipSnD_Zone.mqh): a zone
 // already touched by validation time hits at 56-58% at 5m/15m vs 75%+ for
-// one that validated clean, so these are saved already `used=true` — a
-// record stays in g_savedLtfZones[]/on the chart (frozen immediately, `asOf`
-// as its resolve stamp) for visibility, but CheckRejectionRetests never
-// watches it for a rejection entry.
+// one that validated clean, so these are saved already `used=true` and
+// `g_ltfZoneDrawFrozen=true` — a record stays in g_savedLtfZones[] (join
+// key for the zone CSV etc.), but it never enters the rejection watch AND
+// never gets drawn on chart at all: it was never a candidate CheckRejection-
+// Retests would have watched, so there is nothing worth showing on chart
+// either, unlike a zone that WAS watched for a while and later resolved.
 void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
   {
    int sz = ArraySize(g_savedLtfZones);
@@ -36,12 +38,12 @@ void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
    ArrayResize(g_ltfZoneDrawEnd, sz + 1);
    g_ltfZoneDrawEnd[sz] = preTouched ? asOf : 0;
    ArrayResize(g_ltfZoneDrawFrozen, sz + 1);
-   g_ltfZoneDrawFrozen[sz] = false;
+   g_ltfZoneDrawFrozen[sz] = preTouched;
 
    if(InpEnableLog)
      {
       if(preTouched)
-         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation, marked used (no rejection watch)",
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation, marked used (no rejection watch, not drawn)",
                      zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
       else
          PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
