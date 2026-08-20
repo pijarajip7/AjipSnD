@@ -332,9 +332,9 @@ void ReplayZoneBars(const MqlRates &rates[], int startIdx, int count,
   }
 
 //---- Draw a single zone rectangle ----
-void DrawZoneRect(string name, datetime time, double price1, double price2, color clr)
+void DrawZoneRect(string name, datetime time, datetime endTime, double price1, double price2, color clr)
   {
-   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, TimeCurrent(), price2))
+   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, time, price1, endTime, price2))
       return;
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
@@ -343,9 +343,11 @@ void DrawZoneRect(string name, datetime time, double price1, double price2, colo
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
   }
 
-//---- Draw saved (awaiting-rejection) LTF zones — the only chart objects ----
-// Zones already used (rejection resolved, order attempted) are dropped
-// rather than kept drawn — a used zone has nothing left pending.
+//---- Draw every saved LTF zone — the only chart objects. Never deleted once
+// drawn: a still-watched zone's right edge keeps extending to "now" every
+// call, and a resolved one (g_ltfZoneDrawEnd[i] != 0 — touched+rejected,
+// structurally broken, or superseded) freezes at the bar it resolved on,
+// instead of vanishing or continuing to extend. ----
 void DrawSavedLtfZones()
   {
    if(!InpDrawLines) return;
@@ -361,9 +363,9 @@ void DrawSavedLtfZones()
    int n = ArraySize(g_savedLtfZones);
    for(int i = 0; i < n; i++)
      {
-      if(g_savedLtfZones[i].used) continue;
       color clr = g_savedLtfZones[i].isDemand ? clrDodgerBlue : clrOrangeRed;
-      DrawZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time,
+      datetime endTime = (g_ltfZoneDrawEnd[i] > 0) ? g_ltfZoneDrawEnd[i] : TimeCurrent();
+      DrawZoneRect(prefix + IntegerToString(i), g_savedLtfZones[i].time, endTime,
                    g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
      }
   }
@@ -618,8 +620,9 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
       if(g_savedLtfZones[j].touched)
         {
          g_savedLtfZones[j].used = true;
+         g_ltfZoneDrawEnd[j]     = confirmed.time;
          if(InpEnableLog)
-            PrintFormat("AjipSnD: %s watch zone [%.5f, %.5f] touched+superseded by fresher zone — dropped",
+            PrintFormat("AjipSnD: %s watch zone [%.5f, %.5f] touched+superseded by fresher zone — retired",
                         g_savedLtfZones[j].isDemand ? "DEMAND" : "SUPPLY",
                         g_savedLtfZones[j].low, g_savedLtfZones[j].high);
         }

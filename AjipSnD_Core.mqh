@@ -23,6 +23,9 @@ void SaveLtfZoneForWatch(const SnDZone &zone)
    g_savedLtfZones[sz].touched   = false;
    g_savedLtfZones[sz].used      = false;
 
+   ArrayResize(g_ltfZoneDrawEnd, sz + 1);
+   g_ltfZoneDrawEnd[sz] = 0;
+
    if(InpEnableLog)
       PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
                   zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
@@ -79,6 +82,7 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       if(broken)
         {
          g_savedLtfZones[i].used = true;
+         g_ltfZoneDrawEnd[i]     = bar.time;
          if(InpEnableLog)
             PrintFormat("AjipSnD: %s zone [%.5f, %.5f] BROKEN (close %.5f past %.5f) — invalidated",
                         isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bar.close, breakLevel);
@@ -100,6 +104,7 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       if(!rejected) continue;   // touched but no clean rejection yet — still watching
 
       g_savedLtfZones[i].used = true;
+      g_ltfZoneDrawEnd[i]     = bar.time;
 
       int    dir    = isDemand ? 1 : -1;
       double buffer = InpZoneSlBufferAtr * atrLtf;

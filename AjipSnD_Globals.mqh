@@ -176,6 +176,16 @@ struct SavedLtfZone
   };
 SavedLtfZone g_savedLtfZones[];
 
+// ---- Drawing-only shadow of g_savedLtfZones, same size, grown in lockstep,
+// index-aligned. 0 = zone still live. Non-zero = the bar time it stopped
+// being watched (touched+rejected, structurally broken, or superseded) —
+// DrawSavedLtfZones reads this to give a resolved zone a correct frozen
+// right edge instead of continuing to extend it to "now" forever. Zones are
+// never deleted from the chart once drawn, only frozen. Kept separate from
+// SavedLtfZone itself so the trading struct stays exactly what it was
+// before this existed. ----
+datetime g_ltfZoneDrawEnd[];
+
 //==================================================================
 // HELPER FUNCTIONS
 //==================================================================
