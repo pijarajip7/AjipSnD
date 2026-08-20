@@ -80,38 +80,42 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.isDemand = true;
             candidate.sweepHigh = 0;
             candidate.sweepLow  = 0;
+            candidate.sweepHighCount = 0;
+            candidate.sweepLowCount  = 0;
             candidate.baseBars  = 0;
            }
         }
-      
+
       if(candidate.time != 0)
         {
          candidate.baseBars++;
          // Update low if deeper wick
          if(bar.low < candidate.low)
             candidate.low = bar.low;
-         
+
          // --- Bar sweep detection ---
          // Sweep above: wick above candidate.high, close stays below → liquidity grab.
          // Sweep below: wick below candidate.low, close stays above → support test.
          if(bar.high > candidate.high && bar.close <= candidate.high)
            {
+            candidate.sweepHighCount++;
             if(bar.high > candidate.sweepHigh)
                candidate.sweepHigh = bar.high;
            }
          if(bar.low < candidate.low && bar.close >= candidate.low)
            {
+            candidate.sweepLowCount++;
             if(bar.low < candidate.sweepLow || candidate.sweepLow == 0)
                candidate.sweepLow = bar.low;
            }
-         
+
          // --- Confirmation ---
          // If swept: need close > sweepHigh (broke above the liquidity grab level).
          // If not swept: close > candidate.high as before.
          double breakLevel = (candidate.sweepHigh > 0)
                              ? candidate.sweepHigh
                              : candidate.high;
-         
+
          if(bar.close > breakLevel)
            {
             confirmed = candidate;
@@ -126,6 +130,8 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
                candidate.isDemand = false;
                candidate.sweepHigh = 0;
                candidate.sweepLow  = 0;
+               candidate.sweepHighCount = 0;
+               candidate.sweepLowCount  = 0;
               }
             else
                ZeroMemory(candidate);
@@ -148,37 +154,41 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
             candidate.isDemand = false;
             candidate.sweepHigh = 0;
             candidate.sweepLow  = 0;
+            candidate.sweepHighCount = 0;
+            candidate.sweepLowCount  = 0;
             candidate.baseBars  = 0;
            }
         }
-      
+
       if(candidate.time != 0)
         {
          candidate.baseBars++;
          if(bar.high > candidate.high)
             candidate.high = bar.high;
-         
+
          // --- Bar sweep detection ---
          // Sweep below: wick below candidate.low, close stays above → liquidity grab.
          // Sweep above: wick above candidate.high, close stays below → resistance test.
          if(bar.low < candidate.low && bar.close >= candidate.low)
            {
+            candidate.sweepLowCount++;
             if(bar.low < candidate.sweepLow || candidate.sweepLow == 0)
                candidate.sweepLow = bar.low;
            }
          if(bar.high > candidate.high && bar.close <= candidate.high)
            {
+            candidate.sweepHighCount++;
             if(bar.high > candidate.sweepHigh || candidate.sweepHigh == 0)
                candidate.sweepHigh = bar.high;
            }
-         
+
          // --- Confirmation ---
          // If swept: need close < sweepLow (broke below the liquidity grab level).
          // If not swept: close < candidate.low as before.
          double breakLevel = (candidate.sweepLow > 0)
                              ? candidate.sweepLow
                              : candidate.low;
-         
+
          if(bar.close < breakLevel)
            {
             confirmed = candidate;
@@ -193,6 +203,8 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
                candidate.isDemand = true;
                candidate.sweepHigh = 0;
                candidate.sweepLow  = 0;
+               candidate.sweepHighCount = 0;
+               candidate.sweepLowCount  = 0;
               }
             else
                ZeroMemory(candidate);
@@ -420,10 +432,11 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
          "action", "outcome", "tf", "type", "zone_time",
          "high", "low", "confirm_close", "confirm_level",
          "atr", "width_atr", "disp_body_atr", "disp_range_atr", "base_bars",
-         "swept_low", "swept_high", "validated", "entry_placed", "quality_pass",
+         "swept_low", "swept_high", "sweep_low_count", "sweep_high_count",
+         "validated", "entry_placed", "quality_pass",
          "bars_since", "bars_to_touch", "touched", "touch_depth_pts",
          "max_fav_pts", "max_adv_pts", "fav_after_touch_pts", "trend_at_confirm",
-         "touched_at_validation", "bars_to_validate");
+         "touched_at_validation", "bars_to_validate", "validate_sweep_count");
      }
    else
       FileSeek(handle, 0, SEEK_END);
@@ -444,6 +457,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       IntegerToString(zone.baseBars),
       zone.sweepLow > 0 ? "1" : "0",
       zone.sweepHigh > 0 ? "1" : "0",
+      IntegerToString(zone.sweepLowCount),
+      IntegerToString(zone.sweepHighCount),
       zone.validated ? "1" : "0",
       zone.entryPlaced ? "1" : "0",
       zone.qualityPass ? "1" : "0",
@@ -456,7 +471,8 @@ void ZoneCsvWrite(string action, const SnDZone &zone, string outcome)
       DoubleToString(zone.favAfterTouchPts, 1),
       zone.trendAtConfirm == TREND_UP ? "UP" : "DOWN",
       zone.touchedAtValidation ? "1" : "0",
-      IntegerToString(zone.barsToValidate));
+      IntegerToString(zone.barsToValidate),
+      IntegerToString(zone.validateSweepCount));
 
    FileClose(handle);
   }
@@ -478,6 +494,7 @@ void TrackZone(SnDZone &zone, bool htf)
    zone.favAfterTouchPts  = 0.0;
    zone.touchedAtValidation = false;
    zone.barsToValidate      = 0;   // not yet known — filled in by MarkLtfValidationContext
+   zone.validateSweepCount  = 0;   // not yet known — filled in by MarkLtfValidationContext
 
    int sz = ArraySize(g_zoneTracker);
    ArrayResize(g_zoneTracker, sz + 1);
@@ -610,10 +627,12 @@ void MarkZoneValidated(bool htf, bool isDemand, datetime zoneTime)
 // field — silently stop working the moment quality logging was switched
 // off. The caller (UpdateLTF) now tracks g_ltfPendingTouched independently
 // for exactly this reason, and the same value feeds the OnInit historical
-// replay, which never runs TrackZone at all. barsToValidate has no bearing
-// on the supersede-marking below (CSV-diagnostic only), but is threaded the
-// same way for consistency, sourced from the caller's own g_ltfPendingBars.
-void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation, int barsToValidate)
+// replay, which never runs TrackZone at all. barsToValidate/
+// validateSweepCount have no bearing on the supersede-marking below
+// (CSV-diagnostic only), but are threaded the same way for consistency,
+// sourced from the caller's own g_ltfPendingBars/g_ltfPendingSweepCount.
+void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation,
+                              int barsToValidate, int validateSweepCount)
   {
    // CSV-diagnostic fields — safe no-op when this zone isn't being tracked
    // (InpZoneQualityLog=false, or the OnInit replay). The loop below is core
@@ -623,6 +642,7 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
      {
       g_zoneTracker[i].touchedAtValidation = touchedAtValidation;
       g_zoneTracker[i].barsToValidate      = barsToValidate;
+      g_zoneTracker[i].validateSweepCount  = validateSweepCount;
      }
 
    // A same-direction watch-list entry already touched by now is stale the

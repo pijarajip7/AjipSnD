@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "3.5-barstovalidate"
+#define EA_BUILD "3.6-sweepcounts"
 
 #include <Trade\Trade.mqh>
 

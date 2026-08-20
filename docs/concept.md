@@ -254,17 +254,26 @@ kualitas — `InpZoneQualityLog` (default true).
 - **CONFIRM row**: atribut kualitas saat zona terbentuk — displacement
   (`disp_body_atr`, `disp_range_atr`), lebar zona (`width_atr`), `base_bars`
   (bar yang dibutuhkan CANDIDATE untuk jadi zona CONFIRMED — lihat komentar
-  di `ProcessZoneBar`/`SnDZone.baseBars`, floor 2 bar), sweep flag, trend
-  saat konfirmasi. `bars_to_validate` masih `0` di baris ini — belum
-  tervalidasi saat CONFIRM ditulis, lihat OUTCOME row.
+  di `ProcessZoneBar`/`SnDZone.baseBars`, floor 2 bar), sweep flag
+  (`swept_low`/`swept_high` — pernah kejadian atau tidak) + **hitungannya**
+  (`sweep_low_count`/`sweep_high_count` — berapa BAR CANDIDATE yang wick-nya
+  nembus `candidate.low`/`candidate.high` tanpa close-nya ikut nembus,
+  sebelum akhirnya CONFIRMED; bisa >1 kalau level itu di-test berkali-kali),
+  trend saat konfirmasi. `bars_to_validate`/`validate_sweep_count` masih `0`
+  di baris ini — belum tervalidasi saat CONFIRM ditulis, lihat OUTCOME row.
 - **OUTCOME row**: nasib zona — `FAILED_OPPOSITE`, `TOUCHED_SUPERSEDED`,
   `REPLACED`, `EXPIRED`, `UNRESOLVED` (masih `trackingActive` saat EA
   shutdown) — plus statistik perilaku sejak konfirmasi (excursion, first
   touch, `fav_after_touch_pts`). Validasi sendiri bukan outcome — itu kolom
   boolean terpisah (`validated`) di baris yang sama. `bars_to_validate`
-  (bar dari CONFIRMED ke VALIDATED, floor 1 bar) baru terisi di sini kalau
-  zona sempat tervalidasi sebelum outcome ditulis — tetap `0` kalau zona
-  gagal (`FAILED_OPPOSITE` dll.) sebelum sempat tervalidasi.
+  (bar dari CONFIRMED ke VALIDATED, floor 1 bar) dan `validate_sweep_count`
+  (sama konsep sweep di atas, tapi terhadap `confirm_level` selama menunggu
+  validasi, bukan terhadap `candidate.low`/`candidate.high` — bar yang
+  wick-nya nembus `confirm_level` favorable TANPA close-nya ikut nembus,
+  berarti percobaan validasi yang gagal tapi zona-nya belum mati) baru
+  terisi di sini kalau zona sempat tervalidasi sebelum outcome ditulis —
+  keduanya tetap `0` kalau zona gagal (`FAILED_OPPOSITE` dll.) sebelum
+  sempat tervalidasi.
 
 Tujuan: kumpulkan data dulu, lalu analisis korelasi atribut → outcome, dan
 jadikan atribut yang terbukti sebagai filter entry.

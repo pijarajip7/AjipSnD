@@ -191,6 +191,21 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
    if(g_ltfAwaitingValidation)
       g_ltfPendingBars++;
 
+   // Failed validation-attempt count: a bar that wicks past confirmLevel in
+   // the favorable direction without CLOSING past it (that close would BE
+   // the validation, so this and "validates this bar" are mutually
+   // exclusive) — the same sweep concept ProcessZoneBar already applies to
+   // candidate.high/low during candidate formation, just against
+   // confirmLevel during this later confirm-to-validate window instead.
+   // Also runs before the validation check so this bar counts either way.
+   if(g_ltfAwaitingValidation)
+     {
+      bool sweptConfirmLevel = g_ltfPendingZone.isDemand
+                               ? (bar.high > g_ltfPendingZone.confirmLevel && bar.close <= g_ltfPendingZone.confirmLevel)
+                               : (bar.low  < g_ltfPendingZone.confirmLevel && bar.close >= g_ltfPendingZone.confirmLevel);
+      if(sweptConfirmLevel) g_ltfPendingSweepCount++;
+     }
+
    // Wick re-entry into the currently-pending zone, tracked independently of
    // g_zoneTracker so MarkLtfValidationContext gets an accurate
    // touchedAtValidation whether or not CSV tracking is on. Runs before the
@@ -212,7 +227,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       if(passed)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
-         MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched, g_ltfPendingBars);
+         MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched, g_ltfPendingBars, g_ltfPendingSweepCount);
          SaveLtfZoneForWatch(g_ltfPendingZone, g_ltfPendingTouched, bar.time);
          g_ltfAwaitingValidation = false;
         }
@@ -274,6 +289,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       g_ltfAwaitingValidation = true;
       g_ltfPendingTouched = false;
       g_ltfPendingBars = 0;
+      g_ltfPendingSweepCount = 0;
      }
 
    // Check every saved zone against this closed bar. Redraw is skipped during

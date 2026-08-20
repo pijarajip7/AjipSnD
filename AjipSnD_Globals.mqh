@@ -24,6 +24,12 @@ struct SnDZone
    double   low;         // zone bottom
    double   sweepHigh;   // highest wick above high that failed to break (0=none)
    double   sweepLow;    // lowest wick below low that failed to break (0=none)
+   // How many separate CANDIDATE bars swept — not just whether one did
+   // (sweepHigh/sweepLow > 0 already answers that): each bar whose wick
+   // crosses candidate.high/low without the close confirming it counts,
+   // even if it doesn't set a new sweepHigh/sweepLow extreme.
+   int      sweepHighCount;  // bars that swept above candidate.high before confirmation
+   int      sweepLowCount;   // bars that swept below candidate.low before confirmation
    double   confirmLevel;// confirming bar's high (demand) / low (supply) — follow-through validation level
    datetime time;        // bar time when zone was confirmed
    bool     isDemand;    // true=demand, false=supply
@@ -64,6 +70,15 @@ struct SnDZone
    // (g_ltfPendingBars), not a time delta — a weekend gap between the
    // confirm and validate bars would otherwise inflate the count.
    int      barsToValidate;      // bars from confirmation to validation (1=fastest)
+   // Same sweep concept as sweepHighCount/sweepLowCount above, but against
+   // confirmLevel during the confirm-to-validate window instead of against
+   // candidate.high/low during candidate formation: a bar that wicks past
+   // confirmLevel in the favorable direction without CLOSING past it (that
+   // close would BE the validation, so this and "validated this bar" are
+   // mutually exclusive for a given bar) — a failed validation attempt that
+   // didn't kill the zone, just like a candidate sweep doesn't kill the
+   // candidate.
+   int      validateSweepCount;  // failed validation-attempt bars before actually validating
    int      barsSinceConfirm; // closed bars since confirmation
    int      barsToTouch;      // bars from confirmation to first touch (0=untouched)
    double   touchDepthPts;    // penetration depth of first touch (points)
@@ -133,6 +148,9 @@ bool           g_ltfPendingTouched = false;
 // SnDZone.barsToValidate at the moment validation passes. See that field's
 // comment for why this is a counter, not a time delta.
 int            g_ltfPendingBars = 0;
+// Failed validation-attempt bars since g_ltfPendingZone started waiting —
+// feeds SnDZone.validateSweepCount. See that field's comment.
+int            g_ltfPendingSweepCount = 0;
 
 // ---- Entry tracking (like AjipIDM) ----
 EntryTracker   g_entries[];
