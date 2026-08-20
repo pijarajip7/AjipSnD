@@ -53,9 +53,9 @@ struct SnDZone
    double   dispBodyAtr;      // confirming bar body / ATR (displacement)
    double   dispRangeAtr;     // confirming bar range / ATR
    bool     trackingActive;   // true while outcome stats are being collected
-   bool     entryPlaced;      // reserved — no writer since the rejection-only
-                               // rewrite; always false. Kept for CSV schema
-                               // stability.
+   bool     entryPlaced;      // reserved — no writer since the limit-order
+                               // entry path was removed; always false. Kept
+                               // for CSV schema stability.
    bool     touched;          // wick re-entered zone range after confirmation
    //--- LTF-only, snapshotted at the exact moment validation passes ---
    // Deliberately NOT derived from touched's final state: that reflects the
@@ -115,6 +115,7 @@ struct EntryTracker
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
    bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
    bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
+   bool     tpMovedToBe;     // invalidation TP->BE already fired (one-shot)
   };
 
 // Fill info handed from an order-placing function to AddEntry() — what the
@@ -196,13 +197,13 @@ datetime       g_lastTradeCloseTime = 0;
 // ---- Zone quality tracker (live-confirmed zones, CSV backtest log) ----
 SnDZone        g_zoneTracker[];
 
-// ---- Rejection-entry mode — the EA's only entry mechanism ----
-// Every LTF zone that validates is saved directly onto the watch list, both
-// directions, no bias gate — see SaveLtfZoneForWatch() in AjipSnD_Core.mqh.
-// A saved zone then waits for ITS OWN retest + rejection (wick back in,
-// closed back out, with real momentum) before anything is traded — no zone
-// is ever traded straight off its own validation. Unproven — written
-// directly to spec, not measured first.
+// ---- Saved-zone watch list — the EA's only entry mechanism ----
+// Every LTF zone that validates clean (no candidate-phase sweep) is saved
+// directly onto the watch list, both directions, no bias gate — see
+// SaveLtfZoneForWatch() in AjipSnD_Core.mqh. Entry is aggressive: the FIRST
+// wick back into a saved zone triggers a market order immediately (tick or
+// bar close), no rejection pattern required — no zone is ever traded
+// straight off its own validation, only off its own first retest touch.
 struct SavedLtfZone
   {
    double   high;
@@ -212,13 +213,13 @@ struct SavedLtfZone
    datetime time;
    bool     isDemand;
    bool     touched;     // live: any wick has re-entered the range, whether or not it resolved
-   bool     used;        // resolved (rejected+traded, structurally broken, or superseded) — stop checking
+   bool     used;        // resolved (traded, structurally broken, or superseded) — stop checking
   };
 SavedLtfZone g_savedLtfZones[];
 
 // ---- Drawing-only shadow of g_savedLtfZones, same size, grown in lockstep,
 // index-aligned. 0 = zone still live. Non-zero = the bar time it stopped
-// being watched (touched+rejected, structurally broken, or superseded) —
+// being watched (traded, structurally broken, or superseded) —
 // DrawSavedLtfZones reads this to give a resolved zone a correct frozen
 // right edge instead of continuing to extend it to "now" forever. Zones are
 // never deleted from the chart once drawn, only frozen. Kept separate from
@@ -232,6 +233,14 @@ datetime g_ltfZoneDrawEnd[];
 // keep extending. Without this, redraw cost would grow with every zone ever
 // confirmed, not just the ones still being watched. ----
 bool     g_ltfZoneDrawFrozen[];
+// Index into g_zoneTracker[] for this saved zone's diagnostic entry, resolved
+// once at SaveLtfZoneForWatch time (backward search — the match is always
+// the most recently confirmed zone of its direction, so it is near the tail).
+// -1 if no tracker entry exists (InpZoneQualityLog was off at confirm time).
+// Lets DrawSavedLtfZones show live diagnostic fields (e.g. favBeforeTouch-
+// WidthRatio) on chart without re-searching the ever-growing tracker array
+// on every redraw.
+int      g_ltfZoneTrackerIdx[];
 
 //==================================================================
 // HELPER FUNCTIONS

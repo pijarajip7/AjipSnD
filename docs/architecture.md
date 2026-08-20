@@ -14,12 +14,12 @@ InpMaxZoneWidthAtr = 0            — Max zone width / ATR to allow entry (0=dis
 InpMinDispBodyAtr  = 0            — Min confirming-bar body / ATR to allow entry (0=disabled)
 ```
 
-### Zone Quality Gate — diagnostic only, does not gate rejection-entry
+### Zone Quality Gate — diagnostic only, does not gate entry
 
 `ComputeZoneMetrics()` runs at every zone confirmation (live + OnInit
 replay), independent of `InpZoneQualityLog`, and sets `zone.qualityPass`.
 Historically this gated which zones were offered for entry, but the
-rejection-entry mechanism does not consult it anywhere:
+entry mechanism does not consult it anywhere:
 `SaveLtfZoneForWatch` and `CheckRejectionRetests` both work directly off
 `g_savedLtfZones[]`, which carries no `qualityPass` field. Today
 `qualityPass` only feeds the panel's `tradeable/total` count and the zone
@@ -46,14 +46,69 @@ no longer describes what a risk-sized trade actually opens.
 
 **Stop Loss & Take Profit**
 ```
-InpAggressiveEntry  = false — Enter on first touch, skip waiting for rejection confirmation
-InpZoneSlBufferAtr  = 1.0   — SL buffer beyond the entry-trigger bar's own extreme, in LTF ATR
-InpRejectionBodyAtr = 0.5   — Min rejection-bar body/ATR in the favourable direction (ignored if aggressive)
+InpZoneSlBufferWidthMult = 1.0 — SL buffer beyond breakLevel, in zone widths (was ATR-based)
 InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
 InpTakeProfitRR     = 4.0   — TP = this many multiples of the actual SL distance (0=no TP)
 InpMaxPositionsPerDir = 1   — Max positions per direction (0=disabled)
 InpMaxRiskOvershoot = 0     — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
+
+Entry is always aggressive (first touch, no rejection pattern) — formerly
+gated behind `InpAggressiveEntry`, now the only mode, so that input and its
+paired `InpRejectionBodyAtr` (the rejection-bar body/ATR threshold) are both
+gone.
+
+**Partial Close, Trailing Stop & Invalidation TP**
+```
+InpPartialCloseEnabled     = true  — Enable partial close at RR target + SL->breakeven
+InpPartialCloseRR          = 2.0   — RR multiple of the original stop distance that triggers it
+InpPartialClosePercent     = 50.0  — Percent of position volume closed at the RR target
+InpBreakEvenOffsetPoints   = 0     — Points beyond entry for the BE price (shared by both BE mechanisms here)
+InpInvalidationTpBeEnabled = true  — Move TP to breakeven when price returns to the entry zone's breakLevel
+InpTrailingStopEnabled     = true  — Enable trailing stop on partial-closed remainders
+InpTrailingStopAtr         = 1.5   — Trailing distance behind price, in LTF ATR
+InpTrailingStepAtr         = 0.1   — Min SL improvement (LTF ATR) before re-modifying the broker
+```
+
+### Invalidation TP→BE (`CheckInvalidationTpToBe`, `ManageOpenPositions`)
+
+`breakLevel` is **derived on the fly**, not stored — no `EntryTracker`
+field, no parameter threaded through `OpenMarketWithStructuralStops`. SL
+was placed at `breakLevel` minus (demand) / plus (supply) a buffer of
+`InpZoneSlBufferWidthMult` zone-widths, and the zone-width itself
+approximates the entry-to-breakLevel distance (entry happens at the zone's
+near edge, `breakLevel` is the far edge). Both directions reduce to the
+same algebra — `SL = B ∓ M(entry∓B)` → `B(1+M) = SL + M·entry` → :
+
+```
+breakLevel = (slPrice + InpZoneSlBufferWidthMult * entryPrice) / (1 + InpZoneSlBufferWidthMult)
+```
+
+Both `slPrice` and `entryPrice` live on the broker position itself
+(`EntryTracker` already carries them for other reasons), so this needs
+nothing a restart can lose — works identically for a freshly-opened or a
+restart-recovered position, no special case. Traded deliberately for
+precision: entry isn't always exactly at the near edge (the bar-close
+fallback trigger path can land a bar's worth inside the zone), so this is
+an approximation, not the zone's literal historical `breakLevel` — accepted
+directly in exchange for eliminating the restart gap an earlier version of
+this feature had (a stored `breakLevel` field that restart-recovered
+positions couldn't repopulate).
+
+Checked every tick, alongside partial-close and trailing:
+
+- If price returns to the derived level before the position resolves any
+  other way, TP moves to breakeven (`InpBreakEvenOffsetPoints` past entry,
+  same offset the partial-close SL→BE uses) — one-shot, gated by
+  `EntryTracker.tpMovedToBe`.
+- **SL is deliberately left untouched.** Since `breakLevel` sits roughly
+  halfway between entry and the actual SL (the SL adds another zone-width
+  buffer beyond it), this makes risk/reward asymmetric from that point on —
+  SL still far, TP now close. Confirmed directly as the wanted tradeoff over
+  also tightening SL or closing the position outright.
+- No-op only if the position has no structural SL at all
+  (`!hasStructuralSl || slPrice<=0`) — otherwise applies unconditionally,
+  restart-recovered or not.
 
 **Risk Management — Final** (permanen, lintas hari)
 ```
@@ -154,16 +209,20 @@ nothing left to interleave against — one stream is enough.
 
 `isReplay=true` (see `UpdateLTF` below) never places a real order —
 `CheckRejectionRetests` still resolves every saved zone's fate (broken,
-rejected, or still open) against the historical bars that follow it, but
+triggered, or still open) against the historical bars that follow it, but
 skips `OpenMarketWithStructuralStops`: by the time OnInit runs, price has
-already moved on from wherever a historical rejection bar closed, so there
-is no legitimate fill left to send. It also skips every CSV/diagnostic
-write (`UpdateZoneTracking`, `TrackZone`+`ZoneCsvWrite`, the excursion/
-drift probes) and per-bar chart redraws, so replaying the same historical
-window on every restart does not keep re-appending rows to the same CSVs —
-and the one draw call at the end means a zone that already resolved during
-replay gets its correct frozen right edge on its first-ever draw, instead
-of a live-extending one that would then need a second call to freeze.
+already moved on from wherever a historical trigger bar closed, so there
+is no legitimate fill left to send. `UpdateZoneTracking` and `TrackZone`
+still run (so `g_zoneTracker[]` — and the chart's runway label — reflect
+real replayed history, not a cold restart), but the CSV write itself
+(`ZoneCsvWrite`, both the CONFIRM row and any OUTCOME row via
+`LogZoneOutcome`'s own `isReplay` flag) and the excursion/drift probes stay
+skipped, so replaying the same historical window on every restart does not
+keep re-appending rows to the same CSVs. Per-bar chart redraws are also
+skipped — the one draw call at the end means a zone that already resolved
+during replay gets its correct frozen right edge on its first-ever draw,
+instead of a live-extending one that would then need a second call to
+freeze.
 
 ---
 
@@ -178,11 +237,11 @@ Per-tick (order matters):
 2. CheckFinalTargetCloseAll (gated by news) → return if hit
 2b. CheckFinalMaxLossCloseAll (never gated) → return if hit
 3. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
-3a. CheckAggressiveTickEntries — no-op unless InpAggressiveEntry; checks
-    tick.bid against every unresolved saved zone and enters immediately on
-    first touch, without waiting for the LTF bar to close (see Zone Drawing
-    / Structural SL/TP sections below for what it shares with the bar-close
-    path). Placed after the close-all checks above so a target/loss hit
+3a. CheckAggressiveTickEntries — checks tick.bid against every unresolved
+    saved zone and enters immediately on first touch, without waiting for
+    the LTF bar to close (see Zone Drawing / Structural SL/TP sections
+    below for what it shares with the bar-close path). Placed after the
+    close-all checks above so a target/loss hit
     this same tick isn't immediately followed by a fresh entry.
 
 LTF update (new closed bar gate):
@@ -202,7 +261,8 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
 *Zone Quality Gate* above).
 
 ```
-1. Quality tracker per-bar stats (if InpZoneQualityLog && !isReplay)
+1. Quality tracker per-bar stats (if InpZoneQualityLog — runs during
+   OnInit replay too, see the replay note above)
 2. Diagnostic probes (excursion reject check, drift baseline/records) — skipped if isReplay
 3. If a zone is awaiting validation: track wick re-entry into its own range
    (g_ltfPendingTouched) — independent of the CSV tracker, so it stays
@@ -211,17 +271,17 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
    - passed → MarkZoneValidated, MarkLtfValidationContext(zone, g_ltfPendingTouched)
      (CSV-diagnostic touchedAtValidation bit, plus superseded-retirement of
      any stale same-direction watch-list entry — see concept.md's
-     Rejection-Entry Mechanism), then
+     Entry Mechanism section), then
      SaveLtfZoneForWatch(zone, g_ltfPendingTouched, bar.time) — appends
      directly to g_savedLtfZones[], both directions, no gate, EXCEPT: if
      g_ltfPendingTouched is true (zone already wicked into during its own
-     confirm-to-validate window), it's saved already used=true AND
-     g_ltfZoneDrawFrozen=true — a record stays in g_savedLtfZones[] (CSV
-     join key etc.) but it never enters active rejection watch and is never
-     drawn on chart at all, since it was never really a watch candidate
-     (see Zone Drawing below). Zone confirmation and clean validation still
-     never earn an order on their own; only a later rejection on retest
-     does.
+     confirm-to-validate window) OR the zone's own candidate phase swept
+     (zone.sweepHigh > 0 || zone.sweepLow > 0), it's saved already used=true
+     AND g_ltfZoneDrawFrozen=true — a record stays in g_savedLtfZones[] (CSV
+     join key etc.) but it never enters the active watch and is never drawn
+     on chart at all, since it was never really a watch candidate (see Zone
+     Drawing below). Zone confirmation and clean validation still never earn
+     an order on their own; only the zone's own first touch does.
 5. ProcessZoneBar(bar) → check if zone confirmed
 6. If zone CONFIRMED:
    a. Opposite formed first → pending zone fails (discarded, no entry)
@@ -229,7 +289,7 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
    c. AddDemandZone / AddSupplyZone (data-only)
    d. Hold for follow-through validation, reset g_ltfPendingTouched
 7. CheckRejectionRetests(bar, isReplay) — resolve every saved zone's fate
-   against this bar; on break/rejection also stamps g_ltfZoneDrawEnd[i] with
+   against this bar; on break/trigger also stamps g_ltfZoneDrawEnd[i] with
    this bar's time (see Zone Drawing below)
 8. DrawSavedLtfZones() — skipped if isReplay (ReplayInitialStructure draws
    once at the end instead)
@@ -249,46 +309,93 @@ with g_savedLtfZones[]) via g_ltfZoneDrawFrozen[]/g_ltfZoneDrawEnd[]:
     redrawn every DrawSavedLtfZones call, right edge extended to
     TimeCurrent()
   - Resolved after being watched (g_ltfZoneDrawFrozen[i] == false,
-    g_ltfZoneDrawEnd[i] != 0 — break, rejection-traded, or superseded):
+    g_ltfZoneDrawEnd[i] != 0 — break, traded, or superseded):
     redrawn ONE more time with the right edge frozen at that stamp, then
     g_ltfZoneDrawFrozen[i] set true and skipped on every later call — its
     rectangle never changes again, so there is nothing left to update.
   - Never watched at all (g_ltfZoneDrawFrozen[i] == true from the moment
-    SaveLtfZoneForWatch created the entry — the pre-touch filter above):
-    never drawn even once. It was never a real watch candidate, so there is
-    nothing on chart to represent.
+    SaveLtfZoneForWatch created the entry — pre-touched, or swept during
+    its own candidate phase: `zone.sweepHigh > 0 || zone.sweepLow > 0`,
+    the two conditions OR'd on one gate): never drawn even once. It was
+    never a real watch candidate, so there is nothing on chart to
+    represent.
 
 Redraw cost tracks the live watch list, not the total number of zones ever
 confirmed over the EA's whole runtime.
 ```
+
+### Runway label (`favW~<ratio>` / `favW <ratio>`)
+
+Alongside the rectangle, an `OBJ_TEXT` object (`<rect name>_ratio`) tracks how
+many zone-widths price has run before coming back to touch the zone — read
+live from that zone's `g_zoneTracker[]` entry.
+
+- **Position**: anchored at `(endTime, (high+low)/2)` with `ANCHOR_RIGHT` —
+  same time coordinate the rectangle's own right edge uses (`TimeCurrent()`
+  while live, the frozen resolve stamp once resolved), so the label sits
+  right-aligned *inside* the rectangle, vertically centered, and tracks the
+  moving edge every redraw exactly like the rectangle does. Font size 8,
+  `OBJPROP_ZORDER` above the rectangle's default.
+- **Color is always `clrWhite`, never the zone's own `clrDodgerBlue`/
+  `clrOrangeRed`** — the rectangle is a *solid* fill (`OBJPROP_FILL=true`),
+  so same-color text drawn on top of it has zero contrast and is invisible
+  regardless of position or z-order. Confirmed from a live screenshot where
+  the very first version (same-color text) never showed at all.
+- `g_ltfZoneTrackerIdx[]` (index-aligned with `g_savedLtfZones[]`) is resolved
+  **once**, in `SaveLtfZoneForWatch`, via a backward search of `g_zoneTracker[]`
+  for the matching `time`+`isDemand` — avoids re-searching an array that only
+  ever grows on every redraw. `-1` only if `InpZoneQualityLog` was off at
+  confirm time, in which case no label is ever drawn for that zone.
+- **OnInit replay is fully tracked too**: `TrackZone` and `UpdateZoneTracking`
+  both run regardless of `isReplay` (only the CSV write itself — the CONFIRM
+  row, and any OUTCOME row via `LogZoneOutcome`'s own `isReplay` param — stays
+  gated to live-only, so replaying the same historical window on every EA
+  restart never re-dumps duplicate rows to disk). A zone seeded by replay
+  therefore has an accurate, real `g_zoneTracker[]` entry from the moment
+  `ReplayInitialStructure` finishes — already-touched history shows its true
+  frozen ratio immediately, not a cold restart at 0.
+- **Before first touch** (`g_zoneTracker[tIdx].touched == false`): the label
+  shows `favW~<ratio>`, computed fresh on every redraw as
+  `maxFavPts / widthPts` — `maxFavPts` is the tracker's running
+  max-favorable-excursion, updated every bar regardless of touch state, so
+  this is a genuine live preview, not a placeholder.
+- **At/after first touch**: the label switches to `favW <ratio>` (no `~`),
+  showing the frozen `favBeforeTouchWidthRatio` field itself — the same value
+  that lands in the CSV. Identical to the live preview at the exact touch bar
+  (both are `maxFavPts / widthPts` at that instant), so the display never
+  jumps — it just stops moving.
+- Drawn/updated inside the same per-zone loop iteration as the rectangle, so it
+  freezes in lockstep: once the zone resolves and `g_ltfZoneDrawFrozen[i]` is
+  set, the label's last redraw is also its final one.
 
 ---
 
 ## Structural SL/TP & Risk Sizing
 
 Every entry is a market order (`OpenMarketWithStructuralStops`) with SL and
-TP attached at the same moment, regardless of which trigger fired it
-(rejection, or first touch under `InpAggressiveEntry`) — this is simply how
-the EA sizes and stops every trade, with no separate sizing mode or toggle
-of its own.
+TP attached at the same moment — this is simply how the EA sizes and stops
+every trade, with no separate sizing mode or toggle of its own.
 
-**SL** anchor depends on which mode triggered the entry:
+**SL** anchors to `breakLevel` — the same sweep-aware level
+`CheckRejectionRetests` already uses to decide BROKEN — ±
+`InpZoneSlBufferWidthMult` zone-widths (`zHigh - zLow` of the zone that
+triggered, default multiplier 1.0). This is a deliberate choice, not a
+fallback: the touch that triggers entry is normally a live tick now
+(`CheckAggressiveTickEntries`), not even a finished bar, so there is no bar
+wick to anchor to in the common case — and even in the bar-close fallback
+path the touching bar can close anywhere, including deep inside the zone.
+`breakLevel` is the point at which the zone's own thesis is actually
+invalidated, not just wherever price happened to be at the trigger moment —
+independent of what triggered entry, and stable regardless. The buffer
+itself was ATR-based (`InpZoneSlBufferAtr`); changed to scale with the
+zone's own width instead, so a wider zone gets proportionally more room —
+at the default 1.0 multiplier, total SL distance from a touch near the
+zone's near edge works out to roughly 2x the zone's own width (1x crossing
+the zone, 1x the buffer beyond `breakLevel`).
 
-- **Rejection** (default): the rejection bar's own extreme (`bar.low` for
-  demand, `bar.high` for supply — not the zone's static boundary) ±
-  `InpZoneSlBufferAtr` x LTF ATR. The wick that just got rejected is the
-  actual proof the level held, and can sit shallower or deeper than the
-  zone's own `zLow`/`zHigh` (`wickedIn` only requires the wick to enter the
-  zone's range, not stop exactly at its edge).
-- **Aggressive** (`InpAggressiveEntry=true`): the touch that triggers entry
-  is normally a live tick now (`CheckAggressiveTickEntries`), not even a
-  finished bar — there is no bar wick to anchor to at all in the common
-  case, and even in the bar-close fallback path the touching bar can close
-  anywhere, including deep inside the zone. Either way SL anchors to
-  `breakLevel` instead — the same sweep-aware level `CheckRejectionRetests`
-  already uses to decide BROKEN — ± `InpZoneSlBufferAtr` x LTF ATR. That is
-  the point at which the zone's own thesis is actually invalidated, not
-  just wherever price happened to be at the trigger moment.
+Formerly a mode-dependent choice (the rejection bar's own extreme when
+waiting for a confirmed rejection, `breakLevel` only when aggressive); made
+aggressive-only directly, so `breakLevel` is now the only anchor.
 
 An earlier build had an HTF-zone-edge anchor as a toggle; this build has no
 HTF reference left to anchor to at all.
@@ -354,8 +461,8 @@ CSV schema for column-count stability rather than being dropped.
 EA's old LIMIT-at-zone-edge entry (`ExcursionArm`, called from the
 now-removed `PlaceEntryForZone`/`CheckPendingOrders`) against STOP/REJECT
 inversions of the same fill. With the entry mechanism itself now built
-directly around a rejection concept (market order after a confirmed
-rejection, not a resting limit), there is no remaining call site that arms
+directly around a market order fired on a saved zone's own first touch (not
+a resting limit), there is no remaining call site that arms
 a record — `InpExcursionLog`, `InpStopEntryProbe` and `InpRejectEntryProbe`
 still exist as inputs and the tracker (`UpdateExcursions`,
 `ExcursionCsvWrite`, etc.) still compiles and runs every tick, but with

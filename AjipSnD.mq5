@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                                      AjipSnD.mq5 |
 //|  Supply & Demand EA — single-timeframe zone-based trading on MT5. |
-//|  Every LTF zone that confirms and validates is saved and watched, |
-//|  both directions, no bias gate. Entry fires only once that zone's |
-//|  own retest is REJECTED (wick back in, closed back out,           |
-//|  real-bodied bar) — a market order with structural SL/TP. Exit    |
-//|  via broker SL/TP or daily/final/session close-all.               |
+//|  Every LTF zone that confirms clean (no candidate-phase sweep)    |
+//|  and validates is saved and watched, both directions, no bias     |
+//|  gate. Entry fires on the FIRST wick back into a saved zone — no  |
+//|  rejection pattern required — checked every tick, as a market     |
+//|  order with structural SL/TP anchored to the zone's own edge.     |
+//|  Exit via broker SL/TP or daily/final/session close-all.          |
 //+------------------------------------------------------------------+
 #property copyright   "AjipSMC"
 #property link        ""
@@ -16,7 +17,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "4.0-aggressivetick"
+#define EA_BUILD "5.3-derivedbreaklevel"
 
 #include <Trade\Trade.mqh>
 
@@ -41,19 +42,17 @@ input long   InpMagicNumber  = 99002;  // Magic number
 input int    InpCooldownMinutes = 15;  // Block new entries this many minutes after ANY trade closes (0=disabled)
 
 input group "Stop Loss & Take Profit"
-// Aggressive: enter the instant a wick first touches a saved zone — no
-// rejection pattern required at all. InpRejectionBodyAtr is ignored while
-// this is on, since there is no rejection bar left to measure the body of.
-// Trades every touch a normal run would still be waiting through, for
-// better or worse — unvalidated, not measured against the default.
-input bool   InpAggressiveEntry   = false; // Enter on first touch, skip waiting for rejection confirmation
-input double InpZoneSlBufferAtr   = 1.0;   // SL buffer beyond the entry bar's own extreme, in LTF ATR
-// How strong the rejection bar's body must be, relative to LTF ATR, in the
-// favourable direction, to count as a real rejection rather than a wick that
-// grazed the zone and drifted back. No prior measurement for this specific
-// threshold exists — starting value, not a validated one. Ignored when
-// InpAggressiveEntry is on.
-input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the favourable direction (ignored if aggressive)
+// Entry is always aggressive: the instant a wick first touches a saved
+// zone, no rejection pattern required — checked every tick (not just LTF
+// bar close), so entry doesn't wait for the current bar to finish. Formerly
+// an opt-in mode alongside a wait-for-rejection alternative; made the only
+// mode directly, not on measured results.
+// SL sits at breakLevel (the zone's own structural edge) minus a buffer of
+// this many zone-widths further out — default 1.0, so total SL distance
+// from a touch near the zone's near edge comes out to roughly 2x the zone's
+// own width (1x crossing the zone itself, 1x the buffer beyond it). Was
+// ATR-based; changed to scale with the zone's own size directly instead.
+input double InpZoneSlBufferWidthMult = 1.0;   // SL buffer beyond breakLevel, in zone widths
 // Risk per trade in account currency; lot is derived from it and the stop
 // distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
 // figure because the broker's minimum lot puts a floor under achievable risk:
@@ -62,9 +61,9 @@ input double InpRejectionBodyAtr   = 0.5;   // Min rejection-bar body/ATR in the
 // anyway. At $15 only 19% are floored and the realised average matches the
 // target.
 input double InpRiskPerTrade      = 50.0;  // Risk per trade ($; 0=disable sizing, no trades)
-// TP as a multiple of the ACTUAL stop distance just computed (rejection
-// bar's own extreme + buffer), not an independent ATR figure — the two used
-// to be sized from unrelated bases, so the realised reward:risk floated
+// TP as a multiple of the ACTUAL stop distance just computed (the zone's
+// own structural edge + buffer), not an independent ATR figure — the two
+// used to be sized from unrelated bases, so the realised reward:risk floated
 // wherever they happened to land instead of being enforced. Default 2.0 is
 // this project's own stated floor (0=no TP).
 input double InpTakeProfitRR      = 4.0;   // TP = this many multiples of the actual SL distance (0=no TP)
@@ -81,7 +80,7 @@ input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=dis
 // which restores the run #4 behaviour for an unbiased measurement pass.
 input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
 
-input group "Partial Close & Trailing Stop"
+input group "Partial Close, Trailing Stop & Invalidation TP"
 // Fires once per position: when floating profit reaches this multiple of the
 // ORIGINAL stop distance (same price-distance RR convention as InpTakeProfitRR,
 // so a value here below InpTakeProfitRR fires before the full TP would), close
@@ -89,10 +88,17 @@ input group "Partial Close & Trailing Stop"
 input bool   InpPartialCloseEnabled   = true;   // Enable partial close at RR target + SL->breakeven
 input double InpPartialCloseRR        = 2.0;    // RR multiple of the original stop distance that triggers it
 input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the RR target
-input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry)
+input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry; shared by partial-close SL->BE and invalidation TP->BE below)
+// Fires once per position: the instant price returns to the ORIGINATING
+// ZONE's own breakLevel (the sweep-aware level that would have marked the
+// zone BROKEN before entry — roughly halfway to the actual SL, which sits a
+// further zone-width buffer beyond it), move TP to breakeven. SL is left
+// untouched — this only caps the upside once the setup looks like it's
+// failing, on the confirmed tradeoff that risk/reward turns asymmetric from
+// that point on rather than also tightening the stop or closing outright.
+input bool   InpInvalidationTpBeEnabled = true; // Move TP to breakeven when price returns to the entry zone's breakLevel
 // Trailing only ever arms AFTER the partial close above has fired on that
-// position — the remainder is the "runner." Distance/step are in LTF ATR,
-// same convention as InpZoneSlBufferAtr.
+// position — the remainder is the "runner." Distance/step are in LTF ATR.
 input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
 input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
 input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
@@ -199,11 +205,10 @@ int OnInit()
    // previous run byte for byte. A version line and the state of the inputs
    // that only exist in newer builds makes a stale binary visible in one
    // glance at the Experts log, before hours of tester time are spent.
-   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f rejectionBodyAtr=%.2f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
+   PrintFormat("AjipSnD build %s | riskCap=%.2f tpRR=%.1f excursion=%s (%d/%d bars) stopProbe=%s rejectProbe=%s driftProbe=%s (p=%.3f) | %s %s",
                EA_BUILD,
                InpMaxRiskOvershoot,
                InpTakeProfitRR,
-               InpRejectionBodyAtr,
                InpExcursionLog ? "ON" : "off",
                InpExcursionBars, InpExcursionArmBars,
                InpStopEntryProbe ? "ON" : "off",
@@ -299,7 +304,7 @@ void OnTick()
    // 1b. Partial close (RR target -> SL to BE) + trailing stop on runners that
    // already partial-closed. Must run before the target/loss close-all checks
    // below so their PnL gates see the just-updated position state.
-   ManagePartialCloseAndTrailing();
+   ManageOpenPositions();
 
    // 2. Final target check (blocked during news blackout)
    if(!InNewsBlackout())

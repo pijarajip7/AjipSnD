@@ -5,7 +5,7 @@
 // CORE — InitStructure, UpdateStructure, OnTick dispatch
 //==================================================================
 
-//---- Save a just-validated LTF zone directly onto the rejection watch list —
+//---- Save a just-validated LTF zone directly onto the saved-zone watch list —
 // no bias gate: every zone that validates, either direction, gets watched.
 // Called once, right at the zone's own validation instant (see UpdateLTF) —
 // unlike the HTF-bias-gated version this replaces, there is no delay to
@@ -18,12 +18,21 @@
 // already touched by validation time hits at 56-58% at 5m/15m vs 75%+ for
 // one that validated clean, so these are saved already `used=true` and
 // `g_ltfZoneDrawFrozen=true` — a record stays in g_savedLtfZones[] (join
-// key for the zone CSV etc.), but it never enters the rejection watch AND
+// key for the zone CSV etc.), but it never enters the watch AND
 // never gets drawn on chart at all: it was never a candidate CheckRejection-
 // Retests would have watched, so there is nothing worth showing on chart
 // either, unlike a zone that WAS watched for a while and later resolved.
+//
+// swept (= zone.sweepHigh > 0 || zone.sweepLow > 0) applies the exact same
+// treatment to a zone whose CANDIDATE phase had a failed break attempt
+// before it ever confirmed — a wick past candidate.high/low that didn't
+// close through. Not measured yet, requested directly: only a clean
+// confirmation (no sweep on the way there) gets drawn and watched.
 void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
   {
+   bool swept = (zone.sweepHigh > 0 || zone.sweepLow > 0);
+   bool skip  = preTouched || swept;
+
    int sz = ArraySize(g_savedLtfZones);
    ArrayResize(g_savedLtfZones, sz + 1);
    g_savedLtfZones[sz].high      = zone.high;
@@ -32,48 +41,67 @@ void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
    g_savedLtfZones[sz].sweepLow  = zone.sweepLow;
    g_savedLtfZones[sz].time      = zone.time;
    g_savedLtfZones[sz].isDemand  = zone.isDemand;
-   g_savedLtfZones[sz].touched   = preTouched;
-   g_savedLtfZones[sz].used      = preTouched;
+   g_savedLtfZones[sz].touched   = skip;
+   g_savedLtfZones[sz].used      = skip;
 
    ArrayResize(g_ltfZoneDrawEnd, sz + 1);
-   g_ltfZoneDrawEnd[sz] = preTouched ? asOf : 0;
+   g_ltfZoneDrawEnd[sz] = skip ? asOf : 0;
    ArrayResize(g_ltfZoneDrawFrozen, sz + 1);
-   g_ltfZoneDrawFrozen[sz] = preTouched;
+   g_ltfZoneDrawFrozen[sz] = skip;
+
+   // Resolve once: this zone's CONFIRM-time entry in g_zoneTracker[], if
+   // InpZoneQualityLog was on. TrackZone always appends there strictly
+   // before this function runs for the same zone, so a backward search hits
+   // it in only a few steps — the match is near the tail, not index 0.
+   int trackerIdx = -1;
+   for(int t = ArraySize(g_zoneTracker) - 1; t >= 0; t--)
+     {
+      if(g_zoneTracker[t].time == zone.time && g_zoneTracker[t].isDemand == zone.isDemand)
+        {
+         trackerIdx = t;
+         break;
+        }
+     }
+   ArrayResize(g_ltfZoneTrackerIdx, sz + 1);
+   g_ltfZoneTrackerIdx[sz] = trackerIdx;
 
    if(InpEnableLog)
      {
-      if(preTouched)
-         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation, marked used (no rejection watch, not drawn)",
+      // trackerIdx == -1 here (with InpZoneQualityLog otherwise true) would
+      // mean the backward search itself is broken — worth a dedicated line
+      // since the runway label silently depends on this resolving, with no
+      // other visible symptom. trackerIdx == -1 while InpZoneQualityLog is
+      // false is normal — TrackZone never runs, so there is nothing to find.
+      if(trackerIdx < 0 && InpZoneQualityLog)
+         PrintFormat("AjipSnD: trackerIdx resolve FAILED — zone %s %s not found in g_zoneTracker (size=%d) — runway label won't show for this zone",
+                     zone.isDemand ? "DEMAND" : "SUPPLY", TimeToString(zone.time), ArraySize(g_zoneTracker));
+
+      if(preTouched && swept)
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation AND swept on confirm, marked used (no watch, not drawn)",
+                     zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
+      else if(preTouched)
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation, marked used (no watch, not drawn)",
+                     zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
+      else if(swept)
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — swept on confirm, marked used (no watch, not drawn)",
                      zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
       else
-         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for watch",
                      zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
      }
   }
 
-//---- Check every saved zone against this closed bar: break, rejection, or
-// (InpAggressiveEntry) the first touch itself ----
-// A saved zone stays watchable through any number of weak/shallow touches —
-// it is NOT one-shot on first contact. It only resolves two ways:
+//---- Check every saved zone against this closed bar: break, or the first
+// touch itself ----
+// A saved zone resolves two ways:
 //   1. Structural break — a body CLOSE beyond the zone's far edge (or its
 //      sweep level, if it had one at confirmation). Price didn't just
 //      retest and fail, it went straight through — the thesis is gone.
-//   2. Entry trigger — normally a REJECTION: wick re-enters the zone's
-//      range AND this bar's own body is large relative to LTF ATR in the
-//      favourable direction AND the close ends back outside the zone. All
-//      three together, not just the close-back-out alone (which
-//      InpRejectEntryProbe already showed is close to the weakest possible
-//      bar of the "wick vs close" definitions this project has tried) — the
-//      body requirement is what separates a genuine rejection from a wick
-//      that grazed the level and drifted back on no momentum. With
-//      InpAggressiveEntry on, the trigger is just the FIRST wick into the
-//      zone, full stop — no body/close-back-out requirement at all.
-// A touch that is neither a break nor a qualifying trigger resolves nothing
-// on its own — the zone is still intact and still worth waiting on — but
-// it is recorded (SavedLtfZone.touched) so MarkLtfValidationContext can
-// retire it later if a fresher same-direction zone validates first. (Moot
-// under InpAggressiveEntry: the first touch always triggers immediately,
-// so a zone is never left "touched but still watching" there.)
+//   2. Entry trigger — the FIRST wick into the zone, full stop. No
+//      body/close-back-out requirement — formerly one of two modes
+//      (alongside waiting for a confirmed rejection bar), now the only one,
+//      so a zone is never left "touched but still watching": the first
+//      touch always triggers immediately.
 //
 // isReplay (OnInit historical replay) still resolves a zone's fate exactly
 // as live does — used=true on a break or a confirmed trigger — but never
@@ -84,11 +112,6 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
   {
    int n = ArraySize(g_savedLtfZones);
    if(n == 0) return;
-
-   double atrLtf = GetAtrValue();
-   if(atrLtf <= 0) return;
-
-   double bodyAtr = MathAbs(bar.close - bar.open) / atrLtf;
 
    for(int i = 0; i < n; i++)
      {
@@ -116,97 +139,61 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
       bool wickedIn = isDemand ? (bar.low <= zHigh) : (bar.high >= zLow);
       if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
 
-      bool firstTouch = !g_savedLtfZones[i].touched;
-
-      // Recorded even if this particular touch doesn't resolve anything —
-      // MarkLtfValidationContext reads this to retire the zone the moment a
-      // fresher same-direction one validates, instead of it lingering
-      // touched but never explicitly resolved.
       g_savedLtfZones[i].touched = true;
+      g_savedLtfZones[i].used    = true;
+      g_ltfZoneDrawEnd[i]        = bar.time;
 
-      bool closedOut  = isDemand ? (bar.close > zHigh) : (bar.close < zLow);
-      bool rightColor = isDemand ? IsBullBar(bar) : IsBearBar(bar);
-      bool rejected   = closedOut && rightColor && (bodyAtr >= InpRejectionBodyAtr);
-      bool triggered  = InpAggressiveEntry ? firstTouch : rejected;
-      if(!triggered) continue;   // touched but no trigger yet — still watching
-
-      g_savedLtfZones[i].used = true;
-      g_ltfZoneDrawEnd[i]     = bar.time;
-
-      int    dir    = isDemand ? 1 : -1;
-      double buffer = InpZoneSlBufferAtr * atrLtf;
-      double slPrice;
-      if(InpAggressiveEntry)
-        {
-         // No rejection bar to anchor to — the touching bar can close
-         // anywhere, including deep inside the zone, so its own wick is not
-         // a reliable stop reference here. Anchored to the zone's own
-         // structural edge instead: breakLevel, the same sweep-aware level
-         // that decides BROKEN above — the point at which this zone's own
-         // thesis is invalidated, not just wherever this one bar happened
-         // to reach.
-         slPrice = isDemand
-                   ? NormalizeDouble(breakLevel - buffer, g_digits)
-                   : NormalizeDouble(breakLevel + buffer, g_digits);
-        }
-      else
-        {
-         // Anchored to the rejection bar's own extreme, not the zone's
-         // static boundary — the wick that just got rejected is the actual
-         // proof of where the level held, and can sit shallower or deeper
-         // than the zone's edge (wickedIn only requires touching the range,
-         // not stopping at zLow/zHigh).
-         slPrice = isDemand
-                   ? NormalizeDouble(bar.low  - buffer, g_digits)
-                   : NormalizeDouble(bar.high + buffer, g_digits);
-        }
+      int    dir       = isDemand ? 1 : -1;
+      double zoneWidth = zHigh - zLow;
+      double buffer    = InpZoneSlBufferWidthMult * zoneWidth;
+      // No rejection bar to anchor to — the touching bar can close anywhere,
+      // including deep inside the zone, so its own wick is not a reliable
+      // stop reference here. Anchored to the zone's own structural edge
+      // instead: breakLevel, the same sweep-aware level that decides BROKEN
+      // above — the point at which this zone's own thesis is invalidated,
+      // not just wherever this one bar happened to reach. Buffer scales with
+      // the zone's own width rather than ATR, so a wider zone gets more room.
+      double slPrice = isDemand
+                       ? NormalizeDouble(breakLevel - buffer, g_digits)
+                       : NormalizeDouble(breakLevel + buffer, g_digits);
 
       if(isReplay)
         {
          if(InpEnableLog)
-            PrintFormat("AjipSnD: %s confirmed (init replay) on %s zone [%.5f, %.5f] bodyAtr=%.2f — resolved, no live order",
-                        InpAggressiveEntry ? "AGGRESSIVE ENTRY" : "REJECTION",
-                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr);
+            PrintFormat("AjipSnD: AGGRESSIVE ENTRY confirmed (init replay) on %s zone [%.5f, %.5f] — resolved, no live order",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh);
          continue;
         }
 
       if(InpEnableLog)
-         PrintFormat("AjipSnD: %s confirmed on %s zone [%.5f, %.5f] bodyAtr=%.2f — entering %s market",
-                     InpAggressiveEntry ? "AGGRESSIVE ENTRY" : "REJECTION",
-                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, bodyAtr, dir == 1 ? "BUY" : "SELL");
+         PrintFormat("AjipSnD: AGGRESSIVE ENTRY confirmed on %s zone [%.5f, %.5f] — entering %s market",
+                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, dir == 1 ? "BUY" : "SELL");
 
       if(!EntryGateBlocked(dir))
          OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time);
      }
   }
 
-//---- Tick-level aggressive entry — reacts to a zone touch the instant it
-// happens, without waiting for the current LTF bar to close.
-// InpAggressiveEntry's trigger (first wick into a saved zone) needs no
-// bar CLOSE to evaluate, unlike structural break or a rejection pattern
-// (both inherently need a finished bar — there is no such thing as a tick
-// "close"), so only the touch trigger moves to tick granularity here.
-// Break detection stays exactly where CheckRejectionRetests already runs
-// it, once per closed bar, for every mode.
+//---- Tick-level entry — reacts to a zone touch the instant it happens,
+// without waiting for the current LTF bar to close.
+// The trigger (first wick into a saved zone) needs no bar CLOSE to
+// evaluate, unlike structural break (which inherently needs a finished bar
+// — there is no such thing as a tick "close"), so only the touch trigger
+// moves to tick granularity here. Break detection stays exactly where
+// CheckRejectionRetests already runs it, once per closed bar.
 //
-// A pure no-op unless InpAggressiveEntry is on — one early return, no
-// array scan, negligible per-tick cost otherwise. Never called during
-// OnInit's historical replay (there are no live ticks to react to there);
-// CheckRejectionRetests' own aggressive branch is what resolves a zone's
-// fate during replay instead. In live operation this function almost
-// always wins the race — many ticks land inside a single LTF bar, so a
-// touch is normally caught here well before that bar ever closes — but
-// the bar-close branch is harmless leftover coverage, not a conflict: both
-// check g_savedLtfZones[i].used first, so whichever fires first is final.
+// Never called during OnInit's historical replay (there are no live ticks
+// to react to there); CheckRejectionRetests' own bar-close trigger check is
+// what resolves a zone's fate during replay instead. In live operation this
+// function almost always wins the race — many ticks land inside a single
+// LTF bar, so a touch is normally caught here well before that bar ever
+// closes — but the bar-close branch is harmless leftover coverage, not a
+// conflict: both check g_savedLtfZones[i].used first, so whichever fires
+// first is final.
 void CheckAggressiveTickEntries()
   {
-   if(!InpAggressiveEntry) return;
-
    int n = ArraySize(g_savedLtfZones);
    if(n == 0) return;
-
-   double atrLtf = GetAtrValue();
-   if(atrLtf <= 0) return;   // no unit for the SL buffer yet — try again next tick
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick)) return;
@@ -233,8 +220,9 @@ void CheckAggressiveTickEntries()
                           ? (g_savedLtfZones[i].sweepLow  > 0 ? g_savedLtfZones[i].sweepLow  : zLow)
                           : (g_savedLtfZones[i].sweepHigh > 0 ? g_savedLtfZones[i].sweepHigh : zHigh);
 
-      int    dir     = isDemand ? 1 : -1;
-      double buffer  = InpZoneSlBufferAtr * atrLtf;
+      int    dir       = isDemand ? 1 : -1;
+      double zoneWidth = zHigh - zLow;
+      double buffer    = InpZoneSlBufferWidthMult * zoneWidth;
       // Same zone-edge anchor as the bar-close aggressive path — see its
       // own comment above for why the trigger point itself isn't used.
       double slPrice = isDemand
@@ -256,7 +244,7 @@ void CheckAggressiveTickEntries()
 // the excursion/drift probes) and per-bar chart redraws, since those either
 // write to disk or are meaningless replayed against bars that already
 // happened — but every core structural/decision step (zone detection,
-// validation, touch tracking, superseded-marking, the rejection watch list)
+// validation, touch tracking, superseded-marking, the saved-zone watch list)
 // still runs exactly as it does live, via the SAME code path, so replay ends
 // in the same state continuous live operation would have reached.
 void UpdateLTF(const MqlRates &bar, bool isReplay = false)
@@ -266,8 +254,12 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
 
    g_ltfLastBarTime = bar.time;
 
-   // Quality tracker per-bar stats (excursions, first touch)
-   if(InpZoneQualityLog && !isReplay)
+   // Quality tracker per-bar stats (excursions, first touch) — runs during
+   // OnInit replay too (pure in-memory struct mutation, no disk write) so a
+   // zone seeded from historical bars gets an accurate maxFavPts/touched
+   // instead of starting cold at EA restart. See TrackZone's own call site
+   // below for why the CSV row itself stays live-only.
+   if(InpZoneQualityLog)
       UpdateZoneTracking(bar, false);
 
    if(!isReplay)
@@ -343,7 +335,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF %s zone validation FAILED — opposite zone formed first",
                         g_ltfPendingZone.isDemand ? "DEMAND" : "SUPPLY");
-         LogZoneOutcome("FAILED_OPPOSITE", false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
+         LogZoneOutcome("FAILED_OPPOSITE", false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time, isReplay);
          g_ltfAwaitingValidation = false;
         }
 
@@ -360,25 +352,32 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       // Add to zone array (data-only — keeps count/logging consistent)
       if(confirmed.isDemand)
         {
-         AddDemandZone(g_ltfDemandZones, confirmed);
+         AddDemandZone(g_ltfDemandZones, confirmed, isReplay);
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF DEMAND zone confirmed! [%.5f, %.5f] at %s",
                         confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
       else
         {
-         AddSupplyZone(g_ltfSupplyZones, confirmed);
+         AddSupplyZone(g_ltfSupplyZones, confirmed, isReplay);
          if(InpEnableLog)
             PrintFormat("AjipSnD: LTF SUPPLY zone confirmed! [%.5f, %.5f] at %s",
                         confirmed.low, confirmed.high, TimeToString(confirmed.time));
         }
 
-      // Quality tracking: metrics + CONFIRM row (tracker copy carries isHtf=false)
-      if(InpZoneQualityLog && !isReplay)
+      // Quality tracking: g_zoneTracker[] entry (tracker copy carries
+      // isHtf=false) is created even during OnInit replay — so a zone
+      // confirmed on a historical bar still gets tracked, feeding both the
+      // eventual OUTCOME row (if it resolves live) and the chart's runway
+      // label. Only the CSV row itself stays live-only: writing it during
+      // replay would re-dump the same historical zone's CONFIRM row to disk
+      // on every EA restart.
+      if(InpZoneQualityLog)
         {
          SnDZone tracked = confirmed;
          TrackZone(tracked, false);
-         ZoneCsvWrite("CONFIRM", tracked, "");
+         if(!isReplay)
+            ZoneCsvWrite("CONFIRM", tracked, "");
         }
 
       // Hold for follow-through validation
@@ -407,11 +406,11 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
 // there is exactly one definition of what a validated LTF zone is — see its
 // own comment for what isReplay skips (CSV/diagnostic writes, per-bar chart
 // redraws) and what it never skips (zone detection, follow-through
-// validation, touch/superseded bookkeeping, the rejection watch list). It
+// validation, touch/superseded bookkeeping, the saved-zone watch list). It
 // never places a real order: CheckRejectionRetests still resolves every
 // saved zone's fate against the historical bars that follow it, but
 // isReplay suppresses the actual market fill, since by the time this runs
-// price has already moved on from wherever a historical rejection closed.
+// price has already moved on from wherever a historical trigger closed.
 void ReplayInitialStructure()
   {
    // start_pos=1 skips the current, still-forming bar — replaying a

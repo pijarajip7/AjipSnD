@@ -217,8 +217,12 @@ bool ProcessZoneBar(const MqlRates &bar, ENUM_TREND &trend,
    return(false);
   }
 
-//---- Manage active zones: insert, enforce max count, deactivate older if better ----
-void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
+//---- Manage active zones: insert, enforce max count, deactivate older if
+// better. isReplay forwards to LogZoneOutcome so eviction during OnInit
+// replay still stops tracking (trackingActive=false) without writing a CSV
+// row for a zone that only ever existed inside the replay window — avoids
+// re-dumping duplicate REPLACED/EXPIRED rows on every EA restart. ----
+void AddDemandZone(SnDZone &zones[], const SnDZone &newZone, bool isReplay = false)
   {
    // Check if new zone invalidates any existing
    for(int i = ArraySize(zones) - 1; i >= 0; i--)
@@ -226,7 +230,7 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
       if(newZone.low < zones[i].low)
         {
          // New zone is LOWER → old zone deactivated
-         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
+         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time, isReplay);
          ArrayRemove(zones, i, 1);
          continue;
         }
@@ -236,51 +240,51 @@ void AddDemandZone(SnDZone &zones[], const SnDZone &newZone)
       // so the old zone is trading yesterday's setup.
       if(zones[i].isHtf && zones[i].touched)
         {
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zones[i].time);
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, true, zones[i].time, isReplay);
          ArrayRemove(zones, i, 1);
         }
      }
-  
+
    // Add new zone
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-  
+
    // Enforce InpMaxZones
    while(ArraySize(zones) > InpMaxZones)
      {
       // Remove oldest (index 0)
-      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
+      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time, isReplay);
       ArrayRemove(zones, 0, 1);
      }
   }
 
-void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone)
+void AddSupplyZone(SnDZone &zones[], const SnDZone &newZone, bool isReplay = false)
   {
    for(int i = ArraySize(zones) - 1; i >= 0; i--)
      {
       if(newZone.high > zones[i].high)
         {
          // New zone is HIGHER → old zone deactivated
-         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time);
+         LogZoneOutcome("REPLACED", zones[i].isHtf, zones[i].isDemand, zones[i].time, isReplay);
          ArrayRemove(zones, i, 1);
          continue;
         }
       // HTF only — see AddDemandZone's matching comment.
       if(zones[i].isHtf && zones[i].touched)
         {
-         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zones[i].time);
+         LogZoneOutcome("TOUCHED_SUPERSEDED", true, false, zones[i].time, isReplay);
          ArrayRemove(zones, i, 1);
         }
      }
-  
+
    int sz = ArraySize(zones);
    ArrayResize(zones, sz + 1);
    zones[sz] = newZone;
-  
+
    while(ArraySize(zones) > InpMaxZones)
      {
-      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time);
+      LogZoneOutcome("EXPIRED", zones[0].isHtf, zones[0].isDemand, zones[0].time, isReplay);
       ArrayRemove(zones, 0, 1);
      }
   }
@@ -355,9 +359,36 @@ void DrawZoneRect(string name, datetime time, datetime endTime, double price1, d
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
   }
 
+//---- Draw a small text label anchored on its RIGHT side at (time, price) —
+// text extends leftward from that point, so anchoring at a zone's right
+// edge keeps the whole label inside the rectangle instead of spilling past
+// it. Used for diagnostic-tracker fields that only become meaningful
+// partway through a zone's watch life (e.g. favBeforeTouchWidthRatio,
+// unknown until first touch). ----
+void DrawZoneLabel(string name, datetime time, double price, string text, color clr)
+  {
+   if(!ObjectCreate(0, name, OBJ_TEXT, 0, time, price))
+     {
+      // Diagnostic only, not spammed per-bar: this path should essentially
+      // never trigger, so a hit here is real signal that the label isn't a
+      // pure rendering/visibility issue but an actual creation failure.
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: label ObjectCreate FAILED for %s at %s / %.5f (err=%d)",
+                     name, TimeToString(time), price, GetLastError());
+      return;
+     }
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 100);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT);
+  }
+
 //---- Draw every saved LTF zone — the only chart objects. Never deleted once
 // drawn: a still-watched zone's right edge keeps extending to "now" every
-// call, and a resolved one (g_ltfZoneDrawEnd[i] != 0 — touched+rejected,
+// call, and a resolved one (g_ltfZoneDrawEnd[i] != 0 — traded,
 // structurally broken, or superseded) freezes at the bar it resolved on,
 // instead of vanishing or continuing to extend.
 //
@@ -385,6 +416,37 @@ void DrawSavedLtfZones()
       ObjectDelete(0, name);   // no-op if this zone hasn't been drawn yet
       DrawZoneRect(name, g_savedLtfZones[i].time, endTime,
                    g_savedLtfZones[i].high, g_savedLtfZones[i].low, clr);
+
+      // Before first touch there is no favBeforeTouchWidthRatio yet (that
+      // field only gets set AT touch) — but the running maxFavPts it will be
+      // built from is already live, updated every bar regardless of touch
+      // state. Show that as a "~"-prefixed preview, recomputed fresh every
+      // redraw, so the number is visible while it is still moving. Once
+      // touched, switch to the frozen, officially-recorded value (the same
+      // one that lands in the CSV) — the two are identical at the exact
+      // touch bar, so the switch never jumps, only stops moving.
+      string lblName = name + "_ratio";
+      ObjectDelete(0, lblName);
+      int tIdx = g_ltfZoneTrackerIdx[i];
+      if(tIdx >= 0 && tIdx < ArraySize(g_zoneTracker))
+        {
+         string txt;
+         if(g_zoneTracker[tIdx].touched)
+            txt = StringFormat("favW %.2f", g_zoneTracker[tIdx].favBeforeTouchWidthRatio);
+         else
+           {
+            double widthPts  = (g_savedLtfZones[i].high - g_savedLtfZones[i].low) / g_point;
+            double liveRatio = (widthPts > 0) ? (g_zoneTracker[tIdx].maxFavPts / widthPts) : 0.0;
+            txt = StringFormat("favW~%.2f", liveRatio);
+           }
+         // clrWhite, not the zone's own clr: the rectangle is a SOLID fill
+         // in that same color (OBJPROP_FILL=true), so same-color text on
+         // top of it has zero contrast and is invisible regardless of
+         // z-order or position — confirmed from a live screenshot where
+         // the rectangles render as fully opaque blocks.
+         double midPrice = (g_savedLtfZones[i].high + g_savedLtfZones[i].low) / 2.0;
+         DrawZoneLabel(lblName, endTime, midPrice, txt, clrWhite);
+        }
 
       if(resolved)
          g_ltfZoneDrawFrozen[i] = true;   // final form — never touched again
@@ -604,12 +666,16 @@ int FindTrackedZone(bool htf, bool isDemand, datetime zoneTime)
   }
 
 //---- Log outcome + stop tracking ----
-void LogZoneOutcome(string outcome, bool htf, bool isDemand, datetime zoneTime)
+// isReplay: skip the CSV write (a zone evicted purely inside the OnInit
+// replay window would otherwise re-dump a duplicate OUTCOME row on every EA
+// restart) but still stop tracking it — same as live, just silent on disk.
+void LogZoneOutcome(string outcome, bool htf, bool isDemand, datetime zoneTime, bool isReplay = false)
   {
    int i = FindTrackedZone(htf, isDemand, zoneTime);
    if(i < 0) return;
 
-   ZoneCsvWrite("OUTCOME", g_zoneTracker[i], outcome);
+   if(!isReplay)
+      ZoneCsvWrite("OUTCOME", g_zoneTracker[i], outcome);
    g_zoneTracker[i].trackingActive = false;
   }
 
@@ -669,7 +735,7 @@ void MarkLtfValidationContext(const SnDZone &confirmed, bool touchedAtValidation
    // A same-direction watch-list entry already touched by now is stale the
    // moment this fresher zone validates — the earliest possible trigger
    // point (any LTF zone validating), so it is retired here rather than
-   // lingering until its own break/rejection eventually resolves it.
+   // lingering until its own break/touch eventually resolves it.
    for(int j = 0; j < ArraySize(g_savedLtfZones); j++)
      {
       if(g_savedLtfZones[j].used) continue;

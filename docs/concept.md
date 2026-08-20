@@ -9,7 +9,7 @@ berbeda dari AjipSMC dan AjipIDM.
 | Detection | 2-stage pullback + simple structure | Raw candle (bear/bull) + body-break confirm |
 | Zones | idm zone (single level) | Supply/Demand zone (high-low range) |
 | Timeframe | Single | Single — satu timeframe deteksi zona, tanpa bias timeframe lain |
-| Entry trigger | idm touch + no body break | Zona di-retest, wick masuk lalu REJECTED |
+| Entry trigger | idm touch + no body break | Zona di-retest, WICK PERTAMA yang masuk langsung entry |
 | Order type | — | Market order (bukan pending limit) |
 | Lot | Fixed lot | Risk-based — diturunkan dari `InpRiskPerTrade` / jarak SL |
 | SL/TP | Tidak ada di entry | Structural — SL di swing zone, TP = RR x jarak SL |
@@ -74,7 +74,7 @@ Scan bar-by-bar:
 
 `g_ltfDemandZones[]`/`g_ltfSupplyZones[]` — array structural zone mentah (buat
 panel count + zone-quality CSV), TERPISAH dari `g_savedLtfZones[]` (watch-list
-rejection-entry, lihat [Rejection-Entry Mechanism](#rejection-entry-mechanism)).
+entry, lihat [Entry Mechanism](#entry-mechanism)).
 Array ini tidak punya body-close-break invalidation sendiri — cuma dua aturan:
 
 ```
@@ -115,7 +115,7 @@ supaya tetap akurat walau logging mati atau saat replay OnInit.
 
 ---
 
-## Rejection-Entry Mechanism
+## Entry Mechanism
 
 Ini satu-satunya cara EA membuka posisi. Tidak ada bias timeframe lain, tidak
 ada filter arah dari luar — zona itu sendiri, begitu VALIDATED, langsung jadi
@@ -135,7 +135,7 @@ selesai (`g_ltfPendingTouched` — wick masuk ke range zona di antara bar
 konfirmasi dan bar validasi). Zona begini tetap disimpan di
 `g_savedLtfZones[]` (buat jejak/join-key CSV) TAPI langsung `used=true` —
 tidak pernah masuk watch-list aktif, tidak pernah dapat kesempatan
-rejection-entry, DAN tidak pernah digambar di chart sama sekali
+entry, DAN tidak pernah digambar di chart sama sekali
 (`g_ltfZoneDrawFrozen=true` sejak awal) — zona ini tidak pernah jadi
 kandidat yang benar-benar diawasi, jadi tidak ada apapun yang perlu
 ditampilkan, beda dengan zona yang SEMPAT diawasi lalu resolve (lihat
@@ -145,39 +145,44 @@ rate-nya 56-58% di horizon 5m/15m, vs 75%+ untuk zona yang validasi bersih
 (belum pernah tersentuh) — lihat RESULT block di `MarkLtfValidationContext`
 (`AjipSnD_Zone.mqh`) untuk detail pengukurannya.
 
-### 2. Tunggu retest → REJECTED (atau, agresif, wick pertama), baru entry
+**Gerbang yang sama juga berlaku untuk zona yang sweep saat konfirmasi** —
+`zone.sweepHigh > 0 || zone.sweepLow > 0`, artinya candidate-nya sempat
+kena percobaan break yang gagal (wick lewat `candidate.high`/`.low` tapi
+close tidak menembusnya) sebelum akhirnya benar-benar terkonfirmasi.
+Diperlakukan identik dengan pre-touch: `used=true` sejak lahir, tidak
+pernah masuk watch-list, tidak pernah digambar. Dua kondisi ini (pre-touch
+dan swept) di-OR di satu gerbang yang sama (`SaveLtfZoneForWatch`), jadi
+kalau salah satu saja terjadi, zona langsung didiskualifikasi — belum
+diukur dulu, langsung diterapkan atas permintaan.
+
+### 2. Retest → WICK PERTAMA yang masuk, langsung entry
 
 Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
-(`CheckRejectionRetests`):
+(`CheckRejectionRetests`), dan tiap tick juga dicek (`CheckAggressiveTickEntries`,
+lihat di bawah):
 
 1. **Structural break** — body CLOSE tembus far edge (atau sweep level kalau
    ada) → zona invalid, `used=true`, tidak ada entry. Ini SELALU nunggu bar
-   closed — tidak ada konsep "close" di level tick, jadi break tidak bisa
-   dipercepat di mode manapun.
-2. **Trigger entry** — default-nya **Rejection**: SEMUA tiga syarat: wick
-   masuk ke range zona, body bar/ATR >= `InpRejectionBodyAtr` searah
-   favorable, DAN close berakhir di luar zona lagi → `used=true`,
-   **market order** (`OpenMarketWithStructuralStops`). Dengan
-   `InpAggressiveEntry=true`, trigger-nya jadi WICK PERTAMA yang masuk ke
-   zona, titik — tidak ada syarat body/close-back-out sama sekali. Belum
-   divalidasi/diukur, murni sesuai spek.
-3. Sentuhan yang bukan break maupun trigger valid → zona tetap aktif, cuma
-   dicatat `touched=true`, terus ditunggu. **Bukan one-shot** — zona bisa
-   disentuh berkali-kali sebelum akhirnya break atau trigger (kecuali mode
-   agresif: begitu wick pertama masuk, langsung trigger, jadi zona di mode
-   ini praktis selalu one-shot).
+   closed — tidak ada konsep "close" di level tick.
+2. **Trigger entry** — WICK PERTAMA yang masuk ke range zona, titik. Tidak
+   ada syarat body bar, tidak ada syarat close-back-out sama sekali →
+   `used=true`, **market order** (`OpenMarketWithStructuralStops`) langsung.
+   Zona jadi praktis selalu one-shot: begitu wick pertama masuk (dan bukan
+   break), langsung trigger — tidak pernah ada state "touched tapi masih
+   nunggu". Formerly opsional (`InpAggressiveEntry`) berdampingan dengan
+   mode nunggu rejection bar (body/ATR minimum + close-back-out searah);
+   dijadikan satu-satunya mode langsung atas permintaan, bukan hasil
+   pengukuran.
 
-**Mode agresif jalan di level TICK, bukan cuma bar close** — `CheckAggressiveTickEntries`
+**Jalan di level TICK, bukan cuma bar close** — `CheckAggressiveTickEntries`
 (dipanggil tiap `OnTick`, bukan cuma pas bar LTF baru closed) cek `tick.bid`
 terhadap tiap zona yang belum `used`, dan begitu wick pertama tersentuh
 (walau bar-nya sendiri belum selesai), langsung trigger — tidak nunggu bar
-itu closed dulu seperti yang `CheckRejectionRetests` lakukan. Fungsi ini
-otomatis skip (early return, biaya nyaris nol) kalau `InpAggressiveEntry=false`.
-`CheckRejectionRetests` sendiri MASIH punya cabang agresif-nya sendiri di
-level bar close (untuk replay OnInit, yang tidak punya tick live untuk
-direaksi) — di operasi live keduanya aman berdampingan karena sama-sama cek
-`used` duluan, jadi siapa yang trigger lebih dulu itu yang menang, tidak
-ada risiko entry dobel.
+itu closed dulu. `CheckRejectionRetests` sendiri MASIH punya cabang
+bar-close-nya sendiri untuk hal yang sama — dipakai untuk replay OnInit
+(tidak ada tick live untuk direaksi di sana), dan sebagai fallback redundant
+yang aman di operasi live: keduanya cek `used` duluan, jadi siapa yang
+trigger lebih dulu itu yang menang, tidak ada risiko entry dobel.
 
 Order pakai market (bukan limit) karena begitu bar/tick trigger sudah
 terjadi, harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
@@ -196,7 +201,7 @@ disupersede — cuma yang sudah `touched` dan belum resolve.
 
 `g_ltfZoneDrawEnd[]` (index-aligned dengan `g_savedLtfZones[]`) mencatat kapan
 tiap zona berhenti diawasi — `0` selama masih live. Begitu `used=true`
-(break, rejection-traded, atau superseded di atas), entry ini di-stamp dengan
+(break, traded, atau superseded di atas), entry ini di-stamp dengan
 waktu bar yang menyelesaikannya. `DrawSavedLtfZones` pakai stamp ini: zona
 yang masih live terus digambar ulang tiap bar dengan ujung kanan mengikuti
 "sekarang," zona yang sudah resolve digambar SEKALI LAGI dengan ujung kanan
@@ -213,6 +218,40 @@ walau sekali. Berbeda dari zona yang sempat diawasi dulu baru resolve: zona
 pre-touch tidak pernah benar-benar jadi kandidat watch, jadi tidak ada
 apapun yang perlu direpresentasikan di chart.
 
+**Label runway (`favW~<rasio>` / `favW <rasio>`):** posisinya **di dalam**
+rectangle, rata kanan dan center vertikal — anchor-nya `(endTime,
+(high+low)/2)` dengan `ANCHOR_RIGHT`, persis koordinat waktu yang dipakai
+sisi kanan rectangle-nya sendiri (`TimeCurrent()` selama live, stempel beku
+begitu resolve), jadi label ikut mengikuti sisi kanan yang bergerak tiap
+redraw sama seperti rectangle-nya. Warnanya selalu **putih**, bukan warna
+zona sendiri (biru/oranye) — rectangle-nya solid fill, jadi teks warna sama
+dengan fill-nya kontrasnya nol, tidak kelihatan sama sekali walau posisi
+dan z-order sudah benar (ini akar masalah versi sebelumnya, dikonfirmasi
+dari screenshot chart langsung). Dibaca lewat `g_ltfZoneTrackerIdx[]`
+(index-aligned dengan `g_savedLtfZones[]`, di-resolve sekali di
+`SaveLtfZoneForWatch` lewat pencarian mundur, bukan re-search tiap redraw).
+`-1` (label tidak pernah muncul) cuma kalau `InpZoneQualityLog` mati saat
+konfirmasi.
+
+- **Zona hasil replay OnInit ikut ter-track penuh**: `TrackZone` dan
+  `UpdateZoneTracking` sama-sama jalan tanpa peduli `isReplay` — cuma
+  penulisan CSV-nya sendiri (baris CONFIRM, dan baris OUTCOME lewat
+  parameter `isReplay` di `LogZoneOutcome`) yang tetap live-only, supaya
+  replay window yang sama tidak nge-dump baris duplikat ke disk tiap EA
+  restart. Begitu `ReplayInitialStructure` selesai, zona hasil replay sudah
+  punya entry tracker yang akurat — yang sudah tersentuh di histori langsung
+  tampil rasio beku yang benar, bukan mulai dari 0 gara-gara restart.
+- **Sebelum tersentuh** (`touched=false` di tracker): label tampil
+  `favW~<rasio>` — dihitung ulang tiap redraw dari `maxFavPts / widthPts`.
+  `maxFavPts` sendiri sudah live sejak awal (update tiap bar, tidak
+  digerbang `touched`), jadi ini pratinjau sungguhan, bukan placeholder.
+- **Begitu tersentuh**: label pindah ke `favW <rasio>` (tanpa `~`) — nilai
+  `favBeforeTouchWidthRatio` yang sudah beku, persis yang masuk CSV. Sama
+  persis dengan pratinjau live di bar touch itu sendiri (dua-duanya
+  `maxFavPts / widthPts` di momen yang sama), jadi tampilannya tidak pernah
+  lompat, cuma berhenti bergerak.
+- Ikut beku bareng rectangle-nya begitu zona resolve.
+
 ---
 
 ## Single-Timeframe Architecture
@@ -224,7 +263,7 @@ LTF (InpTimeframe, e.g., M5) — satu-satunya timeframe deteksi zona:
   └─ VALIDATED → SaveLtfZoneForWatch: langsung masuk g_savedLtfZones[], dua arah, tanpa gerbang
   └─ Zone management (g_ltfDemandZones/g_ltfSupplyZones, terpisah dari watch-list):
        max InpMaxZones, lower demand / higher supply invalidates older
-  └─ Tiap bar closed: CheckRejectionRetests terhadap semua saved zone (break/reject/masih-nunggu)
+  └─ Tiap bar closed (+ tiap tick): CheckRejectionRetests / CheckAggressiveTickEntries terhadap semua saved zone (break/trigger/belum tersentuh)
   └─ DrawSavedLtfZones — satu-satunya objek chart, tidak pernah dihapus, dibekukan saat resolve
 ```
 
@@ -251,27 +290,75 @@ satu close-all di atas.
 
 ## Structural SL/TP, Risk-Based Lot
 
-- SL beda anchor per mode entry:
-  - **Rejection** (default): titik ekstrem bar rejection itu sendiri
-    (`bar.low` untuk demand, `bar.high` untuk supply — bukan batas statis
-    zona) ± `InpZoneSlBufferAtr` x LTF ATR. Wick yang barusan di-reject itu
-    bukti nyata di mana level bertahan, bisa lebih dangkal atau lebih
-    dalam dari `zLow`/`zHigh` zona (`wickedIn` cuma butuh wick masuk ke
-    range, tidak harus berhenti tepat di edge).
-  - **Aggressive** (`InpAggressiveEntry=true`): bar yang trigger entry (wick
-    pertama) bisa closed DI MANA SAJA, termasuk di dalam zona — wick-nya
-    sendiri bukan referensi stop yang bisa diandalkan (bisa terlalu dekat
-    ke harga entry, bahkan lebih dekat dari lebar zona-nya sendiri). Jadi
-    SL di-anchor ke `breakLevel` — level sweep-aware yang sama yang
-    menentukan zona BROKEN — ± `InpZoneSlBufferAtr` x LTF ATR. Ini titik di
-    mana thesis zona itu sendiri sudah pasti gagal, bukan sekadar titik
-    yang kebetulan tercapai bar itu.
+- SL selalu anchor ke `breakLevel` — level sweep-aware yang sama yang
+  menentukan zona BROKEN — ± `InpZoneSlBufferWidthMult` x lebar zona
+  (`zHigh - zLow` zona yang trigger, default multiplier 1.0 → total jarak SL
+  dari titik sentuh dekat sisi-dekat zona jadi kira-kira 2x lebar zona
+  sendiri: 1x menyeberangi zona, 1x buffer di luar `breakLevel`). Ini
+  pilihan sengaja, bukan fallback: bar/tick yang trigger entry (wick
+  pertama) bisa closed DI MANA SAJA, termasuk di dalam zona — wick-nya
+  sendiri bukan referensi stop yang bisa diandalkan (bisa terlalu dekat ke
+  harga entry, bahkan lebih dekat dari lebar zona-nya sendiri; trigger-nya
+  malah sering murni tick, bukan bar closed sama sekali). `breakLevel`
+  adalah titik di mana thesis zona itu sendiri sudah pasti gagal, bukan
+  sekadar titik yang kebetulan tercapai saat itu — stabil terlepas dari apa
+  yang men-trigger entry-nya. Buffer-nya sendiri tadinya berbasis ATR
+  (`InpZoneSlBufferAtr`); diganti supaya skalanya ikut lebar zona sendiri,
+  bukan volatilitas pasar. Formerly beda anchor per mode entry (bar rejection sendiri kalau
+  nunggu rejection, `breakLevel` cuma kalau agresif); dijadikan agresif
+  satu-satunya mode langsung, jadi `breakLevel` sekarang satu-satunya anchor.
 - TP = `InpTakeProfitRR` x jarak SL aktual dari harga fill (0 = tanpa TP)
 - Lot dihitung `LotForRisk()`: `InpRiskPerTrade` / (jarak SL x nilai per
   poin), dibulatkan KE BAWAH ke volume step broker
 - `InpMaxRiskOvershoot` membatasi seberapa jauh risiko boleh melebihi
   budget kalau lot minimum broker sudah lebih besar dari yang seharusnya
   (0 = terima overshoot berapapun)
+
+---
+
+## Invalidation TP→BE
+
+`breakLevel` di sini **dihitung ulang tiap kali**, bukan disimpan — tidak
+ada field `EntryTracker`, tidak ada parameter yang diteruskan lewat
+`OpenMarketWithStructuralStops`. SL ditempatkan di `breakLevel` dikurang
+(demand) / ditambah (supply) buffer sebesar `InpZoneSlBufferWidthMult` x
+lebar zona, dan lebar zona itu sendiri kira-kira sama dengan jarak
+entry-ke-breakLevel (entry terjadi di sisi-dekat zona, breakLevel di
+sisi-jauh). Kedua arah reduce ke aljabar yang sama — `SL = B ∓ M(entry∓B)`
+→ `B(1+M) = SL + M·entry` → :
+
+```
+breakLevel = (slPrice + InpZoneSlBufferWidthMult * entryPrice) / (1 + InpZoneSlBufferWidthMult)
+```
+
+`slPrice` dan `entryPrice` dua-duanya sudah ada di posisi broker sendiri
+(`EntryTracker` sudah nyimpen keduanya buat keperluan lain) — jadi tidak
+butuh apapun yang bisa hilang gara-gara restart. Berlaku identik buat
+posisi yang baru dibuka maupun hasil restart, tanpa kasus khusus. Ini
+pendekatan aproksimasi (bukan `breakLevel` historis zona yang literal —
+entry tidak selalu persis di sisi-dekat, jalur fallback bar-close bisa
+mendarat sejauh satu bar di dalam zona), diterima sengaja demi menghilangkan
+celah restart yang ada di versi fitur sebelumnya (field `breakLevel`
+tersimpan yang tidak bisa diisi ulang oleh posisi hasil restart).
+
+Dicek tiap tick lewat `CheckInvalidationTpToBe` (dipanggil dari
+`ManageOpenPositions`, sejajar dengan partial-close dan trailing):
+
+- Kalau harga balik ke level hasil hitungan itu sebelum posisi resolve
+  dengan cara lain, TP dipindah ke breakeven (`InpBreakEvenOffsetPoints`
+  dari entry — offset yang sama dipakai partial-close SL→BE) — sekali
+  tembak, dikunci `tpMovedToBe`.
+- **SL sengaja TIDAK diubah.** Karena `breakLevel` posisinya kira-kira di
+  tengah jalan antara entry dan SL asli (SL nambah lagi 1x lebar zona di
+  luar `breakLevel`), risk/reward jadi asimetris sejak titik itu — SL masih
+  jauh, TP sudah dekat. Dikonfirmasi langsung sebagai tradeoff yang memang
+  diinginkan, dibanding ikut mengetatkan SL atau langsung tutup posisi.
+- Tidak berlaku cuma kalau posisi itu tidak punya SL struktural sama sekali
+  (`!hasStructuralSl || slPrice<=0`) — selain itu berlaku tanpa syarat,
+  baik posisi baru maupun hasil restart.
+
+`InpInvalidationTpBeEnabled` (default true) mengontrol fitur ini secara
+independen dari partial-close/trailing.
 
 ---
 
@@ -329,11 +416,16 @@ zona:
 3. Replay bar-per-bar lewat UpdateLTF yang SAMA dipakai live (isReplay=true)
 4. Setiap validasi zona selama replay tetap men-trigger SaveLtfZoneForWatch
    — EA keluar dari OnInit dengan watch-list nyata, bukan kosong
-5. CheckRejectionRetests tetap resolve nasib tiap saved zone (break/reject)
+5. CheckRejectionRetests tetap resolve nasib tiap saved zone (break/trigger)
    terhadap bar historis, TAPI tidak pernah kirim order — harga sudah
    bergerak jauh dari momen historis itu, tidak ada fill yang valid
-6. CSV/diagnostic write (zone quality tracker, excursion, drift) di-skip
-   selama replay — supaya CSV tidak dibanjiri data replay tiap kali restart
+6. Zone quality tracker (`TrackZone`/`UpdateZoneTracking`) TETAP jalan
+   selama replay — `g_zoneTracker[]` (dan label runway di chart) jadi
+   mencerminkan histori replay yang sungguhan, bukan mulai dari nol pas
+   restart. Yang di-skip cuma PENULISAN CSV-nya sendiri (baris CONFIRM,
+   dan baris OUTCOME lewat parameter `isReplay` di `LogZoneOutcome`) plus
+   probe excursion/drift — supaya CSV tidak dibanjiri baris duplikat tiap
+   kali restart
 7. DrawSavedLtfZones dipanggil SEKALI di akhir (bukan tiap bar historis) —
    zona yang sudah resolve selama replay langsung mendapat ujung kanan beku
    yang benar sejak gambar pertamanya, bukan "sekarang" yang salah

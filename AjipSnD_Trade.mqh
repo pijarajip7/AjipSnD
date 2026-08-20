@@ -4,11 +4,11 @@
 //==================================================================
 // OPEN MARKET WITH STRUCTURAL STOPS — the EA's only entry path.
 // Fills immediately at the current market price rather than resting at a
-// limit: the trigger bar (rejection, or first touch under
-// InpAggressiveEntry) has already closed by the time this is called, so
-// there is no edge left to wait at — price is already moving off the zone.
+// limit: the trigger (first touch of a saved zone, bar-close or tick) has
+// already happened by the time this is called, so there is no edge left to
+// wait at — price is already moving off the zone.
 //
-// slPrice is the caller's stop, anchored to the trigger bar's own extreme;
+// slPrice is the caller's stop, anchored to the zone's own structural edge;
 // TP is derived here from the SAME price this order actually transacts at,
 // so the realised reward:risk is enforced against the real fill rather than
 // an independent figure.
@@ -35,8 +35,7 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    double slDistance = (slPrice > 0.0) ? ((dir == 1) ? (price - slPrice) : (slPrice - price)) : 0.0;
    if(slDistance <= 0.0)
      {
-      PrintFormat("AjipSnD: %s entry skipped — non-positive SL distance",
-                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION");
+      PrintFormat("AjipSnD: AGGRESSIVE entry skipped — non-positive SL distance");
       return(0);
      }
 
@@ -45,13 +44,11 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
    if(lot <= 0.0) return(0);
    if(lot < g_volMin || lot > g_volMax)
      {
-      PrintFormat("AjipSnD: %s entry skip — lot %.2f outside broker range",
-                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION", lot);
+      PrintFormat("AjipSnD: AGGRESSIVE entry skip — lot %.2f outside broker range", lot);
       return(0);
      }
 
-   string comment = StringFormat("AjipSnD %s %s", dir == 1 ? "BUY" : "SELL",
-                                 InpAggressiveEntry ? "AGGR" : "REJECT");
+   string comment = StringFormat("AjipSnD %s AGGR", dir == 1 ? "BUY" : "SELL");
    bool ok;
    if(dir == 1)
       ok = trade.Buy(lot, _Symbol, price, slPrice, tpPrice, comment);
@@ -60,15 +57,14 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
 
    if(!ok)
      {
-      PrintFormat("AjipSnD: %s entry failed. retcode=%d",
-                  InpAggressiveEntry ? "AGGRESSIVE" : "REJECTION", trade.ResultRetcode());
+      PrintFormat("AjipSnD: AGGRESSIVE entry failed. retcode=%d", trade.ResultRetcode());
       return(0);
      }
 
    ulong ticket = trade.ResultOrder();
    double fillPrice = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_PRICE_OPEN) : price;
-   PrintFormat("AjipSnD: %s market-filled (%s). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
-               dir == 1 ? "BUY" : "SELL", InpAggressiveEntry ? "aggressive" : "rejection",
+   PrintFormat("AjipSnD: %s market-filled (aggressive). Ticket=%I64u, Lot=%.2f, Fill=%.5f, SL=%.5f, TP=%.5f",
+               dir == 1 ? "BUY" : "SELL",
                ticket, lot, fillPrice, slPrice, tpPrice);
 
    EntryFillInfo po;
@@ -117,6 +113,7 @@ void AddEntry(ulong ticket, int dir, double entryPrice, const EntryFillInfo &po)
    g_entries[sz].zoneTime        = po.zoneTime;
    g_entries[sz].partialClosed       = false;
    g_entries[sz].partialCloseSkipped = false;
+   g_entries[sz].tpMovedToBe     = false;
   }
 
 //==================================================================
@@ -464,14 +461,71 @@ void UpdateTrailingStop(int idx)
   }
 
 //==================================================================
-// DISPATCH — one pass over open entries: partial-close check, then trailing
-// for whichever of them already partial-closed. Called every tick, same as
-// UpdateMfeMae, since the RR trigger is a live price level, not a bar-close
-// event.
+// INVALIDATION TP->BE — once price returns to the originating zone's own
+// breakLevel, move TP to breakeven. SL is left untouched by design: this
+// caps the upside once the setup looks like it's failing, it does not
+// tighten the downside — risk/reward turns asymmetric from this point on
+// (SL still far, TP now close), a deliberate tradeoff confirmed directly
+// over closing outright or also tightening SL. One-shot via tpMovedToBe.
+//
+// breakLevel itself is DERIVED here, not stored — SL was placed at
+// breakLevel minus (demand) / plus (supply) a buffer of
+// InpZoneSlBufferWidthMult zone-widths, and the zone-width itself
+// approximates entryPrice-to-breakLevel (entry happens at the zone's near
+// edge, breakLevel is the far edge). Both directions reduce to the same
+// algebra: SL = B ∓ M(entry∓B) → B(1+M) = SL + M·entry → B = (SL +
+// M·entry)/(1+M). Both slPrice and entryPrice live on the broker position
+// itself, so this needs nothing that a restart can lose — no separate
+// breakLevel field, no restart-recovery special case, works identically for
+// a freshly-opened or a restart-recovered position. Approximate rather than
+// exact (entry isn't always precisely at the near edge — the bar-close
+// fallback trigger path can land a bar's worth inside the zone), traded
+// deliberately for eliminating the restart gap entirely.
 //==================================================================
-void ManagePartialCloseAndTrailing()
+void CheckInvalidationTpToBe(int idx)
   {
-   if(!InpPartialCloseEnabled && !InpTrailingStopEnabled) return;
+   if(g_entries[idx].tpMovedToBe) return;
+   if(!g_entries[idx].hasStructuralSl || g_entries[idx].slPrice <= 0.0) return;
+
+   int    dir = g_entries[idx].dir;
+   double m   = InpZoneSlBufferWidthMult;
+   double breakLevel = (g_entries[idx].slPrice + m * g_entries[idx].entryPrice) / (1.0 + m);
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double price = (dir == 1) ? tick.bid : tick.ask;   // side the position would exit on
+
+   bool touched = (dir == 1) ? (price <= breakLevel) : (price >= breakLevel);
+   if(!touched) return;
+
+   double bePrice = (dir == 1)
+                    ? g_entries[idx].entryPrice + InpBreakEvenOffsetPoints * g_point
+                    : g_entries[idx].entryPrice - InpBreakEvenOffsetPoints * g_point;
+   bePrice = NormalizeDouble(bePrice, g_digits);
+
+   ulong  ticket = g_entries[idx].ticket;
+   double curSl  = PositionGetDouble(POSITION_SL);
+   if(!trade.PositionModify(ticket, curSl, bePrice))
+     {
+      PrintFormat("AjipSnD: Invalidation TP->BE FAILED ticket=%I64u be=%.5f retcode=%d",
+                  ticket, bePrice, trade.ResultRetcode());
+      return;
+     }
+
+   g_entries[idx].tpMovedToBe = true;
+   PrintFormat("AjipSnD: Invalidation TP->BE ticket=%I64u — breakLevel %.5f touched (price=%.5f), TP -> %.5f",
+               ticket, breakLevel, price, bePrice);
+  }
+
+//==================================================================
+// DISPATCH — one pass over open entries: partial-close check, trailing for
+// whichever of them already partial-closed, and the invalidation TP->BE
+// check. Called every tick, same as UpdateMfeMae, since all three triggers
+// are live price levels, not bar-close events.
+//==================================================================
+void ManageOpenPositions()
+  {
+   if(!InpPartialCloseEnabled && !InpTrailingStopEnabled && !InpInvalidationTpBeEnabled) return;
 
    for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
      {
@@ -482,6 +536,9 @@ void ManagePartialCloseAndTrailing()
 
       if(InpTrailingStopEnabled && g_entries[i].partialClosed)
          UpdateTrailingStop(i);
+
+      if(InpInvalidationTpBeEnabled)
+         CheckInvalidationTpToBe(i);
      }
   }
 

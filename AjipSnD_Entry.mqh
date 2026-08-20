@@ -70,6 +70,13 @@ void RebuildTrackedPositions()
       g_entries[idx].partialClosed       = false;
       g_entries[idx].partialCloseSkipped = false;
 
+      // Unlike zoneTime/partialClosed above, invalidation TP->BE needs no
+      // special restart handling at all: CheckInvalidationTpToBe derives
+      // breakLevel from slPrice + entryPrice (both set just above from the
+      // live broker position) rather than storing it, so it works
+      // identically for a restart-recovered position.
+      g_entries[idx].tpMovedToBe = false;
+
       recovered++;
      }
 
@@ -79,7 +86,7 @@ void RebuildTrackedPositions()
   }
 
 //==================================================================
-// ENTRY LOGIC — LTF zone confirmed, then rejected on its own retest
+// ENTRY LOGIC — LTF zone confirmed, then traded on the first touch of its retest
 //==================================================================
 
 //---- Gate entry for bar-close path ----
