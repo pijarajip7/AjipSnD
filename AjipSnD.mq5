@@ -30,6 +30,19 @@ input int              InpCandlesInit    = 50;          // Lookback candles for 
 input int              InpMaxZones       = 10;           // Max active zones per type (demand/supply)
 input double           InpMaxZoneWidthAtr = 0;      // Max zone width / ATR to allow entry (0=disabled)
 input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
+// favW entry filter — the first real entry gate since the aggressive-only
+// rewrite. favW = favorable pre-touch excursion in ZONE WIDTHS: how far price
+// ran in the profitable direction after the zone confirmed, before coming back
+// to touch it — the same ratio as the chart's "favW~x"/"favW x" runway label
+// and the CSV's fav_before_touch_width_ratio column. A saved zone whose FIRST
+// touch lands with favW below InpMinFavW or above InpMaxFavW is skipped
+// (marked used, no order) — one-shot, consistent with aggressive entry: the
+// metric is monotonic (maxFavPts only grows), so a later touch can only be
+// further out of range. 0 = that side disabled. The metric is tracked by the
+// zone-quality tracker, which now runs whenever this filter is on even if
+// InpZoneQualityLog is off (CSV writes still require InpZoneQualityLog).
+input double InpMinFavW = 3;  // Min favW (zone widths) to allow entry (0=disabled)
+input double InpMaxFavW = 10; // Max favW (zone widths) to allow entry (0=disabled)
 
 input group "Entry & Trade Sizing"
 input bool   InpAllowHedging = false;   // Allow BUY & SELL open simultaneously (false=block opposite)

@@ -12,6 +12,7 @@ InpCandlesInit     = 50           — Lookback bars for initial trend + OnInit r
 InpMaxZones        = 10           — Max active zones per type
 InpMaxZoneWidthAtr = 0            — Max zone width / ATR to allow entry (0=disabled)
 InpMinDispBodyAtr  = 0            — Min confirming-bar body / ATR to allow entry (0=disabled)
+InpMinFavW = 3, InpMaxFavW = 10   — favW entry filter (min/max favorable pre-touch excursion, in zone widths; 0=disabled per side)
 ```
 
 ### Zone Quality Gate — diagnostic only, does not gate entry
@@ -30,6 +31,26 @@ see *UpdateLTF* below for what replaced it.)
 
 If ATR is unavailable the gate fails open and prints a warning, so a broken
 indicator handle cannot silently stop all trading.
+
+### favW entry filter — an actual entry gate (unlike the quality gate above)
+
+`InpMinFavW` / `InpMaxFavW` (default 3 / 10) gate entry on
+`favW`: the favorable pre-touch excursion expressed in zone widths — how far
+price ran in the profitable direction after a zone confirmed, before coming
+back to touch it. Same ratio as the chart's `favW~x` / `favW x` runway label
+and the CSV's `fav_before_touch_width_ratio` column.
+
+A saved zone whose FIRST touch lands with `favW` below `InpMinFavW` or above
+`InpMaxFavW` is skipped — marked `used` with no order, one-shot consistent
+with aggressive entry (the metric is monotonic, so a later touch can only be
+further out of range). Evaluated on both the tick-level path
+(`CheckAggressiveTickEntries`) and the bar-close path (`CheckRejectionRetests`);
+on the tick path the value is `maxFavPts` as of the last closed bar — one bar
+stale by construction, the same granularity the CSV's snapshot uses.
+
+The metric lives in the zone-quality tracker (`maxFavPts`), so the tracker now
+runs whenever this filter is enabled even if `InpZoneQualityLog` is off — CSV
+writes still require `InpZoneQualityLog` (see `NeedsZoneTracking`).
 
 **Entry & Trade Sizing**
 ```

@@ -674,7 +674,7 @@ void LogZoneOutcome(string outcome, bool htf, bool isDemand, datetime zoneTime, 
    int i = FindTrackedZone(htf, isDemand, zoneTime);
    if(i < 0) return;
 
-   if(!isReplay)
+   if(InpZoneQualityLog && !isReplay)
       ZoneCsvWrite("OUTCOME", g_zoneTracker[i], outcome);
    g_zoneTracker[i].trackingActive = false;
   }

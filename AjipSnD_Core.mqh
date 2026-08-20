@@ -91,6 +91,45 @@ void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
      }
   }
 
+//---- favW entry filter helpers ----
+// favW = favorable pre-touch excursion in zone widths (the chart's runway
+// label and the CSV's fav_before_touch_width_ratio). The metric lives in the
+// zone-quality tracker (maxFavPts), so these helpers reach across to
+// g_zoneTracker[] via the index resolved once at save time.
+
+// True when the zone-quality tracker must run: either for the CSV (quality
+// log) or because the favW entry filter needs the in-memory maxFavPts.
+// CSV writes stay gated on InpZoneQualityLog alone — see the ZoneCsvWrite
+// call sites — so enabling only the filter tracks in memory, no disk writes.
+bool NeedsZoneTracking()
+  {
+   return(InpZoneQualityLog || InpMinFavW > 0 || InpMaxFavW > 0);
+  }
+
+// favW ratio for a saved zone, or -1 if unavailable (no tracker entry, or a
+// zero-width zone). The negative sentinel lets callers fail open.
+double SavedZoneFavW(int savedIdx)
+  {
+   if(savedIdx < 0 || savedIdx >= ArraySize(g_ltfZoneTrackerIdx)) return(-1.0);
+   int tIdx = g_ltfZoneTrackerIdx[savedIdx];
+   if(tIdx < 0 || tIdx >= ArraySize(g_zoneTracker)) return(-1.0);
+   double widthPts = (g_savedLtfZones[savedIdx].high - g_savedLtfZones[savedIdx].low) / g_point;
+   if(widthPts <= 0) return(-1.0);
+   return(g_zoneTracker[tIdx].maxFavPts / widthPts);
+  }
+
+// True when this zone's first touch should be skipped: favW falls below
+// InpMinFavW or above InpMaxFavW. Filter off (both 0) or no metric -> false.
+bool FavWFilterBlocks(int savedIdx)
+  {
+   if(InpMinFavW <= 0 && InpMaxFavW <= 0) return(false);
+   double favW = SavedZoneFavW(savedIdx);
+   if(favW < 0) return(false);
+   if(InpMinFavW > 0 && favW < InpMinFavW) return(true);
+   if(InpMaxFavW > 0 && favW > InpMaxFavW) return(true);
+   return(false);
+  }
+
 //---- Check every saved zone against this closed bar: break, or the first
 // touch itself ----
 // A saved zone resolves two ways:
@@ -138,6 +177,17 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
 
       bool wickedIn = isDemand ? (bar.low <= zHigh) : (bar.high >= zLow);
       if(!wickedIn) continue;   // not touched yet, still intact — keep waiting
+
+      if(FavWFilterBlocks(i))
+        {
+         g_savedLtfZones[i].touched = true;
+         g_savedLtfZones[i].used    = true;
+         g_ltfZoneDrawEnd[i]        = bar.time;
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by favW filter (favW=%.2f outside [%.2f, %.2f])",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, SavedZoneFavW(i), InpMinFavW, InpMaxFavW);
+         continue;
+        }
 
       g_savedLtfZones[i].touched = true;
       g_savedLtfZones[i].used    = true;
@@ -212,6 +262,17 @@ void CheckAggressiveTickEntries()
       bool wickedIn = isDemand ? (tick.bid <= zHigh) : (tick.bid >= zLow);
       if(!wickedIn) continue;
 
+      if(FavWFilterBlocks(i))
+        {
+         g_savedLtfZones[i].used    = true;
+         g_savedLtfZones[i].touched = true;
+         g_ltfZoneDrawEnd[i]        = TimeCurrent();
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by favW filter (favW=%.2f outside [%.2f, %.2f])",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, SavedZoneFavW(i), InpMinFavW, InpMaxFavW);
+         continue;
+        }
+
       g_savedLtfZones[i].used    = true;
       g_savedLtfZones[i].touched = true;
       g_ltfZoneDrawEnd[i]        = TimeCurrent();
@@ -259,7 +320,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
    // zone seeded from historical bars gets an accurate maxFavPts/touched
    // instead of starting cold at EA restart. See TrackZone's own call site
    // below for why the CSV row itself stays live-only.
-   if(InpZoneQualityLog)
+   if(NeedsZoneTracking())
       UpdateZoneTracking(bar, false);
 
    if(!isReplay)
@@ -372,11 +433,11 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
       // label. Only the CSV row itself stays live-only: writing it during
       // replay would re-dump the same historical zone's CONFIRM row to disk
       // on every EA restart.
-      if(InpZoneQualityLog)
+      if(NeedsZoneTracking())
         {
          SnDZone tracked = confirmed;
          TrackZone(tracked, false);
-         if(!isReplay)
+         if(InpZoneQualityLog && !isReplay)
             ZoneCsvWrite("CONFIRM", tracked, "");
         }
 

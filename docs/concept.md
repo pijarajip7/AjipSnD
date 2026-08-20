@@ -188,6 +188,20 @@ Order pakai market (bukan limit) karena begitu bar/tick trigger sudah
 terjadi, harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
 ditunggu dengan limit order.
 
+### favW filter (opsional)
+
+`InpMinFavW` / `InpMaxFavW` (default 3 / 10; 0 = mati) — gerbang entry berbasis
+`favW`: ekskursi favorable sebelum touch, dalam satuan lebar zona (sama
+persis dengan label `favW~x`/`favW x` di chart dan kolom CSV
+`fav_before_touch_width_ratio`). Zona yang touch pertamanya mendarat dengan
+`favW` di luar `[min, max]` langsung `used=true` tanpa entry — one-shot,
+konsisten dengan mode agresif (metric monotonic, touch berikutnya cuma makin
+jauh di luar range). Dinilai di jalur tick dan bar-close; di jalur tick
+nilainya `maxFavPts` per bar closed terakhir (stale satu bar, sama
+granularitas dengan snapshot CSV). Metric ini hidup di zone-quality tracker,
+jadi tracker ikut jalan kalau filter ini on walau `InpZoneQualityLog` off —
+penulisan CSV tetap digerbang `InpZoneQualityLog`.
+
 ### 3. Zona yang sudah touched, disupersede otomatis
 
 Kalau zona searah yang lebih baru VALIDATED sementara zona lama di watch-list
