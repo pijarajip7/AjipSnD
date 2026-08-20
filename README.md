@@ -13,7 +13,7 @@
 
 | Dokumen | Isi |
 |---------|-----|
-| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, bias + rejection-entry mechanism, zone invalidation, exit plan |
+| [docs/concept.md](docs/concept.md) | Konsep inti, SnD zone detection, rejection-entry mechanism, zone invalidation, exit plan |
 | [docs/architecture.md](docs/architecture.md) | Input parameters, Init/OnTick flow, structural SL/TP, CSV, panel |
 
 ---
@@ -31,13 +31,13 @@
 | Risk-based sizing | Lot derived from `InpRiskPerTrade` and the real stop distance, capped by `InpMaxRiskOvershoot` |
 | Init replay | OnInit replays LTF bars chronologically, so the EA starts with its real zone structure and watch list instead of an empty one |
 | Session + News | Session filter blocks entries outside hours; news blackout blocks entries + profit-taking closes (max-loss never gated) |
-| Panel | 20-line dashboard, saved-LTF-zone rectangles on chart |
+| Panel | 19-line dashboard, saved-LTF-zone rectangles on chart |
 
 ---
 
 ## Panel Info
 
-20-line on-chart dashboard (Consolas 9, OBJ_RECTANGLE_LABEL background):
+19-line on-chart dashboard (Consolas 9, OBJ_RECTANGLE_LABEL background):
 
 | Section | Lines |
 |---------|-------|

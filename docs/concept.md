@@ -8,13 +8,13 @@ berbeda dari AjipSMC dan AjipIDM.
 | Structure | SL/SH swings | Tidak ada — murni candle-based |
 | Detection | 2-stage pullback + simple structure | Raw candle (bear/bull) + body-break confirm |
 | Zones | idm zone (single level) | Supply/Demand zone (high-low range) |
-| HTF role | Equilibrium filter (discount/premium) | Directional bias saja — bukan price range untuk entry |
-| Entry trigger | idm touch + no body break | LTF zone (searah bias HTF) di-retest, wick masuk lalu REJECTED |
+| Timeframe | Single | Single — satu timeframe deteksi zona, tanpa bias timeframe lain |
+| Entry trigger | idm touch + no body break | Zona di-retest, wick masuk lalu REJECTED |
 | Order type | — | Market order (bukan pending limit) |
 | Lot | Fixed lot | Risk-based — diturunkan dari `InpRiskPerTrade` / jarak SL |
-| SL/TP | Tidak ada di entry | Structural — SL di swing LTF zone, TP = RR x jarak SL |
-| Zone invalidation | Tidak ada | HTF & saved LTF zone dihapus saat body close break boundary |
-| Init | Bar terakhir saja | Replay HTF+LTF kronologis — EA start dengan bias & watch-list nyata |
+| SL/TP | Tidak ada di entry | Structural — SL di swing zone, TP = RR x jarak SL |
+| Zone invalidation | Tidak ada | Saved zone dicoret dari watch-list saat body close break boundary |
+| Init | Bar terakhir saja | Replay kronologis — EA start dengan watch-list nyata |
 
 ---
 
@@ -72,36 +72,27 @@ Scan bar-by-bar:
 
 ## Zone Management
 
+`g_ltfDemandZones[]`/`g_ltfSupplyZones[]` — array structural zone mentah (buat
+panel count + zone-quality CSV), TERPISAH dari `g_savedLtfZones[]` (watch-list
+rejection-entry, lihat [Rejection-Entry Mechanism](#rejection-entry-mechanism)).
+Array ini tidak punya body-close-break invalidation sendiri — cuma dua aturan:
+
 ```
-InpMaxZones (default 2) — max zona aktif per tipe
+InpMaxZones (default 10) — max zona aktif per tipe
 
 Demand zone baru:  if zone.low < any_existing_demand.low → old deactivated
 Supply zone baru:  if zone.high > any_existing_supply.high → old deactivated
-HTF only: zone yang sudah touched juga deactivated begitu zona baru searah confirm
-  (TOUCHED_SUPERSEDED — pasar sudah bikin struktur baru, zona lama basi)
 
 Max exceeded → oldest (index 0) deactivated
 ```
 
----
-
-## HTF Zone Invalidation
-
-HTF zones yang di-break price action dihapus dari array + chart.
-Per HTF bar close, BEFORE ProcessZoneBar (existing zones checked first).
-
-Sweep hanya memperlebar batas zone, **tidak** mengubah trigger invalidasi:
-- Demand: bar.close < zone.low → INVALID. Jika swept → bar.close < zone.sweepLow → INVALID
-- Supply: bar.close > zone.high → INVALID. Jika swept → bar.close > zone.sweepHigh → INVALID
-
-Sweep tracking: ProcessZoneBar track **kedua arah** sweep untuk **kedua jenis** zone.
-Demand invalidation pakai sweepLow (support side), supply pakai sweepHigh (resistance side).
-
-Aturan yang sama persis (body-close-break, sweep-aware) dipakai untuk saved LTF
-zone di watch-list rejection — lihat [Rejection-Entry Mechanism](#rejection-entry-mechanism).
-
-`InvalidateHtfZones` juga jalan selama `ReplayInitialStructure` di OnInit — zona
-yang break di tengah replay langsung dihapus, sama seperti live.
+`AddDemandZone`/`AddSupplyZone` juga punya cabang "zona sudah touched
+dideaktivasi begitu zona baru searah confirm" — sisa dari era ketika ini
+timeframe-generic (dipanggil untuk HTF dan LTF). Sekarang cabang itu digerbang
+oleh `isHtf`, yang selalu `false` di single-timeframe ini, jadi tidak pernah
+jalan lagi — dibiarkan sebagai dead weight yang tidak berbahaya, bukan
+dihapus, karena parameter `htf`/`isHtf` masih dipakai fungsi-fungsi
+zone-tracking lain (lihat `AjipSnD_Zone.mqh`).
 
 ---
 
@@ -114,51 +105,38 @@ sebelum boleh dipakai. Konfirmasi + follow-through:
 - Supply: bar X close < candidate.low/sweepLow → butuh bar berikutnya close < barX.low
 
 Aturan:
-- LTF: validasi SELALU aktif — entry ditunda sampai follow-through muncul.
-- HTF: gated oleh `InpRequireZoneValidation` (default true).
+- Validasi SELALU aktif — entry ditunda sampai follow-through muncul.
 - Validasi harus selesai SEBELUM zona opposite terbentuk; kalau opposite duluan → zona gagal (discard, no entry).
-- HTF zona belum tervalidasi digambar beda warna (pending), belum jadi retest area aktif.
 
-Saat LTF zona VALIDATED, EA juga cek apakah wick sudah masuk ke range zona itu
+Saat zona VALIDATED, EA juga cek apakah wick sudah masuk ke range zona itu
 sejak dia jadi pending (`g_ltfPendingTouched`) — dipakai nanti sebagai
-`touchedAtValidation` di riwayat LTF, independen dari CSV tracker supaya tetap
-akurat walau `InpZoneQualityLog=false` atau saat replay OnInit.
+`touchedAtValidation` di CSV tracker, independen dari `InpZoneQualityLog`
+supaya tetap akurat walau logging mati atau saat replay OnInit.
 
 ---
 
 ## Rejection-Entry Mechanism
 
-Ini satu-satunya cara EA membuka posisi. HTF di sini **murni sinyal arah**,
-bukan area harga untuk ditunggu — LTF zone sendiri yang jadi pemicu entry.
+Ini satu-satunya cara EA membuka posisi. Tidak ada bias timeframe lain, tidak
+ada filter arah dari luar — zona itu sendiri, begitu VALIDATED, langsung jadi
+kandidat watch, dua arah, tanpa gerbang apapun.
 
-### 1. HTF validasi → set bias, bukan zona
+### 1. Validasi → langsung masuk watch-list, bukan trigger entry
 
-Begitu zona HTF VALIDATED, `g_htfBiasDir` di-set (1=demand/bullish,
--1=supply/bearish). HTF tidak pernah dicek secara geometris (harga di dalam
-zona HTF atau tidak) — dia cuma bilang arah mana yang layak diperhatikan.
+Begitu zona VALIDATED (lihat [Zone Validation](#zone-validation-follow-through)),
+`SaveLtfZoneForWatch` langsung append satu entry baru ke `g_savedLtfZones[]` —
+status `touched=false, used=false`. Tidak ada delay, tidak ada bias arah yang
+harus dicocokkan dulu: zona demand dan supply sama-sama langsung di-watch
+begitu masing-masing tervalidasi. Validasi zona itu sendiri **belum** berarti
+entry — cuma berarti "sekarang mulai diawasi untuk retest."
 
-### 2. Replay mundur cari kandidat LTF
-
-Begitu bias berubah, `SaveLtfZonesForHtfBias` replay MUNDUR lewat
-`g_ltfValidatedHistory[]` — arsip permanen semua zona LTF yang pernah
-VALIDATED — mencari yang:
-- Searah dengan bias baru
-- Waktunya `>= HTF zone.time` (origin bar HTF, bukan waktu HTF validasi —
-  supaya zona LTF yang validasi SEBELUM bias HTF terbentuk tetap ketemu,
-  bukan cuma yang validasi setelahnya)
-- Belum `superseded` (lihat poin 4)
-
-Yang cocok dan belum pernah disimpan → masuk `g_savedLtfZones[]`, status
-`touched=false, used=false`.
-
-### 3. Tunggu retest → REJECTED, baru entry
+### 2. Tunggu retest → REJECTED, baru entry
 
 Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
 (`CheckRejectionRetests`):
 
 1. **Structural break** — body CLOSE tembus far edge (atau sweep level kalau
-   ada) → zona invalid, `used=true`, tidak ada entry. Aturan sama persis
-   dengan invalidasi HTF.
+   ada) → zona invalid, `used=true`, tidak ada entry.
 2. **Rejection** — SEMUA tiga syarat: wick masuk ke range zona, body bar/ATR
    >= `InpRejectionBodyAtr` searah favorable, DAN close berakhir di luar
    zona lagi → `used=true`, **market order** (`OpenMarketWithStructuralStops`).
@@ -170,37 +148,47 @@ Order pakai market (bukan limit) karena begitu bar rejection sudah closed,
 harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
 ditunggu dengan limit order.
 
-### 4. Zona yang sudah touched, disupersede otomatis
+### 3. Zona yang sudah touched, disupersede otomatis
 
-Kalau zona LTF searah yang lebih baru VALIDATED sementara zona lama sudah
-pernah tersentuh (`touchedEver`), zona lama ditandai `superseded` — pasar
-sudah bergerak, setup lama basi. Ini dicek di titik paling awal yang
-mungkin (tiap kali LTF zona validasi, bukan cuma pas HTF validasi
-berikutnya), dan berlaku dua arah:
-- `g_ltfValidatedHistory[]` — ditandai `superseded` (arsip permanen, tidak
-  dihapus), supaya replay mundur berikutnya tidak menawarkan zona ini lagi
-- `g_savedLtfZones[]` — kalau sudah `touched` (bukan cuma di history, tapi
-  di watch-list yang sedang aktif) → langsung `used=true`, dicoret dari
-  chart
+Kalau zona searah yang lebih baru VALIDATED sementara zona lama di watch-list
+sudah pernah tersentuh (`touched`), zona lama langsung ditandai `used=true`
+(`MarkLtfValidationContext`) — pasar sudah bergerak, setup lama basi. Ini
+dicek di titik paling awal yang mungkin: tiap kali ada zona baru validasi,
+bukan ditunda ke pengecekan lain. Zona yang belum pernah tersentuh TIDAK
+disupersede — cuma yang sudah `touched` dan belum resolve.
+
+### Rectangle chart: dibekukan, bukan dihapus
+
+`g_ltfZoneDrawEnd[]` (index-aligned dengan `g_savedLtfZones[]`) mencatat kapan
+tiap zona berhenti diawasi — `0` selama masih live. Begitu `used=true`
+(break, rejection-traded, atau superseded di atas), entry ini di-stamp dengan
+waktu bar yang menyelesaikannya. `DrawSavedLtfZones` pakai stamp ini: zona
+yang masih live terus digambar ulang tiap bar dengan ujung kanan mengikuti
+"sekarang," zona yang sudah resolve digambar SEKALI LAGI dengan ujung kanan
+beku di titik itu, lalu ditandai `g_ltfZoneDrawFrozen[i]=true` dan tidak
+pernah disentuh lagi — rectangle-nya **tetap ada di chart selamanya**, tidak
+pernah dihapus, tapi juga tidak pernah diproses ulang setelah beku (jaga
+biaya redraw supaya tidak ikut membengkak seiring total zona sepanjang umur
+EA).
 
 ---
 
-## Multi-Timeframe Architecture
+## Single-Timeframe Architecture
 
 ```
-HTF (InpHtfTimeframe, e.g., H1):
-  └─ Detect Supply & Demand zones dari bar data
-  └─ Zone confirmed → (optional) follow-through validation → VALIDATED (gated InpRequireZoneValidation)
-  └─ VALIDATED → set g_htfBiasDir + SaveLtfZonesForHtfBias (replay mundur cari kandidat LTF)
-  └─ Zone management: max InpMaxZones, lower demand / higher supply invalidates older
-  └─ Zone invalidation: close breaks zone boundary → remove dari array (bookkeeping/CSV — tidak digambar)
-
-LTF (InpTimeframe, e.g., M5):
-  └─ Detect Supply & Demand zones independently
-  └─ Zone confirmed + VALIDATED → masuk g_ltfValidatedHistory[] permanen (bukan trigger entry)
+LTF (InpTimeframe, e.g., M5) — satu-satunya timeframe deteksi zona:
+  └─ Detect Supply & Demand zones
+  └─ Zone confirmed → follow-through validation (selalu aktif) → VALIDATED
+  └─ VALIDATED → SaveLtfZoneForWatch: langsung masuk g_savedLtfZones[], dua arah, tanpa gerbang
+  └─ Zone management (g_ltfDemandZones/g_ltfSupplyZones, terpisah dari watch-list):
+       max InpMaxZones, lower demand / higher supply invalidates older
   └─ Tiap bar closed: CheckRejectionRetests terhadap semua saved zone (break/reject/masih-nunggu)
-  └─ DrawSavedLtfZones — HANYA zona LTF yang digambar; HTF tidak pernah jadi objek chart
+  └─ DrawSavedLtfZones — satu-satunya objek chart, tidak pernah dihapus, dibekukan saat resolve
 ```
+
+Tidak ada timeframe kedua yang menentukan arah atau menunda watch-list —
+setiap zona yang tervalidasi di timeframe ini langsung jadi kandidat retest,
+apapun arahnya.
 
 ---
 
@@ -238,15 +226,17 @@ satu close-all di atas.
 
 ## Zone Quality Logging (CSV)
 
-Setiap zona yang dikonfirmasi live (LTF & HTF) dicatat ke CSV untuk analisis
+Setiap zona yang dikonfirmasi live dicatat ke CSV untuk analisis
 kualitas — `InpZoneQualityLog` (default true).
 
 - **CONFIRM row**: atribut kualitas saat zona terbentuk — displacement
   (`disp_body_atr`, `disp_range_atr`), lebar zona (`width_atr`), `base_bars`,
   sweep flag, trend saat konfirmasi.
-- **OUTCOME row**: nasib zona — `VALIDATED`, `FAILED_OPPOSITE`, `INVALIDATED`,
-  `REPLACED`, `EXPIRED`, `UNRESOLVED` — plus statistik perilaku sejak
-  konfirmasi (excursion, first touch, `fav_after_touch_pts`).
+- **OUTCOME row**: nasib zona — `FAILED_OPPOSITE`, `TOUCHED_SUPERSEDED`,
+  `REPLACED`, `EXPIRED`, `UNRESOLVED` (masih `trackingActive` saat EA
+  shutdown) — plus statistik perilaku sejak konfirmasi (excursion, first
+  touch, `fav_after_touch_pts`). Validasi sendiri bukan outcome — itu kolom
+  boolean terpisah (`validated`) di baris yang sama.
 
 Tujuan: kumpulkan data dulu, lalu analisis korelasi atribut → outcome, dan
 jadikan atribut yang terbukti sebagai filter entry.
@@ -257,23 +247,21 @@ File: `AjipSnD_Zones_<symbol>_<login>.csv` di `Common\Files`.
 
 ## Init
 
-`ReplayInitialStructure()` — replay HTF+LTF bersamaan, urut kronologis per
-waktu-close, bukan cuma isi array zona:
+`ReplayInitialStructure()` — replay bar LTF kronologis, bukan cuma isi array
+zona:
 
 ```
-1. Fetch InpCandlesInit bar HTF (skip bar yang belum closed)
-2. Trend awal HTF: DetermineInitialTrend atas bar-bar itu
-3. Fetch bar LTF SEPANJANG rentang kalender yang sama dengan window HTF
-   (bukan InpCandlesInit bar LTF — timeframe LTF/HTF bisa jauh beda skala,
-   fixed count akan under-cover window HTF)
-4. Trend awal LTF: dari InpCandlesInit bar TERAKHIR pada window LTF itu
-5. Merge kedua stream per waktu-close, replay bar-per-bar lewat UpdateHTF/
-   UpdateLTF yang SAMA dipakai live (isReplay=true)
-6. Setiap validasi HTF selama replay tetap men-trigger SaveLtfZonesForHtfBias
-   — EA keluar dari OnInit dengan bias & watch-list nyata, bukan kosong
-7. CheckRejectionRetests tetap resolve nasib tiap saved zone (break/reject)
+1. Fetch InpCandlesInit bar LTF (skip bar yang belum closed)
+2. Trend awal: DetermineInitialTrend atas bar-bar itu
+3. Replay bar-per-bar lewat UpdateLTF yang SAMA dipakai live (isReplay=true)
+4. Setiap validasi zona selama replay tetap men-trigger SaveLtfZoneForWatch
+   — EA keluar dari OnInit dengan watch-list nyata, bukan kosong
+5. CheckRejectionRetests tetap resolve nasib tiap saved zone (break/reject)
    terhadap bar historis, TAPI tidak pernah kirim order — harga sudah
    bergerak jauh dari momen historis itu, tidak ada fill yang valid
-8. CSV/diagnostic write (zone quality tracker, excursion, drift) di-skip
+6. CSV/diagnostic write (zone quality tracker, excursion, drift) di-skip
    selama replay — supaya CSV tidak dibanjiri data replay tiap kali restart
+7. DrawSavedLtfZones dipanggil SEKALI di akhir (bukan tiap bar historis) —
+   zona yang sudah resolve selama replay langsung mendapat ujung kanan beku
+   yang benar sejak gambar pertamanya, bukan "sekarang" yang salah
 ```
