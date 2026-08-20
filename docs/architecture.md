@@ -204,10 +204,14 @@ The only per-bar update function left — there is no `UpdateHTF` anymore
    - passed → MarkZoneValidated, MarkLtfValidationContext(zone, g_ltfPendingTouched)
      (CSV-diagnostic touchedAtValidation bit, plus superseded-retirement of
      any stale same-direction watch-list entry — see concept.md's
-     Rejection-Entry Mechanism), then SaveLtfZoneForWatch(zone) — appends
-     directly to g_savedLtfZones[], both directions, no gate. Zone
-     confirmation and validation still never earn an order on their own;
-     only a later rejection on retest does.
+     Rejection-Entry Mechanism), then
+     SaveLtfZoneForWatch(zone, g_ltfPendingTouched, bar.time) — appends
+     directly to g_savedLtfZones[], both directions, no gate, EXCEPT: if
+     g_ltfPendingTouched is true (zone already wicked into during its own
+     confirm-to-validate window), it's saved already used=true — a record
+     stays for visibility but it never enters active rejection watch. Zone
+     confirmation and clean validation still never earn an order on their
+     own; only a later rejection on retest does.
 5. ProcessZoneBar(bar) → check if zone confirmed
 6. If zone CONFIRMED:
    a. Opposite formed first → pending zone fails (discarded, no entry)

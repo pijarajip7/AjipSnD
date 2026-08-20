@@ -24,6 +24,7 @@
 |-------|-----------|
 | SnD Detection | Raw candle bear/bull + body-break confirm, lowest-low / highest-high candidate |
 | Rejection watch | Every zone that confirms and validates is saved and watched immediately, both directions — no bias gate, no wait for a second timeframe |
+| Pre-touch filter | A zone already wicked into during its own confirm-to-validate window is saved already `used=true` — no rejection watch. Backtested: 56-58% hit rate at 5m/15m vs 75%+ for a clean (never-touched) validation |
 | Rejection entry | Wick back into a saved zone, closed back out, body/ATR above threshold → market order |
 | Zone invalidation | Saved zones leave the watch list on a body CLOSE past the far edge (sweep-aware) — the rectangle itself stays on chart, frozen (see Persistent zone drawing below) |
 | Persistent zone drawing | A zone's rectangle is never deleted once drawn. While still watched, its right edge keeps extending to "now"; once resolved (rejected+traded, structurally broken, or superseded by a fresher same-direction zone) it freezes at the bar that resolved it, is redrawn once in that final form, then skipped on every later call — redraw cost tracks the live watch list, not the ever-growing total of every zone ever confirmed |

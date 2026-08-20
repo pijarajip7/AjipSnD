@@ -124,11 +124,21 @@ kandidat watch, dua arah, tanpa gerbang apapun.
 ### 1. Validasi → langsung masuk watch-list, bukan trigger entry
 
 Begitu zona VALIDATED (lihat [Zone Validation](#zone-validation-follow-through)),
-`SaveLtfZoneForWatch` langsung append satu entry baru ke `g_savedLtfZones[]` —
-status `touched=false, used=false`. Tidak ada delay, tidak ada bias arah yang
-harus dicocokkan dulu: zona demand dan supply sama-sama langsung di-watch
-begitu masing-masing tervalidasi. Validasi zona itu sendiri **belum** berarti
-entry — cuma berarti "sekarang mulai diawasi untuk retest."
+`SaveLtfZoneForWatch` langsung append satu entry baru ke `g_savedLtfZones[]`.
+Tidak ada delay, tidak ada bias arah yang harus dicocokkan dulu: zona demand
+dan supply sama-sama langsung di-watch begitu masing-masing tervalidasi.
+Validasi zona itu sendiri **belum** berarti entry — cuma berarti "sekarang
+mulai diawasi untuk retest."
+
+**Kecuali** kalau zona itu sudah pernah tersentuh SEBELUM validasinya
+selesai (`g_ltfPendingTouched` — wick masuk ke range zona di antara bar
+konfirmasi dan bar validasi). Zona begini tetap disimpan (buat jejak di
+chart/CSV) TAPI langsung `used=true` — tidak pernah masuk watch-list aktif,
+tidak pernah dapat kesempatan rejection-entry. Ini backtested: zona yang
+sudah tersentuh saat validasi hit rate-nya 56-58% di horizon 5m/15m, vs 75%+
+untuk zona yang validasi bersih (belum pernah tersentuh) — lihat RESULT
+block di `MarkLtfValidationContext` (`AjipSnD_Zone.mqh`) untuk detail
+pengukurannya.
 
 ### 2. Tunggu retest → REJECTED, baru entry
 

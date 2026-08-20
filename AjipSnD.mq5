@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "3.2-frozenzoneskip"
+#define EA_BUILD "3.3-skippretouched"
 
 #include <Trade\Trade.mqh>
 

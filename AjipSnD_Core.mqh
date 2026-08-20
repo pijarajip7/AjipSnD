@@ -10,7 +10,17 @@
 // Called once, right at the zone's own validation instant (see UpdateLTF) —
 // unlike the HTF-bias-gated version this replaces, there is no delay to
 // backfill for, so this is a plain append, not a backward search.
-void SaveLtfZoneForWatch(const SnDZone &zone)
+//
+// preTouched (= g_ltfPendingTouched at validation) filters out zones that
+// were already wicked into during their own confirm-to-validate window —
+// formed, but touched before ever finishing validation. Backtested (see the
+// RESULT block on MarkLtfValidationContext in AjipSnD_Zone.mqh): a zone
+// already touched by validation time hits at 56-58% at 5m/15m vs 75%+ for
+// one that validated clean, so these are saved already `used=true` — a
+// record stays in g_savedLtfZones[]/on the chart (frozen immediately, `asOf`
+// as its resolve stamp) for visibility, but CheckRejectionRetests never
+// watches it for a rejection entry.
+void SaveLtfZoneForWatch(const SnDZone &zone, bool preTouched, datetime asOf)
   {
    int sz = ArraySize(g_savedLtfZones);
    ArrayResize(g_savedLtfZones, sz + 1);
@@ -20,17 +30,23 @@ void SaveLtfZoneForWatch(const SnDZone &zone)
    g_savedLtfZones[sz].sweepLow  = zone.sweepLow;
    g_savedLtfZones[sz].time      = zone.time;
    g_savedLtfZones[sz].isDemand  = zone.isDemand;
-   g_savedLtfZones[sz].touched   = false;
-   g_savedLtfZones[sz].used      = false;
+   g_savedLtfZones[sz].touched   = preTouched;
+   g_savedLtfZones[sz].used      = preTouched;
 
    ArrayResize(g_ltfZoneDrawEnd, sz + 1);
-   g_ltfZoneDrawEnd[sz] = 0;
+   g_ltfZoneDrawEnd[sz] = preTouched ? asOf : 0;
    ArrayResize(g_ltfZoneDrawFrozen, sz + 1);
    g_ltfZoneDrawFrozen[sz] = false;
 
    if(InpEnableLog)
-      PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
-                  zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
+     {
+      if(preTouched)
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — touched before validation, marked used (no rejection watch)",
+                     zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
+      else
+         PrintFormat("AjipSnD: LTF %s zone validated [%.5f, %.5f] — saved for rejection watch",
+                     zone.isDemand ? "DEMAND" : "SUPPLY", zone.low, zone.high);
+     }
   }
 
 //---- Check every saved zone against this closed bar: break, or rejection ----
@@ -189,7 +205,7 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
         {
          MarkZoneValidated(false, g_ltfPendingZone.isDemand, g_ltfPendingZone.time);
          MarkLtfValidationContext(g_ltfPendingZone, g_ltfPendingTouched);
-         SaveLtfZoneForWatch(g_ltfPendingZone);
+         SaveLtfZoneForWatch(g_ltfPendingZone, g_ltfPendingTouched, bar.time);
          g_ltfAwaitingValidation = false;
         }
      }
