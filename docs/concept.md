@@ -151,7 +151,9 @@ Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
 (`CheckRejectionRetests`):
 
 1. **Structural break** — body CLOSE tembus far edge (atau sweep level kalau
-   ada) → zona invalid, `used=true`, tidak ada entry.
+   ada) → zona invalid, `used=true`, tidak ada entry. Ini SELALU nunggu bar
+   closed — tidak ada konsep "close" di level tick, jadi break tidak bisa
+   dipercepat di mode manapun.
 2. **Trigger entry** — default-nya **Rejection**: SEMUA tiga syarat: wick
    masuk ke range zona, body bar/ATR >= `InpRejectionBodyAtr` searah
    favorable, DAN close berakhir di luar zona lagi → `used=true`,
@@ -165,8 +167,20 @@ Zona tersimpan **tidak langsung ditradingkan**. Tiap bar LTF closed dicek
    agresif: begitu wick pertama masuk, langsung trigger, jadi zona di mode
    ini praktis selalu one-shot).
 
-Order pakai market (bukan limit) karena begitu bar trigger sudah closed,
-harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
+**Mode agresif jalan di level TICK, bukan cuma bar close** — `CheckAggressiveTickEntries`
+(dipanggil tiap `OnTick`, bukan cuma pas bar LTF baru closed) cek `tick.bid`
+terhadap tiap zona yang belum `used`, dan begitu wick pertama tersentuh
+(walau bar-nya sendiri belum selesai), langsung trigger — tidak nunggu bar
+itu closed dulu seperti yang `CheckRejectionRetests` lakukan. Fungsi ini
+otomatis skip (early return, biaya nyaris nol) kalau `InpAggressiveEntry=false`.
+`CheckRejectionRetests` sendiri MASIH punya cabang agresif-nya sendiri di
+level bar close (untuk replay OnInit, yang tidak punya tick live untuk
+direaksi) — di operasi live keduanya aman berdampingan karena sama-sama cek
+`used` duluan, jadi siapa yang trigger lebih dulu itu yang menang, tidak
+ada risiko entry dobel.
+
+Order pakai market (bukan limit) karena begitu bar/tick trigger sudah
+terjadi, harga sudah bergerak menjauh dari edge zona — tidak ada lagi "edge" untuk
 ditunggu dengan limit order.
 
 ### 3. Zona yang sudah touched, disupersede otomatis

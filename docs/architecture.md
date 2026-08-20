@@ -178,6 +178,12 @@ Per-tick (order matters):
 2. CheckFinalTargetCloseAll (gated by news) → return if hit
 2b. CheckFinalMaxLossCloseAll (never gated) → return if hit
 3. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
+3a. CheckAggressiveTickEntries — no-op unless InpAggressiveEntry; checks
+    tick.bid against every unresolved saved zone and enters immediately on
+    first touch, without waiting for the LTF bar to close (see Zone Drawing
+    / Structural SL/TP sections below for what it shares with the bar-close
+    path). Placed after the close-all checks above so a target/loss hit
+    this same tick isn't immediately followed by a fresh entry.
 
 LTF update (new closed bar gate):
   CopyRates 3 bars InpTimeframe
@@ -274,14 +280,15 @@ of its own.
   actual proof the level held, and can sit shallower or deeper than the
   zone's own `zLow`/`zHigh` (`wickedIn` only requires the wick to enter the
   zone's range, not stop exactly at its edge).
-- **Aggressive** (`InpAggressiveEntry=true`): the trigger bar (first touch)
-  can close anywhere, including deep inside the zone, so its own wick is
-  not a reliable stop reference — it could end up closer to the entry price
-  than the zone is wide. SL anchors to `breakLevel` instead — the same
-  sweep-aware level `CheckRejectionRetests` already uses to decide BROKEN —
-  ± `InpZoneSlBufferAtr` x LTF ATR. That is the point at which the zone's
-  own thesis is actually invalidated, not just wherever one bar happened to
-  reach.
+- **Aggressive** (`InpAggressiveEntry=true`): the touch that triggers entry
+  is normally a live tick now (`CheckAggressiveTickEntries`), not even a
+  finished bar — there is no bar wick to anchor to at all in the common
+  case, and even in the bar-close fallback path the touching bar can close
+  anywhere, including deep inside the zone. Either way SL anchors to
+  `breakLevel` instead — the same sweep-aware level `CheckRejectionRetests`
+  already uses to decide BROKEN — ± `InpZoneSlBufferAtr` x LTF ATR. That is
+  the point at which the zone's own thesis is actually invalidated, not
+  just wherever price happened to be at the trigger moment.
 
 An earlier build had an HTF-zone-edge anchor as a toggle; this build has no
 HTF reference left to anchor to at all.

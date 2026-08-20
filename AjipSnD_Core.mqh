@@ -180,6 +180,76 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
      }
   }
 
+//---- Tick-level aggressive entry — reacts to a zone touch the instant it
+// happens, without waiting for the current LTF bar to close.
+// InpAggressiveEntry's trigger (first wick into a saved zone) needs no
+// bar CLOSE to evaluate, unlike structural break or a rejection pattern
+// (both inherently need a finished bar — there is no such thing as a tick
+// "close"), so only the touch trigger moves to tick granularity here.
+// Break detection stays exactly where CheckRejectionRetests already runs
+// it, once per closed bar, for every mode.
+//
+// A pure no-op unless InpAggressiveEntry is on — one early return, no
+// array scan, negligible per-tick cost otherwise. Never called during
+// OnInit's historical replay (there are no live ticks to react to there);
+// CheckRejectionRetests' own aggressive branch is what resolves a zone's
+// fate during replay instead. In live operation this function almost
+// always wins the race — many ticks land inside a single LTF bar, so a
+// touch is normally caught here well before that bar ever closes — but
+// the bar-close branch is harmless leftover coverage, not a conflict: both
+// check g_savedLtfZones[i].used first, so whichever fires first is final.
+void CheckAggressiveTickEntries()
+  {
+   if(!InpAggressiveEntry) return;
+
+   int n = ArraySize(g_savedLtfZones);
+   if(n == 0) return;
+
+   double atrLtf = GetAtrValue();
+   if(atrLtf <= 0) return;   // no unit for the SL buffer yet — try again next tick
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+
+   for(int i = 0; i < n; i++)
+     {
+      if(g_savedLtfZones[i].used) continue;
+
+      bool   isDemand = g_savedLtfZones[i].isDemand;
+      double zLow     = g_savedLtfZones[i].low;
+      double zHigh    = g_savedLtfZones[i].high;
+
+      // tick.bid for both directions — the same reference MT5 builds
+      // bar.low/bar.high from by default, so this lines up with what
+      // CheckRejectionRetests' own wickedIn check already means.
+      bool wickedIn = isDemand ? (tick.bid <= zHigh) : (tick.bid >= zLow);
+      if(!wickedIn) continue;
+
+      g_savedLtfZones[i].used    = true;
+      g_savedLtfZones[i].touched = true;
+      g_ltfZoneDrawEnd[i]        = TimeCurrent();
+
+      double breakLevel = isDemand
+                          ? (g_savedLtfZones[i].sweepLow  > 0 ? g_savedLtfZones[i].sweepLow  : zLow)
+                          : (g_savedLtfZones[i].sweepHigh > 0 ? g_savedLtfZones[i].sweepHigh : zHigh);
+
+      int    dir     = isDemand ? 1 : -1;
+      double buffer  = InpZoneSlBufferAtr * atrLtf;
+      // Same zone-edge anchor as the bar-close aggressive path — see its
+      // own comment above for why the trigger point itself isn't used.
+      double slPrice = isDemand
+                       ? NormalizeDouble(breakLevel - buffer, g_digits)
+                       : NormalizeDouble(breakLevel + buffer, g_digits);
+
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: AGGRESSIVE TICK ENTRY on %s zone [%.5f, %.5f] bid=%.5f — entering %s market",
+                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, tick.bid, dir == 1 ? "BUY" : "SELL");
+
+      if(!EntryGateBlocked(dir))
+         OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time);
+     }
+  }
+
 //---- Update LTF on new closed bar ----
 // isReplay=true is the OnInit historical replay (see ReplayInitialStructure):
 // it skips CSV/diagnostic writes (UpdateZoneTracking, TrackZone+ZoneCsvWrite,

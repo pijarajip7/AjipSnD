@@ -16,7 +16,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "3.9.1-fixfilllogmode"
+#define EA_BUILD "4.0-aggressivetick"
 
 #include <Trade\Trade.mqh>
 
@@ -318,6 +318,12 @@ void OnTick()
    if(!InNewsBlackout())
       CheckDailyTargetCloseAll();
    CheckDailyMaxLossCloseAll();
+
+   // 3a. Aggressive-mode entries react on the tick itself, not the bar
+   // close — placed after the account-level close-all checks above so a
+   // target/loss hit this same tick isn't immediately followed by a fresh
+   // entry, same ordering the LTF bar-close entry path already respects.
+   CheckAggressiveTickEntries();
 
    //══════════════════════════════════════════════════════════════
    // LTF update (new closed bar)
