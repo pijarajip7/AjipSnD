@@ -386,6 +386,55 @@ void DrawZoneLabel(string name, datetime time, double price, string text, color 
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT);
   }
 
+//---- Draw one MA line segment (OBJ_TREND between two (time,price) points) ----
+void DrawMaSegment(string name, datetime t1, double p1, datetime t2, double p2, color clr)
+  {
+   ObjectDelete(0, name);   // reuse — no-op if absent
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, t1, p1, t2, p2))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+//---- Draw two SMA lines (fast/slow) as OBJ_TREND segments — DIAGNOSTIC ONLY,
+// no entry gate. Objects live under g_objPrefix ("MAfast_"/"MAslow_") so the
+// existing ObjectsDeleteAll(0, g_objPrefix) on deinit removes them. Redrawn
+// each new LTF bar (closed-bar MA values are stable); the forming bar's
+// segment is updated to its latest MA reading. ----
+void DrawMaLines()
+  {
+   if(!InpShowMaLines) return;
+   if(g_maFastHandle == INVALID_HANDLE || g_maSlowHandle == INVALID_HANDLE) return;
+
+   const int bars = 300;   // lookback drawn
+   datetime times[];
+   double   fastBuf[], slowBuf[];
+   ArraySetAsSeries(times, true);
+   ArraySetAsSeries(fastBuf, true);
+   ArraySetAsSeries(slowBuf, true);
+
+   int copied = CopyTime(_Symbol, InpTimeframe, 0, bars, times);
+   int fCopy  = CopyBuffer(g_maFastHandle, 0, 0, bars, fastBuf);
+   int sCopy  = CopyBuffer(g_maSlowHandle, 0, 0, bars, slowBuf);
+   int n = MathMin(MathMin(copied, fCopy), sCopy);
+   if(n < 2) return;
+
+   for(int i = 0; i < n - 1; i++)
+     {
+      if(fastBuf[i] <= 0 || fastBuf[i + 1] <= 0) continue;
+      DrawMaSegment(g_objPrefix + "MAfast_" + IntegerToString(i),
+                    times[i], fastBuf[i], times[i + 1], fastBuf[i + 1], clrYellow);
+      if(slowBuf[i] > 0 && slowBuf[i + 1] > 0)
+         DrawMaSegment(g_objPrefix + "MAslow_" + IntegerToString(i),
+                       times[i], slowBuf[i], times[i + 1], slowBuf[i + 1], clrMagenta);
+     }
+  }
+
 //---- Draw every saved LTF zone — the only chart objects. Never deleted once
 // drawn: a still-watched zone's right edge keeps extending to "now" every
 // call, and a resolved one (g_ltfZoneDrawEnd[i] != 0 — traded,

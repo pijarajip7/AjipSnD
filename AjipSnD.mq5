@@ -17,7 +17,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "6.3-widthfilter"
+#define EA_BUILD "6.4-madiagnostic"
 
 #include <Trade\Trade.mqh>
 
@@ -154,6 +154,11 @@ input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER;  // Panel corner
 input int              InpPanelX      = 20;                 // Panel X offset
 input int              InpPanelY      = 50;                 // Panel Y offset
 
+input group "MA Display (diagnostic)"
+input bool InpShowMaLines  = true;   // Draw fast/slow SMA lines on chart (diagnostic only — no entry gate)
+input int  InpMaFastPeriod = 20;     // Fast SMA period
+input int  InpMaSlowPeriod = 50;     // Slow SMA period
+
 input group "Diagnostics"
 input bool InpEnableLog = true;  // Enable Print/PrintFormat output
 input bool InpZoneQualityLog = true;
@@ -271,6 +276,13 @@ int OnInit()
    // ATR handle for zone quality metrics
    g_atrLtfHandle = iATR(_Symbol, InpTimeframe, 14);
 
+   // Double-SMA diagnostic handles (draw-only, no entry gate)
+   if(InpShowMaLines)
+     {
+      g_maFastHandle = iMA(_Symbol, InpTimeframe, InpMaFastPeriod, 0, MODE_SMA, PRICE_CLOSE);
+      g_maSlowHandle = iMA(_Symbol, InpTimeframe, InpMaSlowPeriod, 0, MODE_SMA, PRICE_CLOSE);
+     }
+
    // Trend probe MA — its own handle on its own timeframe
    if(InpDriftLog && InpDriftTrendProbe)
      {
@@ -375,6 +387,10 @@ void OnTick()
    // Update panel
    if(InpShowPanel)
       DrawPanel();
+
+   // Draw diagnostic SMA lines (new bar only — closed-bar MA values are stable)
+   if(InpShowMaLines)
+      DrawMaLines();
   }
 
 //==================================================================
@@ -397,6 +413,8 @@ void OnDeinit(const int reason)
    // Release ATR handle
    if(g_atrLtfHandle != INVALID_HANDLE) IndicatorRelease(g_atrLtfHandle);
    if(g_driftTrendMa != INVALID_HANDLE) IndicatorRelease(g_driftTrendMa);
+   if(g_maFastHandle != INVALID_HANDLE) IndicatorRelease(g_maFastHandle);
+   if(g_maSlowHandle != INVALID_HANDLE) IndicatorRelease(g_maSlowHandle);
 
    ObjectsDeleteAll(0, g_objPrefix);
    Print("AjipSnD: EA removed. Reason=", reason);

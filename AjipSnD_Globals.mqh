@@ -172,6 +172,10 @@ double         g_volMin, g_volMax, g_volStep;
 // ---- ATR handle for zone quality metrics ----
 int            g_atrLtfHandle = INVALID_HANDLE;
 
+// ---- Double-SMA diagnostic handles (draw-only, no entry gate) ----
+int            g_maFastHandle = INVALID_HANDLE;
+int            g_maSlowHandle = INVALID_HANDLE;
+
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
 
