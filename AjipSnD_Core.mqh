@@ -130,6 +130,19 @@ bool FavWFilterBlocks(int savedIdx)
    return(false);
   }
 
+// True when this zone's width (in points) falls outside [min, max] and its
+// first touch should be skipped. Filter off (both 0) -> false. Evaluated at
+// TOUCH time, exactly like favW above: the zone stays on the watch list and
+// drawn on chart, it just never enters.
+bool WidthFilterBlocks(int savedIdx)
+  {
+   if(InpMinZoneWidthPoints <= 0 && InpMaxZoneWidthPoints <= 0) return(false);
+   double widthPts = (g_savedLtfZones[savedIdx].high - g_savedLtfZones[savedIdx].low) / g_point;
+   if(InpMinZoneWidthPoints > 0 && widthPts <  InpMinZoneWidthPoints) return(true);
+   if(InpMaxZoneWidthPoints > 0 && widthPts >= InpMaxZoneWidthPoints) return(true);
+   return(false);
+  }
+
 //---- Check every saved zone against this closed bar: break, or the first
 // touch itself ----
 // A saved zone resolves two ways:
@@ -186,6 +199,18 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
          if(InpEnableLog)
             PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by favW filter (favW=%.2f outside [%.2f, %.2f])",
                         isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, SavedZoneFavW(i), InpMinFavW, InpMaxFavW);
+         continue;
+        }
+
+      if(WidthFilterBlocks(i))
+        {
+         g_savedLtfZones[i].touched = true;
+         g_savedLtfZones[i].used    = true;
+         g_ltfZoneDrawEnd[i]        = bar.time;
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by width filter (%.1f pts outside [%.0f, %.0f])",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh,
+                        (zHigh - zLow) / g_point, InpMinZoneWidthPoints, InpMaxZoneWidthPoints);
          continue;
         }
 
@@ -270,6 +295,18 @@ void CheckAggressiveTickEntries()
          if(InpEnableLog)
             PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by favW filter (favW=%.2f outside [%.2f, %.2f])",
                         isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, SavedZoneFavW(i), InpMinFavW, InpMaxFavW);
+         continue;
+        }
+
+      if(WidthFilterBlocks(i))
+        {
+         g_savedLtfZones[i].used    = true;
+         g_savedLtfZones[i].touched = true;
+         g_ltfZoneDrawEnd[i]        = TimeCurrent();
+         if(InpEnableLog)
+            PrintFormat("AjipSnD: %s zone [%.5f, %.5f] first touch SKIPPED by width filter (%.1f pts outside [%.0f, %.0f])",
+                        isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh,
+                        (zHigh - zLow) / g_point, InpMinZoneWidthPoints, InpMaxZoneWidthPoints);
          continue;
         }
 

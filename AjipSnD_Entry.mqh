@@ -63,18 +63,11 @@ void RebuildTrackedPositions()
       else
          g_entries[idx].riskUsd = 0.0;
 
-      // Whether this position already partial-closed in an earlier run is not
-      // recoverable either — same limitation as zoneTime above. Worst case a
-      // restarted position gets one more partial-close shot than it should;
-      // trailing simply won't arm until that fires.
-      g_entries[idx].partialClosed       = false;
-      g_entries[idx].partialCloseSkipped = false;
-
-      // Unlike zoneTime/partialClosed above, invalidation TP->BE needs no
-      // special restart handling at all: CheckInvalidationTpToBe derives
-      // breakLevel from slPrice + entryPrice (both set just above from the
-      // live broker position) rather than storing it, so it works
-      // identically for a restart-recovered position.
+      // Unlike zoneTime above, invalidation TP->BE needs no special restart
+      // handling at all: CheckInvalidationTpToBe derives breakLevel from
+      // slPrice + entryPrice (both set just above from the live broker
+      // position) rather than storing it, so it works identically for a
+      // restart-recovered position.
       g_entries[idx].tpMovedToBe = false;
 
       recovered++;

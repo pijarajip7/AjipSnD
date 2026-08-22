@@ -12,6 +12,8 @@ InpCandlesInit     = 50           — Lookback bars for initial trend + OnInit r
 InpMaxZones        = 10           — Max active zones per type
 InpMaxZoneWidthAtr = 0            — Max zone width / ATR to allow entry (0=disabled)
 InpMinDispBodyAtr  = 0            — Min confirming-bar body / ATR to allow entry (0=disabled)
+InpMinZoneWidthPoints = 0         — Min zone width (points) to allow entry (0=disabled; real gate)
+InpMaxZoneWidthPoints = 0         — Max zone width (points) to allow entry (0=disabled; real gate)
 InpMinFavW = 3, InpMaxFavW = 10   — favW entry filter (min/max favorable pre-touch excursion, in zone widths; 0=disabled per side)
 ```
 
@@ -52,6 +54,17 @@ The metric lives in the zone-quality tracker (`maxFavPts`), so the tracker now
 runs whenever this filter is enabled even if `InpZoneQualityLog` is off — CSV
 writes still require `InpZoneQualityLog` (see `NeedsZoneTracking`).
 
+### Zone-width filter (points) — an actual entry gate
+
+`InpMinZoneWidthPoints` / `InpMaxZoneWidthPoints` gate entry on the zone's own
+width in **points** (`zHigh − zLow`). Unlike the ATR-based
+`InpMaxZoneWidthAtr`/`InpMinDispBodyAtr` (which feed the diagnostic
+`qualityPass` only), this is applied for real — but at TOUCH time, exactly like
+the favW filter: the zone stays on the watch list and drawn on chart (label
+included), and a zone whose width falls below the min or at/above the max is
+skipped when its first touch arrives (marked `used`, no order). No ATR
+dependency, so it cannot fail open.
+
 **Entry & Trade Sizing**
 ```
 InpAllowHedging = false  — Allow BUY & SELL simultaneously (false=block opposite)
@@ -67,7 +80,7 @@ no longer describes what a risk-sized trade actually opens.
 
 **Stop Loss & Take Profit**
 ```
-InpZoneSlBufferWidthMult = 1.0 — SL buffer beyond breakLevel, in zone widths (was ATR-based)
+InpZoneSlBufferWidthMult = 2.0 — SL buffer beyond breakLevel, in zone widths (was ATR-based)
 InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
 InpTakeProfitRR     = 4.0   — TP = this many multiples of the actual SL distance (0=no TP)
 InpMaxPositionsPerDir = 1   — Max positions per direction (0=disabled)
@@ -79,16 +92,15 @@ gated behind `InpAggressiveEntry`, now the only mode, so that input and its
 paired `InpRejectionBodyAtr` (the rejection-bar body/ATR threshold) are both
 gone.
 
-**Partial Close, Trailing Stop & Invalidation TP**
+**Trailing Stop & Invalidation TP**
 ```
-InpPartialCloseEnabled     = true  — Enable partial close at RR target + SL->breakeven
-InpPartialCloseRR          = 2.0   — RR multiple of the original stop distance that triggers it
-InpPartialClosePercent     = 50.0  — Percent of position volume closed at the RR target
-InpBreakEvenOffsetPoints   = 0     — Points beyond entry for the BE price (shared by both BE mechanisms here)
-InpInvalidationTpBeEnabled = true  — Move TP to breakeven when price returns to the entry zone's breakLevel
-InpTrailingStopEnabled     = true  — Enable trailing stop on partial-closed remainders
-InpTrailingStopAtr         = 1.5   — Trailing distance behind price, in LTF ATR
-InpTrailingStepAtr         = 0.1   — Min SL improvement (LTF ATR) before re-modifying the broker
+InpBreakEvenOffsetPoints   = 0     — Points beyond entry for the BE price (invalidation TP→BE)
+InpInvalidationTpBeEnabled = true  — Move TP to breakeven when price pushes past the entry zone's breakLevel + buffer
+InpInvalidationBufferZoneWidths = 1.0 — Zone widths beyond breakLevel before the position is considered invalid
+InpTrailingStopEnabled     = true  — Enable trailing stop on all open positions (new SL applied only once in profit)
+InpTrailingStopTrigger     = 2.0   — Arm trailing once floating profit reaches this many zone widths past entry
+InpTrailingStopStart       = 1.0   — Trailing distance behind price, in zone widths
+InpTrailingStopStep        = 1.0   — Min SL improvement (zone widths) before re-modifying the broker
 ```
 
 ### Invalidation TP→BE (`CheckInvalidationTpToBe`, `ManageOpenPositions`)
@@ -116,16 +128,18 @@ directly in exchange for eliminating the restart gap an earlier version of
 this feature had (a stored `breakLevel` field that restart-recovered
 positions couldn't repopulate).
 
-Checked every tick, alongside partial-close and trailing:
+Checked every tick, alongside trailing:
 
-- If price returns to the derived level before the position resolves any
-  other way, TP moves to breakeven (`InpBreakEvenOffsetPoints` past entry,
-  same offset the partial-close SL→BE uses) — one-shot, gated by
-  `EntryTracker.tpMovedToBe`.
-- **SL is deliberately left untouched.** Since `breakLevel` sits roughly
-  halfway between entry and the actual SL (the SL adds another zone-width
-  buffer beyond it), this makes risk/reward asymmetric from that point on —
-  SL still far, TP now close. Confirmed directly as the wanted tradeoff over
+- The invalidation threshold is `breakLevel` pushed further out by
+  `InpInvalidationBufferZoneWidths` zone-widths (demand: below, supply:
+  above) — extra room beyond the exact edge before the position is declared
+  invalid. If price reaches it before the position resolves any other way,
+  TP moves to breakeven (`InpBreakEvenOffsetPoints` past entry) — one-shot,
+  gated by `EntryTracker.tpMovedToBe`.
+- **SL is deliberately left untouched.** The buffer must stay below
+  `InpZoneSlBufferWidthMult` so this fires before the SL; the SL then still
+  sits further out, making risk/reward asymmetric from that point on — SL
+  still far, TP now close. Confirmed directly as the wanted tradeoff over
   also tightening SL or closing the position outright.
 - No-op only if the position has no structural SL at all
   (`!hasStructuralSl || slPrice<=0`) — otherwise applies unconditionally,

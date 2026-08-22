@@ -293,12 +293,15 @@ apapun arahnya.
 |-----------|---------|------|
 | Broker SL | Zone-anchored stop, attached saat entry | Selalu |
 | Broker TP | RR x jarak SL, attached saat entry (0=tanpa TP) | Selalu |
+| Trailing stop | Profit = InpTrailingStopTrigger·W → SL = price ∓ InpTrailingStopStart·W; tiap naik InpTrailingStopStep·W, SL ikut (W = lebar zona turunan dari jarak SL) | InpTrailingStopEnabled; SEMUA posisi |
+| Invalidation TP→BE | Harga lewat breakLevel ∓ InpInvalidationBufferZoneWidths·W → TP→BE | InpInvalidationTpBeEnabled |
 | Daily target/loss | GetDailyPnL() + floating | Close all + block rest of day |
 | Final target/loss | Balance - baseline + floating | Close all + stop permanent |
 
-Tidak ada partial close, trailing stop, invalid-position handler, atau
-aggregate SL — posisi murni jalan sampai kena SL/TP broker atau kena salah
-satu close-all di atas.
+Trailing dan invalidation TP→BE jalan di `ManageOpenPositions` (tiap tick),
+masing-masing digerbang input-nya sendiri (independen). Tidak ada aggregate
+SL: SL hanya digerakkan oleh trailing (in-profit, satu arah); TP hanya
+digerakkan oleh invalidation TP→BE.
 
 ---
 
@@ -306,9 +309,9 @@ satu close-all di atas.
 
 - SL selalu anchor ke `breakLevel` — level sweep-aware yang sama yang
   menentukan zona BROKEN — ± `InpZoneSlBufferWidthMult` x lebar zona
-  (`zHigh - zLow` zona yang trigger, default multiplier 1.0 → total jarak SL
-  dari titik sentuh dekat sisi-dekat zona jadi kira-kira 2x lebar zona
-  sendiri: 1x menyeberangi zona, 1x buffer di luar `breakLevel`). Ini
+  (`zHigh - zLow` zona yang trigger, default multiplier 2.0 → total jarak SL
+  dari titik sentuh dekat sisi-dekat zona jadi kira-kira 3x lebar zona
+  sendiri: 1x menyeberangi zona, 2x buffer di luar `breakLevel`). Ini
   pilihan sengaja, bukan fallback: bar/tick yang trigger entry (wick
   pertama) bisa closed DI MANA SAJA, termasuk di dalam zona — wick-nya
   sendiri bukan referensi stop yang bisa diandalkan (bisa terlalu dekat ke
@@ -356,23 +359,25 @@ celah restart yang ada di versi fitur sebelumnya (field `breakLevel`
 tersimpan yang tidak bisa diisi ulang oleh posisi hasil restart).
 
 Dicek tiap tick lewat `CheckInvalidationTpToBe` (dipanggil dari
-`ManageOpenPositions`, sejajar dengan partial-close dan trailing):
+`ManageOpenPositions`, sejajar dengan trailing):
 
-- Kalau harga balik ke level hasil hitungan itu sebelum posisi resolve
-  dengan cara lain, TP dipindah ke breakeven (`InpBreakEvenOffsetPoints`
-  dari entry — offset yang sama dipakai partial-close SL→BE) — sekali
-  tembak, dikunci `tpMovedToBe`.
-- **SL sengaja TIDAK diubah.** Karena `breakLevel` posisinya kira-kira di
-  tengah jalan antara entry dan SL asli (SL nambah lagi 1x lebar zona di
-  luar `breakLevel`), risk/reward jadi asimetris sejak titik itu — SL masih
-  jauh, TP sudah dekat. Dikonfirmasi langsung sebagai tradeoff yang memang
-  diinginkan, dibanding ikut mengetatkan SL atau langsung tutup posisi.
+- Threshold invalidasi = `breakLevel` digeser lebih jauh sebesar
+  `InpInvalidationBufferZoneWidths` x lebar zona (demand: di bawah, supply:
+  di atas) — ruang ekstra di luar edge persis sebelum posisi dianggap
+  invalid. Kalau harga lewat level itu sebelum posisi resolve dengan cara
+  lain, TP dipindah ke breakeven (`InpBreakEvenOffsetPoints` dari entry) —
+  sekali tembak, dikunci `tpMovedToBe`.
+- **SL sengaja TIDAK diubah.** Buffer ini harus tetap di bawah
+  `InpZoneSlBufferWidthMult` supaya fire SEBELUM SL; SL tetap lebih jauh,
+  jadi risk/reward asimetris sejak titik itu — SL masih jauh, TP sudah
+  dekat. Dikonfirmasi langsung sebagai tradeoff yang memang diinginkan,
+  dibanding ikut mengetatkan SL atau langsung tutup posisi.
 - Tidak berlaku cuma kalau posisi itu tidak punya SL struktural sama sekali
   (`!hasStructuralSl || slPrice<=0`) — selain itu berlaku tanpa syarat,
   baik posisi baru maupun hasil restart.
 
 `InpInvalidationTpBeEnabled` (default true) mengontrol fitur ini secara
-independen dari partial-close/trailing.
+independen dari trailing.
 
 ---
 

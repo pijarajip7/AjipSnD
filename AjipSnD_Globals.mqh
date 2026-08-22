@@ -113,8 +113,6 @@ struct EntryTracker
    double   riskUsd;         // intended risk at entry — denominator for R-multiples
    double   atrLtfAtEntry;   // LTF ATR frozen at entry — stop/target scale
    datetime zoneTime;        // LTF zone that triggered this entry — join key to the zone CSV
-   bool     partialClosed;       // RR-triggered partial close + SL->BE already fired (one-shot)
-   bool     partialCloseSkipped; // partial slice determined unbrokerable — stop retrying
    bool     tpMovedToBe;     // invalidation TP->BE already fired (one-shot)
   };
 

@@ -17,7 +17,7 @@
 // Bump this with any change that alters backtest output. OnInit prints it, so
 // a stale .ex5 is visible in the Experts log instead of being inferred later
 // from CSVs that match the previous run.
-#define EA_BUILD "5.3-derivedbreaklevel"
+#define EA_BUILD "6.3-widthfilter"
 
 #include <Trade\Trade.mqh>
 
@@ -30,6 +30,14 @@ input int              InpCandlesInit    = 50;          // Lookback candles for 
 input int              InpMaxZones       = 10;           // Max active zones per type (demand/supply)
 input double           InpMaxZoneWidthAtr = 0;      // Max zone width / ATR to allow entry (0=disabled)
 input double           InpMinDispBodyAtr  = 0;      // Min confirming-bar body / ATR to allow entry (0=disabled)
+// Min/max zone width in POINTS — a REAL entry gate (unlike InpMaxZoneWidthAtr/
+// InpMinDispBodyAtr just above, which only feed the diagnostic qualityPass).
+// Evaluated at TOUCH time, exactly like favW: a zone whose width (high−low) in
+// points falls below the min or at/above the max is skipped (marked used, no
+// order) but STAYS drawn on chart — it was already on the watch list. 0 = that
+// side disabled.
+input double InpMinZoneWidthPoints = 0;  // Min zone width (points) to allow entry (0=disabled)
+input double InpMaxZoneWidthPoints = 0;  // Max zone width (points) to allow entry (0=disabled)
 // favW entry filter — the first real entry gate since the aggressive-only
 // rewrite. favW = favorable pre-touch excursion in ZONE WIDTHS: how far price
 // ran in the profitable direction after the zone confirmed, before coming back
@@ -61,11 +69,11 @@ input group "Stop Loss & Take Profit"
 // an opt-in mode alongside a wait-for-rejection alternative; made the only
 // mode directly, not on measured results.
 // SL sits at breakLevel (the zone's own structural edge) minus a buffer of
-// this many zone-widths further out — default 1.0, so total SL distance
-// from a touch near the zone's near edge comes out to roughly 2x the zone's
-// own width (1x crossing the zone itself, 1x the buffer beyond it). Was
+// this many zone-widths further out — default 2.0, so total SL distance
+// from a touch near the zone's near edge comes out to roughly 3x the zone's
+// own width (1x crossing the zone itself, 2x the buffer beyond it). Was
 // ATR-based; changed to scale with the zone's own size directly instead.
-input double InpZoneSlBufferWidthMult = 1.0;   // SL buffer beyond breakLevel, in zone widths
+input double InpZoneSlBufferWidthMult = 2.0;   // SL buffer beyond breakLevel, in zone widths
 // Risk per trade in account currency; lot is derived from it and the stop
 // distance. 0 = sizing disabled, no trades. Default 15 rather than a smaller
 // figure because the broker's minimum lot puts a floor under achievable risk:
@@ -93,28 +101,31 @@ input int    InpMaxPositionsPerDir = 1;    // Max positions per direction (0=dis
 // which restores the run #4 behaviour for an unbiased measurement pass.
 input double InpMaxRiskOvershoot   = 0;  // Max actual risk as a multiple of InpRiskPerTrade (0=no cap)
 
-input group "Partial Close, Trailing Stop & Invalidation TP"
-// Fires once per position: when floating profit reaches this multiple of the
-// ORIGINAL stop distance (same price-distance RR convention as InpTakeProfitRR,
-// so a value here below InpTakeProfitRR fires before the full TP would), close
-// part of the position and move the remainder's SL to breakeven.
-input bool   InpPartialCloseEnabled   = true;   // Enable partial close at RR target + SL->breakeven
-input double InpPartialCloseRR        = 2.0;    // RR multiple of the original stop distance that triggers it
-input double InpPartialClosePercent   = 50.0;   // Percent of position volume closed at the RR target
-input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry; shared by partial-close SL->BE and invalidation TP->BE below)
-// Fires once per position: the instant price returns to the ORIGINATING
+input group "Trailing Stop & Invalidation TP"
+input double InpBreakEvenOffsetPoints = 0;      // Points beyond entry for the BE stop (0=exact entry; used by invalidation TP->BE below)
+// Fires once per position: the instant price pushes past the ORIGINATING
 // ZONE's own breakLevel (the sweep-aware level that would have marked the
-// zone BROKEN before entry — roughly halfway to the actual SL, which sits a
-// further zone-width buffer beyond it), move TP to breakeven. SL is left
-// untouched — this only caps the upside once the setup looks like it's
-// failing, on the confirmed tradeoff that risk/reward turns asymmetric from
-// that point on rather than also tightening the stop or closing outright.
-input bool   InpInvalidationTpBeEnabled = true; // Move TP to breakeven when price returns to the entry zone's breakLevel
-// Trailing only ever arms AFTER the partial close above has fired on that
-// position — the remainder is the "runner." Distance/step are in LTF ATR.
-input bool   InpTrailingStopEnabled   = true;   // Enable trailing stop on partial-closed remainders
-input double InpTrailingStopAtr       = 1.5;    // Trailing distance behind price, in LTF ATR
-input double InpTrailingStepAtr       = 0.1;    // Min SL improvement (LTF ATR) before re-modifying the broker
+// zone BROKEN before entry) by InpInvalidationBufferZoneWidths zone-widths
+// further out, move TP to breakeven. SL is left untouched — this only caps
+// the upside once the setup looks like it's failing, on the confirmed
+// tradeoff that risk/reward turns asymmetric from that point on rather than
+// also tightening the stop or closing outright. The buffer must stay below
+// InpZoneSlBufferWidthMult, otherwise this fires at/after the SL and never
+// does anything before the position is stopped out.
+input bool   InpInvalidationTpBeEnabled = true; // Move TP to breakeven when price pushes past the entry zone's breakLevel + buffer
+input double InpInvalidationBufferZoneWidths = 1.0; // Zone widths beyond breakLevel before the position is considered invalid
+// Trailing arms on every open position whenever this is on. Trigger/start/step
+// are in ZONE WIDTHS derived from the position's own structural SL distance
+// (slDistance = (1 + InpZoneSlBufferWidthMult) x zoneWidth) — see
+// UpdateTrailingStop. Once floating profit reaches Trigger zone-widths past
+// entry, the SL walks to Start zone-widths behind price and tightens in Step
+// zone-width increments as price runs. The new SL is only ever applied once it
+// is IN PROFIT (above entry for a BUY, below for a SELL) — a losing stop is
+// never tightened.
+input bool   InpTrailingStopEnabled = true;   // Enable trailing stop (all open positions; in-profit only)
+input double InpTrailingStopTrigger = 2.0;    // Arm trailing once floating profit reaches this many zone widths past entry
+input double InpTrailingStopStart   = 1.0;    // Trailing distance behind price, in zone widths
+input double InpTrailingStopStep    = 1.0;    // Min SL improvement (zone widths) before re-modifying the broker
 
 input group "Risk Management — Final"
 input double InpFinalProfitTarget = 0.0;  // Overall profit target — close all + stop PERMANENTLY (0=disabled)
@@ -314,9 +325,9 @@ void OnTick()
    // per tick and self-gates. Observation only; places no orders.
    DriftArmTrend();
 
-   // 1b. Partial close (RR target -> SL to BE) + trailing stop on runners that
-   // already partial-closed. Must run before the target/loss close-all checks
-   // below so their PnL gates see the just-updated position state.
+   // 1b. Trailing stop + invalidation TP->BE on open positions. Must run before
+   // the target/loss close-all checks below so their PnL gates see the
+   // just-updated position state.
    ManageOpenPositions();
 
    // 2. Final target check (blocked during news blackout)
