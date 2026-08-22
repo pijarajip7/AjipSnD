@@ -202,6 +202,31 @@ granularitas dengan snapshot CSV). Metric ini hidup di zone-quality tracker,
 jadi tracker ikut jalan kalau filter ini on walau `InpZoneQualityLog` off —
 penulisan CSV tetap digerbang `InpZoneQualityLog`.
 
+### MA filter (opsional)
+
+`InpMaFilterEnabled` (default true) — filter tren double-SMA **simetris**,
+dipasang di dalam `EntryGateBlocked(dir)` sehingga kedua jalur entry (tick
+`CheckAggressiveTickEntries` dan bar-close `CheckRejectionRetests`)
+ter-cover satu hook:
+
+- BUY (zona demand) hanya boleh ketika fast SMA > slow SMA (uptrend).
+- SELL (zona supply) hanya boleh ketika fast SMA < slow SMA (downtrend).
+
+`MaFilterBlocks(dir)` baca SMA bar terakhir yang sudah CLOSED (`CopyBuffer`
+shift=1) — stabil, tidak repaint di tengah bar — dan fail-open (handle hilang
+→ tidak di-block). Handle SMA dibuat kalau `InpMaFilterEnabled ||
+InpShowMaLines`.
+
+Catatan urutan: seperti gerbang `EntryGateBlocked` lainnya (session/news/
+max-positions), cek MA jalan SETELAH zona yang kena touch sudah ditandai
+`used=true` — jadi arah yang ke-block tetap menghabiskan zona di touch pertama
+(one-shot, tanpa order), bukan menunggu state MA yang lebih baik.
+
+Catatan arah: zona demand terbentuk di downtrend, supply di uptrend, jadi
+filter ini membiaskan entry ke retest yang sudah searah tren MA (buy demand
+hanya setelah MA naik, sell supply hanya setelah MA turun) — filter
+trend-alignment, bukan filter reversal murni.
+
 ### 3. Zona yang sudah touched, disupersede otomatis
 
 Kalau zona searah yang lebih baru VALIDATED sementara zona lama di watch-list
@@ -294,14 +319,17 @@ apapun arahnya.
 | Broker SL | Zone-anchored stop, attached saat entry | Selalu |
 | Broker TP | RR x jarak SL, attached saat entry (0=tanpa TP) | Selalu |
 | Trailing stop | Profit = InpTrailingStopTrigger·W → SL = price ∓ InpTrailingStopStart·W; tiap naik InpTrailingStopStep·W, SL ikut (W = lebar zona turunan dari jarak SL) | InpTrailingStopEnabled; SEMUA posisi |
-| Invalidation TP→BE | Harga lewat breakLevel ∓ InpInvalidationBufferZoneWidths·W → TP→BE | InpInvalidationTpBeEnabled |
-| Daily target/loss | GetDailyPnL() + floating | Close all + block rest of day |
+| Invalidation TP→BE (tick) | Harga (bid/ask) lewat breakLevel ∓ InpInvalidationBufferZoneWidths·W → TP→BE | InpInvalidationTpBeEnabled |
+| Invalidation TP→BE (bar close) | Bar LTF CLOSE melewati breakLevel zona asal entry (sweep-aware) → TP→BE | InpInvalidationTpBeEnabled |
+| Weekly target/loss | GetWeekPnL() + floating | Close all + block rest of week |
 | Final target/loss | Balance - baseline + floating | Close all + stop permanent |
+| Session-end close | 3 fase: P1 floating>0 → P2 weekly+floating>0 → P3 force | Close all after session end (weekend flat) |
 
-Trailing dan invalidation TP→BE jalan di `ManageOpenPositions` (tiap tick),
+Trailing dan invalidation TP→BE (trigger tick) jalan di `ManageOpenPositions`
+(tiap tick); trigger bar-close jalan di `UpdateLTF` (tiap bar LTF close),
 masing-masing digerbang input-nya sendiri (independen). Tidak ada aggregate
 SL: SL hanya digerakkan oleh trailing (in-profit, satu arah); TP hanya
-digerakkan oleh invalidation TP→BE.
+digerakkan oleh invalidation TP→BE (kedua trigger, mana duluan yang menang).
 
 ---
 
@@ -367,17 +395,69 @@ Dicek tiap tick lewat `CheckInvalidationTpToBe` (dipanggil dari
   invalid. Kalau harga lewat level itu sebelum posisi resolve dengan cara
   lain, TP dipindah ke breakeven (`InpBreakEvenOffsetPoints` dari entry) —
   sekali tembak, dikunci `tpMovedToBe`.
-- **SL sengaja TIDAK diubah.** Buffer ini harus tetap di bawah
-  `InpZoneSlBufferWidthMult` supaya fire SEBELUM SL; SL tetap lebih jauh,
-  jadi risk/reward asimetris sejak titik itu — SL masih jauh, TP sudah
-  dekat. Dikonfirmasi langsung sebagai tradeoff yang memang diinginkan,
-  dibanding ikut mengetatkan SL atau langsung tutup posisi.
+- **SL: dua mode.** Default (`InpInvalidationRemoveSl=false`) SL TIDAK
+  diubah — buffer invalidasi harus tetap di bawah `InpZoneSlBufferWidthMult`
+  supaya fire SEBELUM SL; SL tetap lebih jauh, jadi risk/reward asimetris
+  sejak titik itu (SL masih jauh, TP sudah dekat). Kalau
+  `InpInvalidationRemoveSl=true`, SL justru DIHAPUS (sl=0) bersamaan TP→BE —
+  downside diserahkan ke max-loss close-all (weekly/final/batch), bukan stop
+  per-posisi. Eksperimen; kalau semua input max-loss 0, posisi tidak punya
+  proteksi downside setelah invalidasi.
 - Tidak berlaku cuma kalau posisi itu tidak punya SL struktural sama sekali
   (`!hasStructuralSl || slPrice<=0`) — selain itu berlaku tanpa syarat,
   baik posisi baru maupun hasil restart.
 
 `InpInvalidationTpBeEnabled` (default true) mengontrol fitur ini secara
 independen dari trailing.
+
+### Trigger bar-close (tambahan, additif)
+
+Selain trigger tick di atas, ada trigger struktural kedua
+(`CheckBarCloseInvalidation`, dipanggil dari `UpdateLTF` tiap bar LTF close,
+live only — tidak pernah saat replay OnInit): bar LTF yang **close**-nya
+melewati `breakLevel` zona asal entry → TP ke breakeven. Ini persis event
+"BROKEN" yang dipakai `CheckRejectionRetests` untuk mencoret zona dari
+watch-list.
+
+- **`breakLevel` dipakai zona ASLI, bukan aproksimasi turunan** — dicari
+  lewat `EntryTracker.zoneTime` (join key ke `g_savedLtfZones[]`), lalu pakai
+  edge sweep-aware (`sweepLow`/`zLow` demand, `sweepHigh`/`zHigh` supply).
+  Untuk posisi hasil restart (`zoneTime == 0`, zona tidak bisa direkonstruksi),
+  fallback ke aljabar turunan `(slPrice + M·entryPrice)/(1+M)` yang sama
+  dengan trigger tick — paritas perilaku restart tetap terjaga.
+- **Tidak ada buffer** — beda dari trigger tick yang menambah
+  `InpInvalidationBufferZoneWidths·W` di luar edge. Trigger bar-close ini
+  memakai `breakLevel` persis, karena kejadiannya sendiri (close bar) sudah
+  konfirmasi struktural, bukan sentuhan harga intra-bar.
+- **Additif, satu kali tembak** — kedua trigger berbagi flag `tpMovedToBe`
+  yang sama, jadi mana yang duluan menyala akan mengunci flag dan yang lain
+  jadi no-op. SL mengikuti mode `InpInvalidationRemoveSl` yang sama dengan
+  trigger tick (dipertahankan atau dihapus).
+
+---
+
+## Recovery Mode (multi posisi, averaging down)
+
+Setelah posisi arah D kena invalidasi (TP→BE, `tpMovedToBe=true`), arah itu
+masuk "recovery mode". `InpMaxPositionsPerDir` dihapus — jumlah posisi kini
+diatur oleh logika recovery di `TryEntry` (satu titik keputusan yang dipakai
+kedua jalur entry, tick dan bar-close):
+
+- **Arah kosong** → entry normal (lot risk-based, SL/TP struktural).
+- **Arah terisi + bukan recovery** (belum ada `tpMovedToBe`) → skip — posisi
+  masih normal, tidak boleh posisi kedua.
+- **Arah terisi + recovery aktif + harga di luar semua posisi** → recovery
+  add: buka posisi market dengan lot SAMA, **tanpa SL/TP**, lalu
+  `ReaverageTpToBreakEven` menyatukan TP semua posisi searah ke satu level =
+  rata-rata harga entry terbobot ∓ `InpBreakEvenOffsetPoints`. SELL mirror
+  (tambah saat harga di atas semua entry).
+
+`RecoveryModeActive(dir)` = ada posisi terbuka searah dengan `tpMovedToBe`.
+`PriceBeyondAllEntries(dir, price)` mensyaratkan harga di bawah semua entry
+BUY / di atas semua entry SELL, supaya tiap add memperbaiki rata-rata. Tanpa
+batas jumlah add — downside diserahkan ke max-loss close-all. `tpMovedToBe`
+direkonstruksi saat restart (`RebuildTrackedPositions`): posisi dianggap
+sudah invalidasi kalau tanpa SL atau TP-nya sudah di breakeven.
 
 ---
 

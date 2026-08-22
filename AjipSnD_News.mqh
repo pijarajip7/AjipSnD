@@ -6,7 +6,7 @@
 // (target-hitting close-alls) around high-impact economic calendar
 // events matching this symbol's base/profit currency.
 //
-// Kill-switch max-loss branches (FinalMaxLoss, DailyMaxLoss) are
+// Kill-switch max-loss branches (FinalMaxLoss, WeeklyMaxLoss) are
 // DELIBERATELY never gated — those protect the account and are needed
 // most exactly when volatility (news spike) is highest.
 //

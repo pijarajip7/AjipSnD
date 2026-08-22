@@ -84,6 +84,88 @@ ulong OpenMarketWithStructuralStops(int dir, double slPrice, datetime zoneTime)
   }
 
 //==================================================================
+// RECOVERY ADD — open an averaging-down position in a direction that is
+// already in recovery mode (a position there has moved to BE). Same lot as
+// the existing position, NO stop loss and NO TP at open — the TP is converged
+// by ReaverageTpToBreakEven immediately after. Downside is left to the
+// account-level max-loss close-all.
+//==================================================================
+ulong OpenRecoveryPosition(int dir, double lot, datetime zoneTime)
+  {
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return(0);
+   double price = (dir == 1) ? tick.ask : tick.bid;
+
+   string comment = StringFormat("AjipSnD %s RECV", dir == 1 ? "BUY" : "SELL");
+   bool ok;
+   if(dir == 1)
+      ok = trade.Buy(lot, _Symbol, price, 0.0, 0.0, comment);
+   else
+      ok = trade.Sell(lot, _Symbol, price, 0.0, 0.0, comment);
+
+   if(!ok)
+     {
+      PrintFormat("AjipSnD: Recovery add FAILED. retcode=%d", trade.ResultRetcode());
+      return(0);
+     }
+
+   ulong ticket = trade.ResultOrder();
+   double fillPrice = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_PRICE_OPEN) : price;
+   PrintFormat("AjipSnD: %s recovery add. Ticket=%I64u, Lot=%.2f, Fill=%.5f, no SL/TP",
+               dir == 1 ? "BUY" : "SELL", ticket, lot, fillPrice);
+
+   EntryFillInfo po;
+   ZeroMemory(po);
+   po.ticket   = ticket;
+   po.dir      = dir;
+   po.price    = fillPrice;
+   po.zoneTime = zoneTime;
+   po.slPrice  = 0.0;
+   po.tpPrice  = 0.0;
+   po.lot      = lot;
+   po.riskUsd  = 0.0;
+   po.atrLtf   = GetAtrValue();
+   AddEntry(ticket, dir, fillPrice, po);
+
+   return(ticket);
+  }
+
+//==================================================================
+// RE-AVERAGE TP — after a recovery add, converge every open position in the
+// direction to the SAME TP: the breakeven of the weighted average entry price
+// (∓ InpBreakEvenOffsetPoints). Each position's own SL is left as-is.
+//==================================================================
+void ReaverageTpToBreakEven(int dir)
+  {
+   double avgEntry = AverageEntryPrice(dir);
+   if(avgEntry <= 0.0) return;
+
+   double bePrice = (dir == 1)
+                    ? avgEntry + InpBreakEvenOffsetPoints * g_point
+                    : avgEntry - InpBreakEvenOffsetPoints * g_point;
+   bePrice = NormalizeDouble(bePrice, g_digits);
+
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(g_entries[i].dir != dir) continue;
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+      double curTp = PositionGetDouble(POSITION_TP);
+      if(MathAbs(curTp - bePrice) < g_point * 0.5) continue;   // already converged
+
+      double curSl = PositionGetDouble(POSITION_SL);
+      if(!trade.PositionModify(g_entries[i].ticket, curSl, bePrice))
+        {
+         PrintFormat("AjipSnD: Re-average TP FAILED ticket=%I64u be=%.5f retcode=%d",
+                     g_entries[i].ticket, bePrice, trade.ResultRetcode());
+         continue;
+        }
+      g_entries[i].tpPrice = bePrice;
+      PrintFormat("AjipSnD: Re-average TP ticket=%I64u -> %.5f (avgEntry %.5f)",
+                  g_entries[i].ticket, bePrice, avgEntry);
+     }
+  }
+
+//==================================================================
 // ADD ENTRY to tracking
 //==================================================================
 // The EntryFillInfo is passed through so the position inherits what the
@@ -405,11 +487,10 @@ void UpdateTrailingStop(int idx)
 //==================================================================
 // INVALIDATION TP->BE — once price pushes past the originating zone's own
 // breakLevel by InpInvalidationBufferZoneWidths zone-widths, move TP to
-// breakeven. SL is left untouched by design: this caps the upside once the
-// setup looks like it's failing, it does not tighten the downside —
-// risk/reward turns asymmetric from this point on (SL still far, TP now
-// close), a deliberate tradeoff confirmed directly over closing outright or
-// also tightening SL. One-shot via tpMovedToBe.
+// breakeven. By default SL is left untouched — this caps the upside once the
+// setup looks like it's failing without tightening the downside. With
+// InpInvalidationRemoveSl the SL is removed instead (sl=0), handing downside
+// handling to the account-level max-loss close-all. One-shot via tpMovedToBe.
 //
 // breakLevel itself is DERIVED here, not stored — SL was placed at
 // breakLevel minus (demand) / plus (supply) a buffer of
@@ -459,7 +540,10 @@ void CheckInvalidationTpToBe(int idx)
 
    ulong  ticket = g_entries[idx].ticket;
    double curSl  = PositionGetDouble(POSITION_SL);
-   if(!trade.PositionModify(ticket, curSl, bePrice))
+   // With InpInvalidationRemoveSl the stop is REMOVED (sl=0) rather than kept —
+   // the account-level max-loss close-all takes over downside handling.
+   double newSl  = InpInvalidationRemoveSl ? 0.0 : curSl;
+   if(!trade.PositionModify(ticket, newSl, bePrice))
      {
       PrintFormat("AjipSnD: Invalidation TP->BE FAILED ticket=%I64u be=%.5f retcode=%d",
                   ticket, bePrice, trade.ResultRetcode());
@@ -467,8 +551,93 @@ void CheckInvalidationTpToBe(int idx)
      }
 
    g_entries[idx].tpMovedToBe = true;
-   PrintFormat("AjipSnD: Invalidation TP->BE ticket=%I64u — invalid level %.5f touched (price=%.5f), TP -> %.5f",
-               ticket, invalidationLevel, price, bePrice);
+   PrintFormat("AjipSnD: Invalidation TP->BE ticket=%I64u — invalid level %.5f touched (price=%.5f), TP -> %.5f%s",
+               ticket, invalidationLevel, price, bePrice,
+               InpInvalidationRemoveSl ? ", SL removed" : "");
+  }
+
+//==================================================================
+// BAR-CLOSE INVALIDATION TP->BE — the structural counterpart to the tick-level
+// CheckInvalidationTpToBe above. Where that one fires the instant live price
+// crosses breakLevel ∓ buffer, this one fires on a CLOSED LTF bar whose close
+// passed the originating zone's own breakLevel — the exact sweep-aware level
+// CheckRejectionRetests uses to mark a zone BROKEN. The two are additive:
+// either firing first locks tpMovedToBe and the other becomes a no-op, so
+// "whichever wins the race" is the requested behaviour — the fast tick-level
+// trigger is kept, and the structural bar-close trigger is added on top.
+//
+// breakLevel is looked up from the ORIGINATING zone via EntryTracker.zoneTime
+// when available (fresh entries), so this uses the zone's REAL sweep-aware
+// edge rather than the derived approximation the tick path relies on. For a
+// restart-recovered position zoneTime is 0 and the zone is unrecoverable, so
+// it falls back to the same SL+entry algebra the tick path derives — keeping
+// parity with that path's restart behaviour.
+//
+// Runs once per closed LTF bar (from UpdateLTF, live only — never during
+// OnInit replay, which would otherwise evaluate historical closes against
+// positions that were recovered on restart).
+//==================================================================
+void CheckBarCloseInvalidation(const MqlRates &bar)
+  {
+   for(int i = ArraySize(g_entries) - 1; i >= 0; i--)
+     {
+      if(g_entries[i].tpMovedToBe) continue;
+      if(!g_entries[i].hasStructuralSl || g_entries[i].slPrice <= 0.0) continue;
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+
+      int    dir        = g_entries[i].dir;
+      bool   found      = false;
+      double breakLevel = 0.0;
+
+      // Real originating zone when we can find it (fresh entry) — sweep-aware
+      // edge, same as CheckRejectionRetests.
+      if(g_entries[i].zoneTime != 0)
+        {
+         int n = ArraySize(g_savedLtfZones);
+         for(int z = 0; z < n; z++)
+           {
+            if(g_savedLtfZones[z].time != g_entries[i].zoneTime) continue;
+            if(g_savedLtfZones[z].isDemand != (dir == 1)) continue;
+            breakLevel = g_savedLtfZones[z].isDemand
+                         ? (g_savedLtfZones[z].sweepLow  > 0 ? g_savedLtfZones[z].sweepLow  : g_savedLtfZones[z].low)
+                         : (g_savedLtfZones[z].sweepHigh > 0 ? g_savedLtfZones[z].sweepHigh : g_savedLtfZones[z].high);
+            found = true;
+            break;
+           }
+        }
+
+      // Fallback (restart-recovered): derive from SL + entry, the same algebra
+      // as CheckInvalidationTpToBe.
+      if(!found)
+        {
+         double m = InpZoneSlBufferWidthMult;
+         breakLevel = (g_entries[i].slPrice + m * g_entries[i].entryPrice) / (1.0 + m);
+        }
+
+      bool broken = (dir == 1) ? (bar.close < breakLevel) : (bar.close > breakLevel);
+      if(!broken) continue;
+
+      double bePrice = (dir == 1)
+                       ? g_entries[i].entryPrice + InpBreakEvenOffsetPoints * g_point
+                       : g_entries[i].entryPrice - InpBreakEvenOffsetPoints * g_point;
+      bePrice = NormalizeDouble(bePrice, g_digits);
+
+      double curSl = PositionGetDouble(POSITION_SL);
+      // With InpInvalidationRemoveSl the stop is REMOVED (sl=0) rather than kept —
+      // the account-level max-loss close-all takes over downside handling.
+      double newSl = InpInvalidationRemoveSl ? 0.0 : curSl;
+      if(!trade.PositionModify(g_entries[i].ticket, newSl, bePrice))
+        {
+         PrintFormat("AjipSnD: Bar-close invalidation TP->BE FAILED ticket=%I64u be=%.5f retcode=%d",
+                     g_entries[i].ticket, bePrice, trade.ResultRetcode());
+         continue;
+        }
+
+      g_entries[i].tpMovedToBe = true;
+      PrintFormat("AjipSnD: Bar-close invalidation TP->BE ticket=%I64u — close %.5f past breakLevel %.5f, TP -> %.5f%s",
+                  g_entries[i].ticket, bar.close, breakLevel, bePrice,
+                  InpInvalidationRemoveSl ? ", SL removed" : "");
+     }
   }
 
 //==================================================================
@@ -668,7 +837,7 @@ void LogTradeCsv(int idx, double fallbackPnl, string fallbackReason)
 // CHECK ENTRY CLEANUP — positions closed outside close-all (SL/TP hit).
 // Each individual close here also fires the rotation handoff signal, so
 // the orchestrator switches accounts after every trade, not just when a
-// daily target/max-loss is hit.
+// weekly target/max-loss is hit.
 //==================================================================
 void CheckEntryCleanup()
   {
@@ -755,32 +924,94 @@ void CloseAllAndLogTrades(string reason)
   }
 
 //==================================================================
-// CHECK DAILY CLOSE-ALL — TARGET only (gated by news)
+// CHECK WEEKLY CLOSE-ALL — TARGET only (gated by news)
 //==================================================================
-void CheckDailyTargetCloseAll()
+void CheckWeeklyTargetCloseAll()
   {
-   if(InpDailyMaxProfit <= 0) return;
-   double total = GetDailyPnL() + GetFloatingPnL();
-   if(total >= InpDailyMaxProfit)
+   if(InpWeeklyMaxProfit <= 0) return;
+   double total = GetWeekPnL() + GetFloatingPnL();
+   if(total >= InpWeeklyMaxProfit)
      {
-      PrintFormat("AjipSnD: DAILY TARGET HIT (%.2f >= %.2f) — closing all", total, InpDailyMaxProfit);
-      WriteHandoffSignal("DAILY_TARGET", total);
-      CloseAllAndLogTrades("DAILY_TARGET");
+      PrintFormat("AjipSnD: WEEKLY TARGET HIT (%.2f >= %.2f) — closing all", total, InpWeeklyMaxProfit);
+      WriteHandoffSignal("WEEKLY_TARGET", total);
+      CloseAllAndLogTrades("WEEKLY_TARGET");
      }
   }
 
 //==================================================================
-// CHECK DAILY MAX LOSS — NEVER gated by news
+// CHECK WEEKLY MAX LOSS — NEVER gated by news
 //==================================================================
-void CheckDailyMaxLossCloseAll()
+void CheckWeeklyMaxLossCloseAll()
   {
-   if(InpDailyMaxLoss <= 0) return;
-   double total = GetDailyPnL() + GetFloatingPnL();
-   if(total <= -InpDailyMaxLoss)
+   if(InpWeeklyMaxLoss <= 0) return;
+   double total = GetWeekPnL() + GetFloatingPnL();
+   if(total <= -InpWeeklyMaxLoss)
      {
-      PrintFormat("AjipSnD: DAILY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpDailyMaxLoss);
-      WriteHandoffSignal("DAILY_MAX_LOSS", total);
-      CloseAllAndLogTrades("DAILY_MAX_LOSS");
+      PrintFormat("AjipSnD: WEEKLY MAX LOSS HIT (%.2f <= %.2f) — closing all", total, -InpWeeklyMaxLoss);
+      WriteHandoffSignal("WEEKLY_MAX_LOSS", total);
+      CloseAllAndLogTrades("WEEKLY_MAX_LOSS");
+     }
+  }
+
+//==================================================================
+// SESSION-END CLOSE (WEEKEND FLAT) — never gated by news.
+// After the weekly session ends, escalate through three phases so no
+// position survives into the weekend:
+//   Phase 1 (session end -> Phase1Time): close all if floating PnL > 0.
+//   Phase 2 (Phase1Time -> Phase2Time): close all if week PnL + floating > 0.
+//   Phase 3 (after Phase2Time): force close all regardless.
+// Phase deadlines are minutes-after-session-end, computed in OnInit.
+//==================================================================
+bool HasOpenPositions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      return(true);
+     }
+   return(false);
+  }
+
+void CheckSessionEndClose()
+  {
+   if(!g_sessionEndCloseEnabled) return;
+   if(InSession()) return;
+   if(!HasOpenPositions()) return;
+
+   int delta = SessionEndDeltaMinutes();
+
+   if(delta < g_phase1DeltaMin)
+     {
+      // Phase 1 — close on floating profit only
+      double floating = GetFloatingPnL();
+      if(floating > 0.0)
+        {
+         PrintFormat("AjipSnD: SESSION END phase 1 — floating %.2f > 0, closing all", floating);
+         WriteHandoffSignal("SESSION_END_P1", floating);
+         CloseAllAndLogTrades("SESSION_END_P1");
+        }
+     }
+   else if(delta < g_phase2DeltaMin)
+     {
+      // Phase 2 — close on weekly + floating profit
+      double total = GetWeekPnL() + GetFloatingPnL();
+      if(total > 0.0)
+        {
+         PrintFormat("AjipSnD: SESSION END phase 2 — week+floating %.2f > 0, closing all", total);
+         WriteHandoffSignal("SESSION_END_P2", total);
+         CloseAllAndLogTrades("SESSION_END_P2");
+        }
+     }
+   else
+     {
+      // Phase 3 — force flat at the deadline
+      double total = GetWeekPnL() + GetFloatingPnL();
+      PrintFormat("AjipSnD: SESSION END phase 3 — deadline reached, forcing close all (%.2f)", total);
+      WriteHandoffSignal("SESSION_END_P3", total);
+      CloseAllAndLogTrades("SESSION_END_P3");
      }
   }
 
@@ -852,9 +1083,9 @@ void CheckFinalMaxLossCloseAll()
 //==================================================================
 // WRITE HANDOFF SIGNAL — fired on every trade close (reason=TRADE_CLOSED,
 // pnl=that trade's own P&L) so the orchestrator rotates accounts after
-// each trade, and also when daily target/max-loss is hit
-// (reason=DAILY_TARGET/DAILY_MAX_LOSS, pnl=daily total) — that account
-// should sit out the rest of the day.
+// each trade, and also when weekly target/max-loss is hit
+// (reason=WEEKLY_TARGET/WEEKLY_MAX_LOSS, pnl=weekly total) — that account
+// should sit out the rest of the week.
 //==================================================================
 void WriteHandoffSignal(const string reason, double pnl)
   {

@@ -15,6 +15,9 @@ InpMinDispBodyAtr  = 0            — Min confirming-bar body / ATR to allow ent
 InpMinZoneWidthPoints = 0         — Min zone width (points) to allow entry (0=disabled; real gate)
 InpMaxZoneWidthPoints = 0         — Max zone width (points) to allow entry (0=disabled; real gate)
 InpMinFavW = 3, InpMaxFavW = 10   — favW entry filter (min/max favorable pre-touch excursion, in zone widths; 0=disabled per side)
+InpMaFilterEnabled = true        — Double-MA trend filter: BUY only when fast>slow, SELL only when fast<slow
+InpMaFastPeriod = 20 / InpMaSlowPeriod = 50 — SMA periods (shared by filter + display)
+InpShowMaLines = true            — Draw fast/slow SMA lines (display only, not a gate by itself)
 ```
 
 ### Zone Quality Gate — diagnostic only, does not gate entry
@@ -65,6 +68,35 @@ included), and a zone whose width falls below the min or at/above the max is
 skipped when its first touch arrives (marked `used`, no order). No ATR
 dependency, so it cannot fail open.
 
+### MA trend filter — an actual entry gate (symmetric)
+
+`InpMaFilterEnabled` (default true) is a symmetric double-SMA trend filter,
+applied inside `EntryGateBlocked(dir)` so BOTH entry paths (tick-level
+`CheckAggressiveTickEntries` and bar-close `CheckRejectionRetests`) are
+covered by a single hook:
+
+- BUY (demand zone) allowed only when fast SMA > slow SMA (uptrend).
+- SELL (supply zone) allowed only when fast SMA < slow SMA (downtrend).
+
+`MaFilterBlocks(dir)` (in `AjipSnD_Globals.mqh`) reads the LAST CLOSED bar's
+SMA values (`CopyBuffer(..., start_pos=1, count=1)`) — stable, no mid-bar
+repaint — and fails open: a missing handle or failed copy returns "not
+blocked", so a broken indicator can never silently stop all trading. SMA
+handles are created whenever `InpMaFilterEnabled || InpShowMaLines` (previously
+`InpShowMaLines` alone, when the lines were diagnostic-only).
+
+Ordering nuance: like every other `EntryGateBlocked` gate (session, news,
+max-positions), the MA check runs AFTER the touching zone is already marked
+`used=true` — so a blocked direction still consumes the zone on its first
+touch (one-shot, no order), it does not leave the zone waiting for a better
+MA state.
+
+Trend-alignment note: SnD demand zones form in a downtrend and supply in an
+uptrend, so this filter biases entries toward retests that already agree with
+the MA trend (buying demand only after the MA has turned up, selling supply
+only after it has turned down) — a trend-alignment filter, not a pure reversal
+filter.
+
 **Entry & Trade Sizing**
 ```
 InpAllowHedging = false  — Allow BUY & SELL simultaneously (false=block opposite)
@@ -83,7 +115,6 @@ no longer describes what a risk-sized trade actually opens.
 InpZoneSlBufferWidthMult = 2.0 — SL buffer beyond breakLevel, in zone widths (was ATR-based)
 InpRiskPerTrade     = 50.0  — Risk per trade ($); lot derived from it (0=disable sizing, no trades)
 InpTakeProfitRR     = 4.0   — TP = this many multiples of the actual SL distance (0=no TP)
-InpMaxPositionsPerDir = 1   — Max positions per direction (0=disabled)
 InpMaxRiskOvershoot = 0     — Cap on actual/budgeted risk when min lot floors it (0=no cap)
 ```
 
@@ -97,6 +128,7 @@ gone.
 InpBreakEvenOffsetPoints   = 0     — Points beyond entry for the BE price (invalidation TP→BE)
 InpInvalidationTpBeEnabled = true  — Move TP to breakeven when price pushes past the entry zone's breakLevel + buffer
 InpInvalidationBufferZoneWidths = 1.0 — Zone widths beyond breakLevel before the position is considered invalid
+InpInvalidationRemoveSl  = true  — On invalidation, ALSO remove the SL (sl=0); let account max-loss close-all handle the downside
 InpTrailingStopEnabled     = true  — Enable trailing stop on all open positions (new SL applied only once in profit)
 InpTrailingStopTrigger     = 2.0   — Arm trailing once floating profit reaches this many zone widths past entry
 InpTrailingStopStart       = 1.0   — Trailing distance behind price, in zone widths
@@ -136,14 +168,39 @@ Checked every tick, alongside trailing:
   invalid. If price reaches it before the position resolves any other way,
   TP moves to breakeven (`InpBreakEvenOffsetPoints` past entry) — one-shot,
   gated by `EntryTracker.tpMovedToBe`.
-- **SL is deliberately left untouched.** The buffer must stay below
+- **SL: two modes.** Default (`InpInvalidationRemoveSl=false`) the SL is
+  deliberately left untouched — the invalidation buffer must stay below
   `InpZoneSlBufferWidthMult` so this fires before the SL; the SL then still
-  sits further out, making risk/reward asymmetric from that point on — SL
-  still far, TP now close. Confirmed directly as the wanted tradeoff over
-  also tightening SL or closing the position outright.
+  sits further out, making risk/reward asymmetric from that point on (SL
+  still far, TP now close). With `InpInvalidationRemoveSl=true` the SL is
+  REMOVED instead (`sl=0`) in the same `PositionModify` that moves TP to BE —
+  the account-level max-loss close-all (weekly/final/batch) takes over
+  downside handling. An experiment: if all max-loss inputs are 0, the
+  position has no downside protection after invalidation.
 - No-op only if the position has no structural SL at all
   (`!hasStructuralSl || slPrice<=0`) — otherwise applies unconditionally,
   restart-recovered or not.
+
+### Bar-close invalidation TP→BE (`CheckBarCloseInvalidation`, `UpdateLTF`)
+
+A second, additive structural trigger alongside the tick-level one above.
+Runs once per closed LTF bar (from `UpdateLTF`, gated `!isReplay` and
+`InpInvalidationTpBeEnabled`) and moves TP to breakeven when a closed bar's
+`close` passes the originating zone's own `breakLevel` — the exact
+sweep-aware level `CheckRejectionRetests` uses to mark a zone BROKEN.
+
+- **`breakLevel` is the zone's REAL edge**, looked up from
+  `g_savedLtfZones[]` via `EntryTracker.zoneTime` (`sweepLow`/`low` for a
+  BUY's demand zone, `sweepHigh`/`high` for a SELL's supply zone) — not the
+  derived approximation the tick path uses. For a restart-recovered position
+  (`zoneTime == 0`, zone unrecoverable) it falls back to the same
+  `(slPrice + M·entryPrice)/(1+M)` algebra, keeping parity with the tick path.
+- **No buffer** — the tick path adds `InpInvalidationBufferZoneWidths` zone
+  widths beyond the edge; this one uses `breakLevel` exactly, because a
+  closed-bar break is itself a structural confirmation, not an intra-bar touch.
+- **Additive, one-shot** — both triggers share the `tpMovedToBe` flag, so
+  whichever fires first locks it and the other becomes a no-op. SL follows
+  the same `InpInvalidationRemoveSl` mode as the tick path (kept or removed).
 
 **Risk Management — Final** (permanen, lintas hari)
 ```
@@ -152,24 +209,36 @@ InpFinalMaxLoss      = 0.0  — Close all + stop entry PERMANENTLY
 InpStartingBalance   = 0.0  — Baseline (0=auto-capture)
 ```
 
-**Risk Management — Daily**
+**Risk Management — Weekly**
 ```
-InpDailyMaxProfit = 0.0   — Close all + block entries rest of day
-InpDailyMaxLoss   = 0.0   — Close all + block entries rest of day
+InpWeeklyMaxProfit = 0.0   — Close all + block entries rest of week
+InpWeeklyMaxLoss   = 0.0   — Close all + block entries rest of week
 ```
 
-**Session Filter**
+**Session Filter** (weekly window)
 ```
-InpTimezoneOffset = 7.0      — UTC offset for daily/weekly/session boundaries
+InpTimezoneOffset = 7.0      — UTC offset for daily/weekly boundaries
+InpSessionStartDay = MONDAY  — Session start day
 InpSessionStart   = "06:00"  — Session start HH:MM local time
-InpSessionEnd     = "00:00"  — Session end
+InpSessionEndDay   = FRIDAY  — Session end day
+InpSessionEnd     = "12:00"  — Session end HH:MM
 ```
 
-Session filter only gates NEW entries (`EntryGateBlocked` → `InSession()`).
-There is no session-end profit close-all — an earlier build force-closed
-open profitable positions when the session ended; that was removed, so
-positions now run purely to their own broker SL/TP or a daily/final
-close-all regardless of session.
+Session filter only gates NEW entries (`EntryGateBlocked` → `InSession()`),
+on a weekly window (default Monday 06:00 → Friday 12:00 local).
+
+**Session-End Close (Weekend Flat)** — after the session ends,
+`CheckSessionEndClose()` escalates through three phases so no position
+survives the weekend:
+```
+InpSessionEndCloseEnabled = true    — enable (default)
+InpSessionEndPhase1Time   = "20:00" — phase 1 ends: close all if floating PnL > 0
+InpSessionEndPhase2Time   = "23:00" — phase 2 ends: close all if week PnL + floating > 0; after → force close all
+```
+- Phase 1 (session end → 20:00): close all on floating profit.
+- Phase 2 (20:00 → 23:00): close all if weekly PnL + floating > 0.
+- Phase 3 (after 23:00): force close all regardless.
+Runs every tick, never gated by news.
 
 **News Filter**
 ```
@@ -271,7 +340,8 @@ Per-tick (order matters):
 1a2. DriftArmTrend — trend probe, self-gated on its own timeframe's bar close
 2. CheckFinalTargetCloseAll (gated by news) → return if hit
 2b. CheckFinalMaxLossCloseAll (never gated) → return if hit
-3. CheckDailyTargetCloseAll (gated) / CheckDailyMaxLossCloseAll (never)
+3. CheckWeeklyTargetCloseAll (gated) / CheckWeeklyMaxLossCloseAll (never)
+3b. CheckSessionEndClose (never gated) — weekend-flat phases
 3a. CheckAggressiveTickEntries — checks tick.bid against every unresolved
     saved zone and enters immediately on first touch, without waiting for
     the LTF bar to close (see Zone Drawing / Structural SL/TP sections
@@ -283,6 +353,9 @@ LTF update (new closed bar gate):
   CopyRates 3 bars InpTimeframe
   if SAME bar as g_ltfLastBarTime → return
   UpdateLTF(ltfRates[1])
+    → CheckRejectionRetests(bar)
+    → CheckBarCloseInvalidation(bar)   [if InpInvalidationTpBeEnabled]
+    → DrawSavedLtfZones()
   CheckEntryCleanup() — positions closed outside close-all (broker SL/TP)
   DrawPanel (if enabled)
 ```
@@ -469,18 +542,34 @@ tolerable:
 | 1.50 | 1.3% | $22.38 |
 | 0 (no cap) | 0% | $38.26 |
 
-Because risk is per-trade and `InpMaxPositionsPerDir` caps concurrency,
-total simultaneous risk is bounded by construction — 2 directions x
-`InpRiskPerTrade` x `InpMaxRiskOvershoot`.
+Because risk is per-trade and the first position in a direction is the only
+risk-sized one, the "normal" concurrent risk is bounded — but recovery adds
+(see below) open with **no stop loss**, so their downside is bounded only by
+the account-level max-loss close-all, not by `InpRiskPerTrade`.
 
-### One position per direction
+### Recovery mode (multi-position, averaging down)
 
-`InpMaxPositionsPerDir` counts open positions only (`DirectionalExposureCount`
-sums `g_entries[]`) — there is no resting-order count to add, since every
-entry fills immediately as a market order. An earlier build also counted
-resting limit orders and capped total volume separately
-(`InpMaxTotalLots`); both were removed once the entry mechanism stopped
-using limit orders.
+`InpMaxPositionsPerDir` is gone. Position count is now governed by recovery
+logic in `TryEntry` (the single decision shared by the tick and bar-close
+entry paths):
+
+- **Direction empty** (`DirectionalExposureCount(dir) == 0`) → normal entry
+  (`OpenMarketWithStructuralStops`, risk-based lot, structural SL/TP).
+- **Direction occupied + not in recovery** (no position has `tpMovedToBe`) →
+  skip — a still-normal position means no second entry.
+- **Direction occupied + recovery active + price beyond all entries** →
+  recovery add: `OpenRecoveryPosition` opens a market order with the SAME lot
+  as the existing position and **no SL/TP**, then `ReaverageTpToBreakEven`
+  converges every position in the direction to one TP = weighted-average
+  entry ∓ `InpBreakEvenOffsetPoints`. SELL mirrors (add above all entries).
+
+`RecoveryModeActive(dir)` = any open position in the direction has
+`tpMovedToBe` (already invalidated → TP→BE). `PriceBeyondAllEntries(dir, price)`
+requires price strictly below every BUY entry / above every SELL entry, so each
+add improves the average. Unlimited adds — downside is left to the account
+max-loss close-all (see the Invalidation TP→BE section). `tpMovedToBe` is
+reconstructed on restart (`RebuildTrackedPositions`): a recovered position is
+treated as already-invalidated if it has no SL or its TP sits at breakeven.
 
 ### `entry_placed` in the zone CSV
 
@@ -570,7 +659,7 @@ reason are used as fallbacks.
 
 `InpTimezoneOffset` (default 7.0) shifts all time-based calculations:
 - GetLocalDayStart(), GetDailyPnL, GetWeekPnL, GetMonthPnL, InSession
-- Example: offset `-4` (EST) → daily reset at 04:00 UTC
+- Example: offset `-4` (EST) → day boundary 04:00 UTC, week boundary Monday 04:00 UTC
 
 ---
 
@@ -582,7 +671,7 @@ AjipSnD v1.0
 LTF Trend: UP (M5)
 Demands: 2/2   Supplies: 1/1   Entries: 3
 Today P/L: 123.45   Week P/L: 456.78   Month P/L: -12.34
-Final: active   Daily: TARGET
+Final: active   Weekly: TARGET
 Session: OPEN   News: clear
 Open MFE: 12.34   Open MAE: -5.67
 ```

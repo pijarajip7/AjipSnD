@@ -63,12 +63,18 @@ void RebuildTrackedPositions()
       else
          g_entries[idx].riskUsd = 0.0;
 
-      // Unlike zoneTime above, invalidation TP->BE needs no special restart
-      // handling at all: CheckInvalidationTpToBe derives breakLevel from
-      // slPrice + entryPrice (both set just above from the live broker
-      // position) rather than storing it, so it works identically for a
-      // restart-recovered position.
-      g_entries[idx].tpMovedToBe = false;
+      // Reconstruct the recovery-mode flag (tpMovedToBe) from the live broker
+      // state, since it isn't stored anywhere a restart can read. A recovered
+      // position counts as already-invalidated (→ recovery mode) when it has no
+      // stop loss (invalidation removed it, or it was opened as a recovery add
+      // without one) OR its TP already sits at breakeven instead of a
+      // structural RR target.
+      double curTp = PositionGetDouble(POSITION_TP);
+      double bePrice = (dir == 1)
+                       ? entryPrice + InpBreakEvenOffsetPoints * g_point
+                       : entryPrice - InpBreakEvenOffsetPoints * g_point;
+      g_entries[idx].tpMovedToBe = (curSl == 0.0)
+                                || (curTp != 0.0 && MathAbs(curTp - bePrice) < g_point * 0.5);
 
       recovered++;
      }
@@ -95,15 +101,15 @@ bool EntryGateBlocked(int dir)
       if(InpEnableLog) Print("AjipSnD: Entry blocked — Final max loss already reached");
       return(true);
      }
-   if(DailyLimitReached())
+   if(WeeklyLimitReached())
      {
-      if(InpEnableLog) Print("AjipSnD: Entry blocked — Daily limit reached");
+      if(InpEnableLog) Print("AjipSnD: Entry blocked — Weekly limit reached");
       return(true);
      }
-   if(MaxPositionsReached(dir))
+   if(MaFilterBlocks(dir))
      {
-      if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — %d position(s) already open for %s",
-                                   InpMaxPositionsPerDir, dir == 1 ? "BUY" : "SELL");
+      if(InpEnableLog) PrintFormat("AjipSnD: Entry blocked — MA filter (need fast%s slow) for %s",
+                                   dir == 1 ? ">" : "<", dir == 1 ? "BUY" : "SELL");
       return(true);
      }
    if(HedgeBlocked(dir))

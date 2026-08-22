@@ -164,7 +164,7 @@ st.title("AjipSnD — Multi-Account Rotation Dashboard")
 
 raw_cfg = load_raw_config()
 accounts = load_public_accounts()
-state = load_json(STATE_PATH, {"current_index": 0, "maxed_today": {}})
+state = load_json(STATE_PATH, {"current_index": 0, "maxed_week": {}})
 live = load_json(LIVE_STATUS_PATH, {})
 files_dir = live.get("files_dir")
 
@@ -175,8 +175,10 @@ st.subheader("Live")
 render_live_panel(raw_cfg.get("poll_interval_seconds", 5))
 
 st.subheader("Rotation")
-today = datetime.date.today().isoformat()
-maxed_today = set(state.get("maxed_today", {}).get(today, []))
+_today = datetime.date.today()
+_iso_year, _iso_week, _ = _today.isocalendar()
+week = f"{_iso_year}-W{_iso_week:02d}"
+maxed_week = set(state.get("maxed_week", {}).get(week, []))
 current_login = (
     accounts[state["current_index"]]["login"]
     if accounts and state.get("current_index", 0) < len(accounts)
@@ -193,12 +195,15 @@ for a in accounts:
 
     if login == current_login:
         status = "ACTIVE"
-    elif login in maxed_today:
-        status = "maxed today"
+    elif login in maxed_week:
+        status = "maxed week"
     else:
         status = "waiting"
 
-    today_df = df[df["CloseTime"].dt.date.astype(str) == today] if not df.empty else df
+    _monday = _today - datetime.timedelta(days=_today.weekday())
+    _week_start = datetime.datetime.combine(_monday, datetime.time.min)
+    _week_end = _week_start + datetime.timedelta(days=7)
+    week_df = df[(df["CloseTime"] >= _week_start) & (df["CloseTime"] < _week_end)] if not df.empty else df
     wins = int(df["Wins"].sum()) if not df.empty else 0
     losses = int(df["Losses"].sum()) if not df.empty else 0
     win_rate = f"{wins / (wins + losses) * 100:.0f}%" if (wins + losses) > 0 else "—"
@@ -208,7 +213,7 @@ for a in accounts:
         "Server": a["server"],
         "Status": status,
         "Floating PnL (live)": round(live["floating_pnl"], 2) if login == current_login and live else None,
-        "Today's realized PnL": round(today_df["TotalRealizedPnL"].sum(), 2) if not today_df.empty else 0.0,
+        "Week's realized PnL": round(week_df["TotalRealizedPnL"].sum(), 2) if not week_df.empty else 0.0,
         "All-time realized PnL": round(df["TotalRealizedPnL"].sum(), 2) if not df.empty else 0.0,
         "Trades": int(df["PositionCount"].sum()) if not df.empty else 0,
         "Win rate": win_rate,

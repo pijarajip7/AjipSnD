@@ -160,6 +160,60 @@ bool WidthFilterBlocks(int savedIdx)
 // calls OpenMarketWithStructuralStops: by the time OnInit runs, price has
 // already moved on from wherever a historical trigger bar closed, so there
 // is no legitimate fill left to send at today's market price.
+//---- Entry decision shared by both entry paths (tick + bar-close). Replaces
+// the old "one position per direction" cap: a direction with no open position
+// enters normally; a direction already in recovery (a position moved to BE)
+// may add an averaging-down position; otherwise the touch is skipped.
+void TryEntry(int dir, double slPrice, datetime zoneTime)
+  {
+   if(EntryGateBlocked(dir)) return;   // all gates still apply (MA, session, news, hedge, cooldown, final/weekly)
+
+   if(DirectionalExposureCount(dir) == 0)
+     {
+      OpenMarketWithStructuralStops(dir, slPrice, zoneTime);
+      return;
+     }
+
+   // Direction occupied: recovery adds only, and only once a position there
+   // has been invalidated (TP->BE). A still-normal position means no second entry.
+   if(!RecoveryModeActive(dir))
+     {
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: %s touch skipped — position open but not in recovery mode",
+                     dir == 1 ? "BUY" : "SELL");
+      return;
+     }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double price = (dir == 1) ? tick.bid : tick.ask;   // "beyond all entries" reference
+
+   if(!PriceBeyondAllEntries(dir, price))
+     {
+      if(InpEnableLog)
+         PrintFormat("AjipSnD: %s recovery skipped — price %.5f not beyond all open entries",
+                     dir == 1 ? "BUY" : "SELL", price);
+      return;
+     }
+
+   // Lot matches the existing position (all recovery positions are identical lot).
+   double lot = 0.0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(g_entries[i].dir == dir && PositionSelectByTicket(g_entries[i].ticket))
+        {
+         lot = PositionGetDouble(POSITION_VOLUME);
+         break;
+        }
+     }
+   if(lot <= 0.0) return;
+
+   if(OpenRecoveryPosition(dir, lot, zoneTime) == 0) return;
+
+   // Converge every position in the direction to the new average breakeven TP.
+   ReaverageTpToBreakEven(dir);
+  }
+
 void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
   {
    int n = ArraySize(g_savedLtfZones);
@@ -240,12 +294,7 @@ void CheckRejectionRetests(const MqlRates &bar, bool isReplay = false)
          continue;
         }
 
-      if(InpEnableLog)
-         PrintFormat("AjipSnD: AGGRESSIVE ENTRY confirmed on %s zone [%.5f, %.5f] — entering %s market",
-                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, dir == 1 ? "BUY" : "SELL");
-
-      if(!EntryGateBlocked(dir))
-         OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time);
+      TryEntry(dir, slPrice, g_savedLtfZones[i].time);
      }
   }
 
@@ -327,12 +376,7 @@ void CheckAggressiveTickEntries()
                        ? NormalizeDouble(breakLevel - buffer, g_digits)
                        : NormalizeDouble(breakLevel + buffer, g_digits);
 
-      if(InpEnableLog)
-         PrintFormat("AjipSnD: AGGRESSIVE TICK ENTRY on %s zone [%.5f, %.5f] bid=%.5f — entering %s market",
-                     isDemand ? "DEMAND" : "SUPPLY", zLow, zHigh, tick.bid, dir == 1 ? "BUY" : "SELL");
-
-      if(!EntryGateBlocked(dir))
-         OpenMarketWithStructuralStops(dir, slPrice, g_savedLtfZones[i].time);
+      TryEntry(dir, slPrice, g_savedLtfZones[i].time);
      }
   }
 
@@ -491,7 +535,15 @@ void UpdateLTF(const MqlRates &bar, bool isReplay = false)
    // redrawing on every historical bar.
    CheckRejectionRetests(bar, isReplay);
    if(!isReplay)
+     {
+      // Bar-close invalidation TP->BE — structural counterpart to the per-tick
+      // CheckInvalidationTpToBe. Gated on the same feature flag; never runs
+      // during OnInit replay (no live positions to act on, and historical
+      // closes must not touch restart-recovered positions).
+      if(InpInvalidationTpBeEnabled)
+         CheckBarCloseInvalidation(bar);
       DrawSavedLtfZones();
+     }
   }
 
 //---- Replay LTF bars to seed the EA's initial structure AND the
@@ -683,8 +735,8 @@ void DrawPanel()
    PANEL_LABEL("", clrWhite);
    string s = LimitTxt(InpFinalProfitTarget, InpFinalMaxLoss, balance - g_startingBalance + floating);
    PANEL_LABEL("Final:     " + s, LimitCol(s));
-   s = LimitTxt(InpDailyMaxProfit, InpDailyMaxLoss, todayPnl + floating);
-   PANEL_LABEL("Daily:     " + s, LimitCol(s));
+   s = LimitTxt(InpWeeklyMaxProfit, InpWeeklyMaxLoss, weekPnl + floating);
+   PANEL_LABEL("Weekly:    " + s, LimitCol(s));
 
    // ---- Session / News ----
    PANEL_LABEL("", clrWhite);

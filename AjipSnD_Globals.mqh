@@ -179,10 +179,16 @@ int            g_maSlowHandle = INVALID_HANDLE;
 // ---- Starting balance for Final target ----
 double         g_startingBalance = 0.0;
 
-// ---- Trading session ----
-int            g_sessionStartMin      = 0;
-int            g_sessionEndMin        = 0;
+// ---- Trading session (weekly window, minute-of-week with Monday=0) ----
+int            g_sessionStartWeekMin  = 0;
+int            g_sessionEndWeekMin    = 0;
 bool           g_sessionFilterEnabled = false;
+
+// ---- Session-end close (weekend flat): phase deadlines as minutes after
+// session end. Set in OnInit from InpSessionEndPhase1Time/Phase2Time. ----
+bool           g_sessionEndCloseEnabled = false;
+int            g_phase1DeltaMin         = 0;
+int            g_phase2DeltaMin         = 0;
 
 // ---- Timezone offset for daily/weekly boundaries ----
 int            g_timezoneOffsetSeconds = 0;
@@ -257,7 +263,26 @@ double GetAtrValue()
    return(buf[0]);
   }
 
-//---- Classify limit status (generic, reused for final + daily) ----
+//---- Double-MA trend filter (BUY needs fast>slow, SELL needs fast<slow) ----
+// Reads the LAST CLOSED bar's SMA values (shift=1) so the gate is stable —
+// the forming bar's MA shifts with every tick and would repaint the entry
+// decision mid-bar. Fails open: a missing/empty handle must never silently
+// block all trading.
+bool MaFilterBlocks(int dir)
+  {
+   if(!InpMaFilterEnabled) return(false);
+   if(g_maFastHandle == INVALID_HANDLE || g_maSlowHandle == INVALID_HANDLE)
+      return(false);
+
+   double fastBuf[1], slowBuf[1];
+   if(CopyBuffer(g_maFastHandle, 0, 1, 1, fastBuf) != 1 ||
+      CopyBuffer(g_maSlowHandle, 0, 1, 1, slowBuf) != 1)
+      return(false);
+
+   return(dir == 1 ? fastBuf[0] <= slowBuf[0] : fastBuf[0] >= slowBuf[0]);
+  }
+
+//---- Classify limit status (generic, reused for final + weekly) ----
 ENUM_LIMIT_STATUS ClassifyLimitStatus(double total, double maxProfit, double maxLoss)
   {
    if(maxProfit <= 0 && maxLoss <= 0)
@@ -282,7 +307,16 @@ int ParseMinutesFromMidnight(string timeStr)
    return(h * 60 + m);
   }
 
-//---- Are we inside the trading session? ----
+//---- Convert day-of-week (0=Sunday..6=Saturday, both ENUM_DAY_OF_WEEK and
+// MqlDateTime.day_of_week use this) to a Monday=0..Sunday=6 index ----
+int MonIndexOf(int dayOfWeek)
+  {
+   return(dayOfWeek == 0 ? 6 : dayOfWeek - 1);
+  }
+
+//---- Are we inside the trading session? Weekly window expressed as
+// minute-of-week (Monday 00:00 = 0). start<=end is a normal within-week
+// range (e.g. Mon 06:00 -> Fri 12:00); start>end wraps across Sunday ----
 bool InSession()
   {
    if(!g_sessionFilterEnabled)
@@ -291,23 +325,37 @@ bool InSession()
    datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
    MqlDateTime local;
    TimeToStruct(localNow, local);
-   int nowMin = local.hour * 60 + local.min;
-   
-   if(g_sessionStartMin <= g_sessionEndMin)
-      return(nowMin >= g_sessionStartMin && nowMin < g_sessionEndMin);
+   int nowWeekMin = MonIndexOf(local.day_of_week) * 1440 + local.hour * 60 + local.min;
+
+   if(g_sessionStartWeekMin <= g_sessionEndWeekMin)
+      return(nowWeekMin >= g_sessionStartWeekMin && nowWeekMin < g_sessionEndWeekMin);
    else
-      return(nowMin >= g_sessionStartMin || nowMin < g_sessionEndMin);
+      return(nowWeekMin >= g_sessionStartWeekMin || nowWeekMin < g_sessionEndWeekMin);
   }
 
-//---- Check if daily limit reached (realized only, gate entry) ----
-bool DailyLimitReached()
+//---- Minutes elapsed since the session ended, wrap-aware across the week
+// boundary (Monday 00:00 = 0). 0 at the instant the session ends, growing
+// through the weekend. Drives the session-end weekend-flat close phases. ----
+int SessionEndDeltaMinutes()
   {
-   if(InpDailyMaxProfit <= 0 && InpDailyMaxLoss <= 0)
+   datetime localNow = TimeCurrent() + g_timezoneOffsetSeconds;
+   MqlDateTime local;
+   TimeToStruct(localNow, local);
+   int nowWeekMin = MonIndexOf(local.day_of_week) * 1440 + local.hour * 60 + local.min;
+   if(nowWeekMin >= g_sessionEndWeekMin)
+      return(nowWeekMin - g_sessionEndWeekMin);
+   return((10080 - g_sessionEndWeekMin) + nowWeekMin);
+  }
+
+//---- Check if weekly limit reached (realized only, gate entry) ----
+bool WeeklyLimitReached()
+  {
+   if(InpWeeklyMaxProfit <= 0 && InpWeeklyMaxLoss <= 0)
       return(false);
-   double total = GetDailyPnL() + GetFloatingPnL();
-   if(InpDailyMaxLoss > 0 && total <= -InpDailyMaxLoss)
+   double total = GetWeekPnL() + GetFloatingPnL();
+   if(InpWeeklyMaxLoss > 0 && total <= -InpWeeklyMaxLoss)
       return(true);
-   if(InpDailyMaxProfit > 0 && total >= InpDailyMaxProfit)
+   if(InpWeeklyMaxProfit > 0 && total >= InpWeeklyMaxProfit)
       return(true);
    return(false);
   }
@@ -344,15 +392,52 @@ int DirectionalExposureCount(int dir)
    return(n);
   }
 
-//---- Position count cap per direction reached? ----
-bool MaxPositionsReached(int dir)
+//---- Recovery-mode detection: a direction has ≥1 position already moved to
+// breakeven (tpMovedToBe) — the trigger for averaging-down adds.
+bool RecoveryModeActive(int dir)
   {
-   if(InpMaxPositionsPerDir <= 0) return(false);
-   return(DirectionalExposureCount(dir) >= InpMaxPositionsPerDir);
+   for(int i = 0; i < ArraySize(g_entries); i++)
+      if(g_entries[i].dir == dir && g_entries[i].tpMovedToBe)
+         return(true);
+   return(false);
+  }
+
+//---- True when `price` is strictly beyond EVERY open entry in the direction:
+// below all BUY entries (averaging down) / above all SELL entries. Recovery
+// adds only fire once price has moved past every existing entry, so each add
+// improves the average.
+bool PriceBeyondAllEntries(int dir, double price)
+  {
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(g_entries[i].dir != dir) continue;
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(dir == 1) { if(price >= entry) return(false); }
+      else         { if(price <= entry) return(false); }
+     }
+   return(true);
+  }
+
+//---- Weighted average entry price of all open positions in a direction ----
+double AverageEntryPrice(int dir)
+  {
+   double volSum = 0.0, weightedSum = 0.0;
+   for(int i = 0; i < ArraySize(g_entries); i++)
+     {
+      if(g_entries[i].dir != dir) continue;
+      if(!PositionSelectByTicket(g_entries[i].ticket)) continue;
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      volSum += vol;
+      weightedSum += PositionGetDouble(POSITION_PRICE_OPEN) * vol;
+     }
+   if(volSum <= 0.0) return(0.0);
+   return(weightedSum / volSum);
   }
 
 //---- Float getters (forward-declared, implemented in Trade.mqh) ----
 double GetDailyPnL();
+double GetWeekPnL();
 double GetFloatingPnL();
 double GetPeriodPnL(datetime from, datetime to);
 void   CloseAllAndLogTrades(string reason);

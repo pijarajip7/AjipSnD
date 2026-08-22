@@ -6,11 +6,11 @@ MT5 has no API to switch a running EA's own account, so the rotation
 happens at the TERMINAL level instead: this script keeps ONE MT5 terminal
 logged into ONE account at a time. The EA writes a handoff signal file to
 Common\\Files (AjipSnD_Trade.mqh:WriteHandoffSignal) after EVERY trade
-close (reason=TRADE_CLOSED), and also when its daily target/max-loss is
-hit (reason=DAILY_TARGET/DAILY_MAX_LOSS). This script polls for that file,
+close (reason=TRADE_CLOSED), and also when its weekly target/max-loss is
+hit (reason=WEEKLY_TARGET/WEEKLY_MAX_LOSS). This script polls for that file,
 waits until the account is flat, then calls mt5.login() to move to the
-next account. Only the daily-target/max-loss reasons bench an account for
-the rest of the day (see DAILY_LIMIT_REASONS) — a plain TRADE_CLOSED
+next account. Only the weekly-target/max-loss reasons bench an account for
+the rest of the week (see WEEKLY_LIMIT_REASONS) — a plain TRADE_CLOSED
 handoff just advances to the next account in line, so the same account
 comes back around once the rotation cycles through the rest.
 
@@ -40,12 +40,12 @@ DEFAULT_POLL_INTERVAL_SECONDS = 5
 DEFAULT_HANDOFF_FILENAME = "AjipSnD_Handoff.csv"
 FLAT_WAIT_WARN_INTERVAL_SECONDS = 30
 
-# Handoff reasons that mean "this account is actually done for the day" —
-# only these bench the account until tomorrow. TRADE_CLOSED (fired after
-# every individual trade, win or lose) just rotates to the next account in
-# line without benching, so the same account is eligible again as soon as
-# its turn comes back around, even later the same day.
-DAILY_LIMIT_REASONS = {"DAILY_TARGET", "DAILY_MAX_LOSS"}
+# Handoff reasons that mean "this account is actually done for the week" —
+# only these bench the account until the next week. TRADE_CLOSED (fired
+# after every individual trade, win or lose) just rotates to the next
+# account in line without benching, so the same account is eligible again
+# as soon as its turn comes back around, even later the same week.
+WEEKLY_LIMIT_REASONS = {"WEEKLY_TARGET", "WEEKLY_MAX_LOSS"}
 
 DEFAULT_HEARTBEAT_FILENAME = "AjipSnD_Heartbeat.csv"
 DEFAULT_HEARTBEAT_GRACE_SECONDS = 60
@@ -74,9 +74,15 @@ def load_config(path):
 
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"current_index": 0, "maxed_today": {}}
+        return {"current_index": 0, "maxed_week": {}}
     with open(STATE_PATH, "r") as f:
-        return json.load(f)
+        state = json.load(f)
+    # Migration: daily-keyed bench state ("maxed_today") from before the
+    # weekly-session switch is no longer valid — drop it so benched accounts
+    # re-enter rotation on the new weekly cadence.
+    state.pop("maxed_today", None)
+    state.setdefault("maxed_week", {})
+    return state
 
 
 def save_state(state):
@@ -84,8 +90,9 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def today_str():
-    return datetime.date.today().isoformat()
+def week_str():
+    iso_year, iso_week, _ = datetime.date.today().isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
 
 
 def parse_kv_file(path):
@@ -248,11 +255,11 @@ def wait_until_flat(symbol_filter, magic_filter, poll_interval):
         waited += poll_interval
 
 
-def pick_next_account(accounts, maxed_logins_today, current_index):
+def pick_next_account(accounts, maxed_logins_week, current_index):
     n = len(accounts)
     for step in range(1, n + 1):
         idx = (current_index + step) % n
-        if int(accounts[idx]["login"]) not in maxed_logins_today:
+        if int(accounts[idx]["login"]) not in maxed_logins_week:
             return idx
     return None
 
@@ -273,15 +280,15 @@ def handle_handoff(cfg, state, accounts, handoff_path):
 
     os.remove(handoff_path)
 
-    day = today_str()
-    maxed_today = state["maxed_today"].setdefault(day, [])
-    if reason in DAILY_LIMIT_REASONS and int(current_account["login"]) not in maxed_today:
-        maxed_today.append(int(current_account["login"]))
+    week = week_str()
+    maxed_week = state["maxed_week"].setdefault(week, [])
+    if reason in WEEKLY_LIMIT_REASONS and int(current_account["login"]) not in maxed_week:
+        maxed_week.append(int(current_account["login"]))
 
-    next_idx = pick_next_account(accounts, set(maxed_today), state["current_index"])
+    next_idx = pick_next_account(accounts, set(maxed_week), state["current_index"])
     if next_idx is None:
-        print(f"[orchestrator] All {len(accounts)} accounts have hit their daily limit for {day}. "
-              f"Idling until the next day.", flush=True)
+        print(f"[orchestrator] All {len(accounts)} accounts have hit their weekly limit for {week}. "
+              f"Idling until the next week.", flush=True)
         append_handoff_history(data, outcome="ALL_MAXED", next_login="")
         save_state(state)
         return
@@ -313,18 +320,18 @@ def main():
 
     switch_time = time.time()
     last_heartbeat_warn_time = 0.0
-    last_seen_day = today_str()
+    last_seen_week = week_str()
 
     print(f"[orchestrator] Watching for handoff signal '{cfg['handoff_filename']}' "
           f"every {cfg['poll_interval_seconds']}s.", flush=True)
 
     try:
         while True:
-            day = today_str()
-            if day != last_seen_day:
-                print(f"[orchestrator] New day ({day}) — clearing exhausted-accounts list.", flush=True)
-                state["maxed_today"].pop(last_seen_day, None)
-                last_seen_day = day
+            week = week_str()
+            if week != last_seen_week:
+                print(f"[orchestrator] New week ({week}) — clearing exhausted-accounts list.", flush=True)
+                state["maxed_week"].pop(last_seen_week, None)
+                last_seen_week = week
                 save_state(state)
 
             handoff_path = os.path.join(common_files_dir(), cfg["handoff_filename"])
