@@ -430,14 +430,18 @@ void DrawSavedLtfZones()
       int tIdx = g_ltfZoneTrackerIdx[i];
       if(tIdx >= 0 && tIdx < ArraySize(g_zoneTracker))
         {
+         // Zone width (points) is the favW denominator — fixed at save time,
+         // no tracker dependency — so it is shown alongside the ratio. The
+         // ratio is live ("~") until first touch, then frozen; the width is
+         // constant for the zone's whole life.
+         double widthPts = (g_savedLtfZones[i].high - g_savedLtfZones[i].low) / g_point;
          string txt;
          if(g_zoneTracker[tIdx].touched)
-            txt = StringFormat("favW %.2f", g_zoneTracker[tIdx].favBeforeTouchWidthRatio);
+            txt = StringFormat("favW %.2f · %.0fpts", g_zoneTracker[tIdx].favBeforeTouchWidthRatio, widthPts);
          else
            {
-            double widthPts  = (g_savedLtfZones[i].high - g_savedLtfZones[i].low) / g_point;
             double liveRatio = (widthPts > 0) ? (g_zoneTracker[tIdx].maxFavPts / widthPts) : 0.0;
-            txt = StringFormat("favW~%.2f", liveRatio);
+            txt = StringFormat("favW~%.2f · %.0fpts", liveRatio, widthPts);
            }
          // clrWhite, not the zone's own clr: the rectangle is a SOLID fill
          // in that same color (OBJPROP_FILL=true), so same-color text on

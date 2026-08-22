@@ -359,11 +359,12 @@ Redraw cost tracks the live watch list, not the total number of zones ever
 confirmed over the EA's whole runtime.
 ```
 
-### Runway label (`favW~<ratio>` / `favW <ratio>`)
+### Runway label (`favW~<ratio> · <width>pts` / `favW <ratio> · <width>pts`)
 
 Alongside the rectangle, an `OBJ_TEXT` object (`<rect name>_ratio`) tracks how
 many zone-widths price has run before coming back to touch the zone — read
-live from that zone's `g_zoneTracker[]` entry.
+live from that zone's `g_zoneTracker[]` entry — and shows the zone's own width
+in points alongside it (the favW denominator, fixed at save time).
 
 - **Position**: anchored at `(endTime, (high+low)/2)` with `ANCHOR_RIGHT` —
   same time coordinate the rectangle's own right edge uses (`TimeCurrent()`
@@ -390,15 +391,18 @@ live from that zone's `g_zoneTracker[]` entry.
   `ReplayInitialStructure` finishes — already-touched history shows its true
   frozen ratio immediately, not a cold restart at 0.
 - **Before first touch** (`g_zoneTracker[tIdx].touched == false`): the label
-  shows `favW~<ratio>`, computed fresh on every redraw as
+  shows `favW~<ratio> · <width>pts`, computed fresh on every redraw as
   `maxFavPts / widthPts` — `maxFavPts` is the tracker's running
   max-favorable-excursion, updated every bar regardless of touch state, so
-  this is a genuine live preview, not a placeholder.
-- **At/after first touch**: the label switches to `favW <ratio>` (no `~`),
-  showing the frozen `favBeforeTouchWidthRatio` field itself — the same value
-  that lands in the CSV. Identical to the live preview at the exact touch bar
-  (both are `maxFavPts / widthPts` at that instant), so the display never
-  jumps — it just stops moving.
+  this is a genuine live preview, not a placeholder. The `<width>pts` part is
+  the zone's own width in points (`(high−low)/g_point`), constant for the
+  zone's whole life.
+- **At/after first touch**: the label switches to
+  `favW <ratio> · <width>pts` (no `~`), showing the frozen
+  `favBeforeTouchWidthRatio` field itself — the same value that lands in the
+  CSV. Identical to the live preview at the exact touch bar (both are
+  `maxFavPts / widthPts` at that instant), so the display never jumps — it
+  just stops moving.
 - Drawn/updated inside the same per-zone loop iteration as the rectangle, so it
   freezes in lockstep: once the zone resolves and `g_ltfZoneDrawFrozen[i]` is
   set, the label's last redraw is also its final one.
